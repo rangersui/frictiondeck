@@ -29,7 +29,7 @@ pre { white-space: pre-wrap; word-break: break-all; font-size: 12px; }
     <span class="version" id="version-label">v0</span>
 </nav>
 
-<main id="canvas"></main>
+<main id="canvas"><iframe id="stage-frame" sandbox="allow-scripts" srcdoc="" style="width:100%;height:100%;border:none;display:block"></iframe></main>
 <div id="log" hidden><pre id="log-content"></pre></div>
 <div id="commit-display" hidden><div id="commit-list"></div></div>
 <div id="commit-controls" hidden>
@@ -118,7 +118,7 @@ async function pollStage() {
         if (data.version && data.version > stageVersion) {
             stageVersion = data.version;
             document.getElementById('version-label').textContent = 'v' + stageVersion;
-            if (data.stage_html != null) document.getElementById('canvas').innerHTML = data.stage_html;
+            if (data.stage_html != null) document.getElementById('stage-frame').srcdoc = data.stage_html;
         }
     } catch (_) {}
 }
