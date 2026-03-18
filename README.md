@@ -81,8 +81,9 @@ You don't design the UI. AI does. Every user's Stage looks different.
 ```bash
 git clone https://github.com/rangersui/frictiondeck-v4
 cd frictiondeck-v4
-pip install fastapi uvicorn
-python server.py
+pip install -r requirements.txt
+python server.py          # HTTP server (browser UI)
+python mcp_server.py      # MCP server (Claude Desktop spawns this)
 ```
 
 Open `http://localhost:3004` — you'll see an empty wall.
@@ -141,7 +142,7 @@ static/index.html      → Three tabs, a few buttons, an empty div
 
 ```
 Total: ~2000 lines of Python + 1 HTML file
-Dependencies: fastapi, uvicorn
+Dependencies: fastapi, uvicorn, mcp
 Models: none
 Frameworks: none
 ```
