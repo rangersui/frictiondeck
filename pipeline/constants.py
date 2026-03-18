@@ -16,7 +16,6 @@ class EventType:
     # Stage DOM mutations (AI via MCP)
     STAGE_MUTATED = "stage_mutated"
     STAGE_APPENDED = "stage_appended"
-    STAGE_JS_EXECUTED = "stage_js_executed"
 
     # Judgment lifecycle
     JUDGMENT_PROMOTED = "judgment_promoted"
@@ -32,6 +31,9 @@ class EventType:
 
     # Proxy
     PROXY_FORWARDED = "proxy_forwarded"
+
+    # CSP
+    CSP_DOMAIN_ADDED = "csp_domain_added"
 
     # Negative space
     NEGATIVE_SPACE_FLAGGED = "negative_space_flagged"

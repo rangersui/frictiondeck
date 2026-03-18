@@ -51,7 +51,7 @@ def record_tool_call(tool_name: str) -> None:
 
     # Reset counter on content-producing tools
     _RESET_TOOLS = {
-        "mutate_stage", "append_stage", "execute_js",
+        "mutate_stage", "append_stage",
         "promote_to_judgment", "flag_negative_space", "propose_commit",
     }
 

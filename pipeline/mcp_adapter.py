@@ -100,6 +100,21 @@ def get_audit_trail(
     })
 
 
+def get_csp_whitelist() -> dict:
+    """Return current CSP whitelist domains."""
+    record_tool_call("get_csp_whitelist")
+    from pipeline.config import (
+        CSP_SCRIPT_WHITELIST, CSP_STYLE_WHITELIST, CSP_FONT_WHITELIST,
+        PERSONAL_MODE,
+    )
+    return _attach_alerts({
+        "mode": "personal" if PERSONAL_MODE else "enterprise",
+        "script_src": list(CSP_SCRIPT_WHITELIST),
+        "style_src": list(CSP_STYLE_WHITELIST),
+        "font_src": list(CSP_FONT_WHITELIST),
+    })
+
+
 # ── T2 — DOM operations ──────────────────────────────────────────────────
 
 def mutate_stage(selector: str, new_html: str) -> dict:
@@ -163,32 +178,6 @@ def query_stage(selector: str) -> dict:
     return _attach_alerts({
         "html": get_html(),
         "selector": selector,
-        "version": get_version(),
-    })
-
-
-def execute_js(script: str) -> dict:
-    """Execute JavaScript on the Stage page via WebSocket broadcast.
-
-    Does NOT modify stage_html — JS is runtime-only, not persisted.
-    Browser receives the script via WebSocket and evals it.
-    """
-    record_tool_call("execute_js")
-    from pipeline.audit import log_event
-    from pipeline.stage import broadcast_event
-
-    log_event(
-        EventType.STAGE_JS_EXECUTED,
-        actor="ai",
-        pathway="mcp",
-        payload={"script_length": len(script)},
-    )
-
-    # Push to browser via WebSocket — runtime only, not persisted
-    broadcast_event("execute_js", {"script": script})
-
-    return _attach_alerts({
-        "action": "execute_js",
         "version": get_version(),
     })
 

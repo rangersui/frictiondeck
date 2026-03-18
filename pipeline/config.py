@@ -32,6 +32,28 @@ IFRAME_SANDBOX = (
     else "allow-scripts allow-popups"
 )
 
+# ── CSP whitelists ────────────────────────────────────────────────────────
+# Domains allowed in Content-Security-Policy for Stage iframe.
+# AI can query these via get_csp_whitelist(). Human can add via /api/csp/add.
+CSP_SCRIPT_WHITELIST: list[str] = [
+    "https://cdn.jsdelivr.net",
+    "https://cdnjs.cloudflare.com",
+    "https://cdn.tailwindcss.com",
+    "https://unpkg.com",
+] if PERSONAL_MODE else []
+
+CSP_STYLE_WHITELIST: list[str] = [
+    "https://cdn.jsdelivr.net",
+    "https://cdnjs.cloudflare.com",
+    "https://unpkg.com",
+    "https://fonts.googleapis.com",
+] if PERSONAL_MODE else []
+
+CSP_FONT_WHITELIST: list[str] = [
+    "https://fonts.googleapis.com",
+    "https://fonts.gstatic.com",
+] if PERSONAL_MODE else []
+
 # ── Proxy whitelist ───────────────────────────────────────────────────────
 # iframe JS can fetch('/proxy/<service>/...') → forwarded to target URL
 # Only whitelisted services are allowed. Everything else → 403.

@@ -21,7 +21,7 @@ lives at localhost:3004.
 The MCP server tells you the current mode (personal or enterprise) at
 connection time. Check the mode to know what you can do:
 - **personal**: iframe has allow-same-origin, Stage JS can fetch /proxy/*,
-  execute_js works, commit approval has no challenge gate.
+  commit approval has no challenge gate.
 - **enterprise**: iframe fully sandboxed, no allow-same-origin, Stage JS
   cannot fetch, use MCP tools for data, commit requires Friction Gate.
 
@@ -67,7 +67,6 @@ Only the human can make things solid.
 - `append_stage(parent_selector, html)` — append HTML to stage_html
 - `mutate_stage(selector, new_html)` — full replacement of stage_html (pass the complete new version)
 - `query_stage(selector)` — read full stage_html (find what you need in context)
-- `execute_js(script)` — push JS to browser via WebSocket (runtime only, not persisted)
 
 ### Constraint tools (controlled — use with intent)
 
@@ -90,7 +89,6 @@ Only the human can make things solid.
 
 - approve_commit — human clicks Approve on the Commit tab
 - reject_commit — human clicks Reject on the Commit tab
-- lock_parameter / unlock_parameter — human confirms or withdraws a value
 
 If any of these are needed, tell the human to do it. Do not attempt workarounds.
 
@@ -99,7 +97,7 @@ If any of these are needed, tell the human to do it. Do not attempt workarounds.
 - **append_stage**: reads current stage_html, concatenates your HTML to the end, writes back. parent_selector is logged for audit only.
 - **mutate_stage**: full replacement. You pass the complete new stage_html. selector is logged for audit only. Use this when you need to restructure or remove elements — read via query_stage, edit in context, write back via mutate_stage.
 - **query_stage**: returns the full stage_html. You parse it in your context. selector is logged for audit/intent.
-- **execute_js**: pushes script to browser via WebSocket. Does NOT modify stage_html. Runtime only.
+To run JS on Stage: write `<script>` tags or `onclick` attributes inside your `append_stage` HTML. This is the only way to run JS on Stage.
 
 To remove an element: `query_stage()` → read HTML → remove the element in your context → `mutate_stage()` with the new version.
 
@@ -143,10 +141,31 @@ Do not summarize findings only in chat. Chat disappears. Stage persists.
 5. Say: "I've proposed a commit. Please approve on the Commit tab."
 6. Do NOT say "committed" or "done" — you only proposed.
 
-## What NOT to do
+## Visual rendering
 
-- Never claim something is "committed" when you only proposed it
-- Never fabricate source references
-- Never skip `get_world_state()` at session start
-- Never put all analysis only in chat — externalize to Stage
-- Never try to approve, lock, or delete through any means
+Pick the best representation for the content. Don't default to plain text.
+
+- Data comparison → HTML table, side-by-side layout
+- Trend or curve → SVG chart, inline `<canvas>` with Chart.js
+- Relationships → SVG diagram, connection lines
+- Calculation → show formula + result, not just the answer
+- Uncertainty → show ranges, not point estimates. Color-code confidence.
+- Need human input → render a form with inputs directly on Stage
+- Complex analysis → build incrementally. Multiple append_stage calls, not one giant dump.
+
+Use Tailwind CDN (`<script src="https://cdn.tailwindcss.com">`) for quick styling.
+You own the full page inside the iframe — `<html>`, `<head>`, `<body>`, everything.
+
+## Responding to human actions
+
+- Human rejected a commit → read the reason from the audit trail, adjust your analysis, re-propose if appropriate
+- Version jumped without your action → re-orient with `get_stage_state()`
+
+## Language precision
+
+"Proposed" and "committed" are different audit states. Say what actually happened.
+
+- After `propose_commit()` → say "I've proposed a commit" (not "committed" or "done")
+- After human approves → then it's committed, HMAC sealed, irreversible
+- Source attribution matters: if working from training data, say so. Don't fabricate references.
+- `get_world_state()` at session start is mandatory — it's how you recover context across sessions

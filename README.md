@@ -174,7 +174,6 @@ DOM operations (AI's hands):
   append_stage(html)          — Add content
   mutate_stage(html)          — Replace all content
   query_stage()               — Read current page
-  execute_js(script)          — Run JavaScript
 
 Judgment operations (structured output):
   promote_to_judgment(selector, claim_text, params)

@@ -142,6 +142,17 @@ def get_proxy_whitelist() -> str:
     })
 
 
+@mcp.tool()
+def get_csp_whitelist() -> str:
+    """List whitelisted CDN domains allowed by Content-Security-Policy.
+
+    Check this before using external libraries in your Stage HTML.
+    If a CDN is not listed, tell the human to add it via /api/csp/add.
+    """
+    from pipeline.mcp_adapter import get_csp_whitelist as _get
+    return _json(_get())
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # T2 — DOM operations (AI writes freely to the canvas)
 # ═══════════════════════════════════════════════════════════════════════════
@@ -167,13 +178,6 @@ def append_stage(parent_selector: str, html: str) -> str:
     from pipeline.mcp_adapter import append_stage as _append
     return _json(_append(parent_selector, html))
 
-
-
-@mcp.tool()
-def execute_js(script: str) -> str:
-    """Execute JavaScript on the Stage page. Personal mode only."""
-    from pipeline.mcp_adapter import execute_js as _exec
-    return _json(_exec(script))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

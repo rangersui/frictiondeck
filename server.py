@@ -16,7 +16,11 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from pipeline.config import PORT, VERSION, PROXY_WHITELIST, setup_logging
+from pipeline.config import (
+    PORT, VERSION, PROXY_WHITELIST,
+    CSP_SCRIPT_WHITELIST, CSP_STYLE_WHITELIST, CSP_FONT_WHITELIST,
+    setup_logging,
+)
 from pipeline.broadcast import broadcast, subscribe, unsubscribe
 from pipeline.stage import set_broadcast, init_stage_db
 from pipeline.audit import init_audit_db
@@ -36,15 +40,22 @@ app = FastAPI(
 
 # ── CSP middleware ────────────────────────────────────────────────────────
 
-CSP = (
-    "default-src 'self'; "
-    "script-src 'unsafe-inline'; "
-    "connect-src 'self'; "
-    "frame-src 'self'; "
-    "img-src * data:; "
-    "style-src 'unsafe-inline' *; "
-    "font-src *"
-)
+def _build_csp() -> str:
+    """Build CSP header from config whitelists."""
+    scripts = " ".join(CSP_SCRIPT_WHITELIST)
+    styles = " ".join(CSP_STYLE_WHITELIST)
+    fonts = " ".join(CSP_FONT_WHITELIST)
+    return (
+        "default-src 'self'; "
+        f"script-src 'unsafe-inline' {scripts}; "
+        "connect-src 'self'; "
+        "frame-src 'self'; "
+        "img-src * data:; "
+        f"style-src 'unsafe-inline' {styles}; "
+        f"font-src {fonts}"
+    ).strip()
+
+CSP = _build_csp()
 
 
 @app.middleware("http")
@@ -246,6 +257,13 @@ async def api_approve_commit(proposal_id: str, engineer: str = "ranger"):
 async def api_reject_commit(proposal_id: str, reason: str):
     from pipeline.gui_adapter import reject_commit
     return reject_commit(proposal_id, reason)
+
+
+@app.post("/api/csp/add")
+async def api_add_csp_domain(category: str, domain: str):
+    """Add a domain to CSP whitelist. Requires server restart to take effect on CSP header."""
+    from pipeline.gui_adapter import add_csp_domain
+    return add_csp_domain(category, domain)
 
 
 # ── Proxy layer ──────────────────────────────────────────────────────────

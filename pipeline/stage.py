@@ -53,11 +53,6 @@ def _broadcast(event_type: str, data: dict) -> None:
             logger.error("broadcast failed: %s", exc)
 
 
-def broadcast_event(event_type: str, data: dict) -> None:
-    """Public API for broadcasting events (used by mcp_adapter for execute_js)."""
-    _broadcast(event_type, data)
-
-
 # ── Connection ───────────────────────────────────────────────────────────
 
 

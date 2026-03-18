@@ -97,6 +97,37 @@ def approve_commit(
     }
 
 
+def add_csp_domain(category: str, domain: str) -> dict:
+    """Add a domain to CSP whitelist. Human only.
+
+    category: 'script' | 'style' | 'font'
+    domain: e.g. 'https://cdn.jsdelivr.net'
+    """
+    from pipeline.audit import log_event
+    from pipeline import config
+
+    lists = {
+        "script": config.CSP_SCRIPT_WHITELIST,
+        "style": config.CSP_STYLE_WHITELIST,
+        "font": config.CSP_FONT_WHITELIST,
+    }
+    target = lists.get(category)
+    if target is None:
+        return {"error": f"Invalid category: {category}. Use: script, style, font"}
+    if domain in target:
+        return {"status": "already_present", "category": category, "domain": domain}
+
+    target.append(domain)
+
+    log_event(
+        EventType.CSP_DOMAIN_ADDED,
+        actor="user",
+        pathway="gui",
+        payload={"category": category, "domain": domain},
+    )
+    return {"status": "added", "category": category, "domain": domain}
+
+
 def reject_commit(proposal_id: str, reason: str) -> dict:
     """Reject a commit proposal."""
     from pipeline.audit import log_event
