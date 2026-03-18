@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FrictionDeck</title>
+<style>
+:root {
+    --bg: #0a0a0a;
+    --surface: #141414;
+    --border: #1e1e1e;
+    --text: #e0e0e0;
+    --text-dim: #666;
+    --accent: #00ff88;
+    --danger: #ff4444;
+    --warning: #ffaa00;
+    --fluid: #444;
+    --viscous: #00aaff;
+    --solid: #888;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+/* ── Nav ── */
+nav {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 8px 16px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+}
+nav .logo { color: var(--accent); font-weight: bold; font-size: 14px; }
+nav .tab {
+    padding: 4px 12px;
+    cursor: pointer;
+    border-radius: 4px;
+    color: var(--text-dim);
+    transition: all 0.15s;
+}
+nav .tab:hover { color: var(--text); }
+nav .tab.active { color: var(--accent); background: rgba(0,255,136,0.08); }
+nav .spacer { flex: 1; }
+nav .version { color: var(--text-dim); font-size: 11px; }
+nav .status { display: flex; align-items: center; gap: 6px; }
+nav .dot { width: 6px; height: 6px; border-radius: 50%; }
+nav .dot.ok { background: var(--accent); }
+nav .dot.err { background: var(--danger); }
+
+/* ── Main ── */
+main { flex: 1; overflow: auto; padding: 16px; }
+
+/* ── Stage view ── */
+#stage-view .stage-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+}
+.card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px;
+    min-width: 280px;
+    max-width: 400px;
+    flex: 1;
+    position: relative;
+    transition: border-color 0.2s;
+}
+.card:hover { border-color: var(--text-dim); }
+.card.fluid { border-left: 3px solid var(--fluid); }
+.card.viscous { border-left: 3px solid var(--viscous); }
+.card.solid { border-left: 3px solid var(--solid); opacity: 0.8; }
+.card .card-type {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-dim);
+    margin-bottom: 6px;
+}
+.card .card-content {
+    line-height: 1.5;
+    word-break: break-word;
+}
+.card .card-meta {
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--text-dim);
+    display: flex;
+    gap: 8px;
+}
+.card iframe {
+    width: 100%;
+    border: none;
+    border-radius: 4px;
+    background: #000;
+    min-height: 120px;
+}
+
+/* ── Log view ── */
+#log-view { display: none; }
+#log-view .log-entry {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    font-size: 12px;
+    display: flex;
+    gap: 12px;
+}
+.log-entry .ts { color: var(--text-dim); min-width: 180px; }
+.log-entry .type { color: var(--viscous); min-width: 160px; }
+.log-entry .actor { min-width: 40px; }
+.log-entry .hash { color: var(--text-dim); font-size: 10px; }
+
+/* ── Commit view ── */
+#commit-view { display: none; }
+.proposal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 12px;
+}
+.proposal .title { font-weight: bold; margin-bottom: 8px; }
+.proposal .judgments { font-size: 12px; color: var(--text-dim); margin-bottom: 12px; }
+.btn {
+    padding: 6px 16px;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    transition: all 0.15s;
+}
+.btn:hover { border-color: var(--text-dim); }
+.btn.approve { color: var(--accent); border-color: var(--accent); }
+.btn.approve:hover { background: rgba(0,255,136,0.1); }
+.btn.reject { color: var(--danger); border-color: var(--danger); }
+.btn.reject:hover { background: rgba(255,68,68,0.1); }
+
+/* ── Empty state ── */
+.empty {
+    color: var(--text-dim);
+    text-align: center;
+    padding: 60px;
+    font-size: 14px;
+    line-height: 2;
+}
+.empty .big { font-size: 48px; margin-bottom: 16px; }
+</style>
+</head>
+<body>
+
+<nav>
+    <span class="logo">FrictionDeck</span>
+    <span class="tab active" data-view="stage">Stage</span>
+    <span class="tab" data-view="log">Log</span>
+    <span class="tab" data-view="commit">Commit</span>
+    <span class="spacer"></span>
+    <span class="status">
+        <span class="dot" id="ws-dot"></span>
+        <span id="ws-status">connecting...</span>
+    </span>
+    <span class="version" id="version-label">v—</span>
+</nav>
+
+<main>
+    <!-- Stage: empty canvas, AI drops artifacts here -->
+    <div id="stage-view">
+        <div class="stage-grid" id="stage-grid"></div>
+        <div class="empty" id="stage-empty">
+            <div class="big">空</div>
+            Stage is empty.<br>
+            Connect an AI via MCP to start dropping artifacts.<br>
+            <span style="color:var(--text-dim);font-size:11px;">
+                "埏埴以为器，当其无，有器之用。"
+            </span>
+        </div>
+    </div>
+
+    <!-- Log: committed knowledge, HMAC sealed -->
+    <div id="log-view">
+        <div id="log-list"></div>
+        <div class="empty" id="log-empty">
+            <div class="big">∅</div>
+            No committed knowledge yet.<br>
+            Propose a commit via MCP, then approve via Friction Gate.
+        </div>
+    </div>
+
+    <!-- Commit: Friction Gate -->
+    <div id="commit-view">
+        <div id="proposal-list"></div>
+        <div class="empty" id="commit-empty">
+            <div class="big">⊘</div>
+            No pending proposals.<br>
+            AI must propose_commit() first.
+        </div>
+    </div>
+</main>
+
+<script>
+// ── State ──
+let stageVersion = 0;
+let ws = null;
+let currentView = 'stage';
+
+// ── Tab switching ──
+document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+        document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+        tab.classList.add('active');
+        currentView = tab.dataset.view;
+        document.getElementById('stage-view').style.display = currentView === 'stage' ? '' : 'none';
+        document.getElementById('log-view').style.display = currentView === 'log' ? '' : 'none';
+        document.getElementById('commit-view').style.display = currentView === 'commit' ? '' : 'none';
+        if (currentView === 'log') loadAuditLog();
+    });
+});
+
+// ── WebSocket ──
+function connectWS() {
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+    ws.onopen = () => {
+        document.getElementById('ws-dot').className = 'dot ok';
+        document.getElementById('ws-status').textContent = 'connected';
+    };
+
+    ws.onclose = () => {
+        document.getElementById('ws-dot').className = 'dot err';
+        document.getElementById('ws-status').textContent = 'disconnected';
+        setTimeout(connectWS, 2000);
+    };
+
+    ws.onmessage = (e) => {
+        const event = JSON.parse(e.data);
+        handleBroadcast(event);
+    };
+}
+
+function handleBroadcast(event) {
+    const v = event.data?.version;
+    if (v && v > stageVersion) {
+        stageVersion = v;
+        document.getElementById('version-label').textContent = `v${stageVersion}`;
+    }
+    // Refresh current view
+    if (currentView === 'stage') loadStage();
+}
+
+// ── Load Stage ──
+async function loadStage() {
+    try {
+        const res = await fetch('/api/stage');
+        const data = await res.json();
+        stageVersion = data.version;
+        document.getElementById('version-label').textContent = `v${stageVersion}`;
+        renderStage(data);
+    } catch (e) {
+        console.error('loadStage failed:', e);
+    }
+}
+
+function renderStage(data) {
+    const grid = document.getElementById('stage-grid');
+    const empty = document.getElementById('stage-empty');
+    const artifacts = data.artifacts || [];
+
+    if (artifacts.length === 0) {
+        grid.innerHTML = '';
+        empty.style.display = '';
+        return;
+    }
+    empty.style.display = 'none';
+
+    grid.innerHTML = artifacts.map(a => {
+        // Determine state from judgments
+        const judgment = (data.judgments || []).find(j => j.artifact_id === a.artifact_id);
+        const state = judgment ? judgment.state : 'fluid';
+        const stateClass = state;
+
+        const isHtml = ['html', 'jsx', 'svg'].includes(a.content_type);
+
+        let contentHtml;
+        if (isHtml) {
+            // iframe sandbox for AI-generated content
+            const escaped = a.content.replace(/"/g, '&quot;');
+            contentHtml = `<iframe sandbox="allow-scripts" srcdoc="${escaped}"></iframe>`;
+        } else {
+            contentHtml = `<div class="card-content">${escapeHtml(a.content)}</div>`;
+        }
+
+        const trust = a.source_trust === 'green' ? '🟢' :
+                      a.source_trust === 'yellow' ? '🟡' : '⚪';
+
+        return `
+            <div class="card ${stateClass}" data-id="${a.artifact_id}">
+                <div class="card-type">${a.content_type} · ${state} ${trust}</div>
+                ${contentHtml}
+                <div class="card-meta">
+                    <span>${a.created_by}</span>
+                    <span>${a.created_at?.slice(0,19) || ''}</span>
+                    ${judgment ? `<span>NLI: ${judgment.nli_verdict || '—'}</span>` : ''}
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+// ── Load Audit Log ──
+async function loadAuditLog() {
+    try {
+        const res = await fetch('/api/audit?limit=100');
+        const data = await res.json();
+        renderLog(data);
+    } catch (e) {
+        console.error('loadAuditLog failed:', e);
+    }
+}
+
+function renderLog(events) {
+    const list = document.getElementById('log-list');
+    const empty = document.getElementById('log-empty');
+
+    if (!events || events.length === 0) {
+        list.innerHTML = '';
+        empty.style.display = '';
+        return;
+    }
+    empty.style.display = 'none';
+
+    list.innerHTML = events.map(e => `
+        <div class="log-entry">
+            <span class="ts">${e.timestamp?.slice(0,19) || ''}</span>
+            <span class="type">${e.event_type}</span>
+            <span class="actor">${e.actor}</span>
+            <span class="hash">${e.event_hash?.slice(0,12) || ''}…</span>
+        </div>
+    `).join('');
+}
+
+// ── Init ──
+connectWS();
+loadStage();
+</script>
+</body>
+</html>
