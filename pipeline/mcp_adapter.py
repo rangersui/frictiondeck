@@ -1,7 +1,8 @@
-"""FrictionDeck v4 — MCP Adapter (AI's hands)
+"""FrictionDeck v4 — MCP Adapter (AI's hands) — Multi-Stage
 
 Physical isolation from gui_adapter. CI enforces zero intersection.
 Every return value gets pending_alerts attached via _attach_alerts().
+All tools accept stage parameter (default: "default").
 """
 
 import logging
@@ -16,6 +17,8 @@ from pipeline.stage import (
     get_version,
     promote_to_judgment,
     set_html,
+    list_stages as _list_stages,
+    create_stage as _create_stage,
 )
 
 logger = logging.getLogger("frictiondeck.mcp_adapter")
@@ -23,41 +26,39 @@ logger = logging.getLogger("frictiondeck.mcp_adapter")
 
 # ── T1 — READ ────────────────────────────────────────────────────────────
 
-def get_world_state() -> dict:
+def get_world_state(stage: str = "default") -> dict:
     """Return complete world state for AI context recovery."""
     record_tool_call("get_world_state")
-    from pipeline.audit import get_audit_log
-    state = get_stage_state()
-    state["recent_audit"] = get_audit_log(limit=20)
+    from pipeline.history import get_events
+    state = get_stage_state(stage)
+    state["recent_history"] = get_events(limit=20, stage=stage)
     return _attach_alerts(state)
 
 
-def mcp_get_stage_state() -> dict:
-    """Return current stage state snapshot."""
+def mcp_get_stage_state(stage: str = "default") -> dict:
     record_tool_call("get_stage_state")
-    return _attach_alerts(get_stage_state())
+    return _attach_alerts(get_stage_state(stage))
 
 
-def mcp_get_stage_html() -> dict:
-    """Return current stage HTML (full DOM)."""
+def mcp_get_stage_html(stage: str = "default") -> dict:
     record_tool_call("get_stage_html")
-    return _attach_alerts({"html": get_html(), "version": get_version()})
+    return _attach_alerts({"html": get_html(stage), "version": get_version(stage), "stage": stage})
 
 
-def mcp_get_stage_summary() -> dict:
-    """Return structured summary of stage (judgments + version, no HTML)."""
+def mcp_get_stage_summary(stage: str = "default") -> dict:
     record_tool_call("get_stage_summary")
+    judgments = get_judgments(stage=stage)
     return _attach_alerts({
-        "version": get_version(),
-        "judgments": get_judgments(),
-        "judgment_count": len(get_judgments()),
+        "stage": stage,
+        "version": get_version(stage),
+        "judgments": judgments,
+        "judgment_count": len(judgments),
     })
 
 
-def wait_for_stage_update(last_known_version: int) -> dict:
-    """Return changes since last_known_version."""
+def wait_for_stage_update(last_known_version: int, stage: str = "default") -> dict:
     record_tool_call("wait_for_stage_update")
-    return _attach_alerts(get_stage_diff(last_known_version))
+    return _attach_alerts(get_stage_diff(last_known_version, stage))
 
 
 def search_commits(
@@ -65,12 +66,11 @@ def search_commits(
     engineer: str | None = None,
     date_from: str | None = None,
     date_to: str | None = None,
+    stage: str = "default",
 ) -> dict:
     """Search committed judgments (solid state)."""
     record_tool_call("search_commits")
-
-    judgments = get_judgments(state=JudgmentState.SOLID)
-
+    judgments = get_judgments(state=JudgmentState.SOLID, stage=stage)
     results = judgments
     if query:
         q = query.lower()
@@ -79,29 +79,24 @@ def search_commits(
         results = [j for j in results if j.get("created_at", "") >= date_from]
     if date_to:
         results = [j for j in results if j.get("created_at", "") <= date_to]
-
-    return _attach_alerts({
-        "query": query,
-        "results": results,
-        "total": len(results),
-    })
+    return _attach_alerts({"query": query, "results": results, "total": len(results)})
 
 
-def get_audit_trail(
+def get_history(
     limit: int = 50,
     offset: int = 0,
     event_type: str | None = None,
+    stage: str = "default",
 ) -> dict:
-    """Return audit log entries."""
-    record_tool_call("get_audit_trail")
-    from pipeline.audit import get_audit_log
+    """Return history events."""
+    record_tool_call("get_history")
+    from pipeline.history import get_events
     return _attach_alerts({
-        "events": get_audit_log(limit=limit, offset=offset, event_type=event_type),
+        "events": get_events(limit=limit, offset=offset, event_type=event_type, stage=stage),
     })
 
 
 def get_csp_whitelist() -> dict:
-    """Return current CSP whitelist domains."""
     record_tool_call("get_csp_whitelist")
     from pipeline.config import (
         CSP_SCRIPT_WHITELIST, CSP_STYLE_WHITELIST, CSP_FONT_WHITELIST,
@@ -115,158 +110,99 @@ def get_csp_whitelist() -> dict:
     })
 
 
+# ── MULTI-STAGE ──────────────────────────────────────────────────────────
+
+def mcp_list_stages() -> dict:
+    record_tool_call("list_stages")
+    return _attach_alerts({"stages": _list_stages()})
+
+
+def mcp_create_stage(name: str) -> dict:
+    record_tool_call("create_stage")
+    from pipeline.history import log_event
+    result = _create_stage(name)
+    if "error" not in result:
+        log_event(
+            EventType.STAGE_MUTATED,
+            actor="ai", pathway="mcp",
+            payload={"action": "create_stage", "stage_name": result["name"]},
+            stage=result["name"],
+        )
+    return _attach_alerts(result)
+
+
 # ── T2 — DOM operations ──────────────────────────────────────────────────
 
-def mutate_stage(selector: str, new_html: str) -> dict:
-    """Full replacement of stage HTML. Selector is logged for audit only.
-
-    AI owns the HTML — pass the complete new version.
-    """
+def mutate_stage(selector: str, new_html: str, stage: str = "default") -> dict:
     record_tool_call("mutate_stage")
-    from pipeline.audit import log_event
-
-    result = set_html(new_html)
-
-    log_event(
-        EventType.STAGE_MUTATED,
-        actor="ai",
-        pathway="mcp",
-        payload={"selector": selector, "html_length": len(new_html)},
-    )
-
-    return _attach_alerts({
-        "action": "mutate",
-        "selector": selector,
-        "version": result["version"],
-    })
+    from pipeline.history import log_event
+    result = set_html(new_html, stage)
+    log_event(EventType.STAGE_MUTATED, actor="ai", pathway="mcp",
+              payload={"selector": selector, "html_length": len(new_html)}, stage=stage)
+    return _attach_alerts({"action": "mutate", "stage": stage, "version": result["version"]})
 
 
-def append_stage(parent_selector: str, html: str) -> dict:
-    """Append html to current stage HTML (concatenation).
-
-    parent_selector is logged for audit only — actual operation is
-    string append to the end of stage_html. AI owns the structure.
-    """
+def append_stage(parent_selector: str, html: str, stage: str = "default") -> dict:
     record_tool_call("append_stage")
-    from pipeline.audit import log_event
-
-    current = get_html()
-    result = set_html(current + html)
-
-    log_event(
-        EventType.STAGE_APPENDED,
-        actor="ai",
-        pathway="mcp",
-        payload={"parent_selector": parent_selector, "html_length": len(html)},
-    )
-
-    return _attach_alerts({
-        "action": "append",
-        "parent_selector": parent_selector,
-        "version": result["version"],
-    })
+    from pipeline.history import log_event
+    current = get_html(stage)
+    result = set_html(current + html, stage)
+    log_event(EventType.STAGE_APPENDED, actor="ai", pathway="mcp",
+              payload={"parent_selector": parent_selector, "html_length": len(html)}, stage=stage)
+    return _attach_alerts({"action": "append", "stage": stage, "version": result["version"]})
 
 
-
-def query_stage(selector: str) -> dict:
-    """Return full stage HTML. AI finds what it needs in context.
-
-    Selector is logged for audit/intent. Returns entire stage_html —
-    AI generated it, AI knows the structure.
-    """
+def query_stage(selector: str, stage: str = "default") -> dict:
     record_tool_call("query_stage")
     return _attach_alerts({
-        "html": get_html(),
-        "selector": selector,
-        "version": get_version(),
+        "html": get_html(stage), "selector": selector,
+        "stage": stage, "version": get_version(stage),
     })
 
 
 # ── T2 — Constraint tools ────────────────────────────────────────────────
 
 def mcp_promote_to_judgment(
-    claim_text: str,
-    params: list[dict] | None = None,
+    claim_text: str, params: list[dict] | None = None, stage: str = "default",
 ) -> dict:
-    """Promote a claim to a judgment object (viscous state)."""
     record_tool_call("promote_to_judgment")
-    from pipeline.audit import log_event
-
-    result = promote_to_judgment(
-        claim_text=claim_text,
-        params=params,
-        created_by="ai",
-    )
-
-    log_event(
-        EventType.JUDGMENT_PROMOTED,
-        actor="ai",
-        pathway="mcp",
-        payload={
-            "judgment_id": result["judgment_id"],
-            "claim_text": claim_text[:200],
-        },
-    )
-
+    from pipeline.history import log_event
+    result = promote_to_judgment(claim_text=claim_text, params=params, created_by="ai", stage=stage)
+    log_event(EventType.JUDGMENT_PROMOTED, actor="ai", pathway="mcp",
+              payload={"judgment_id": result["judgment_id"], "claim_text": claim_text[:200]}, stage=stage)
     return _attach_alerts(result)
 
 
-def flag_negative_space(description: str, severity: str = "medium") -> dict:
-    """Flag something MISSING. Only AI can flag, only human can dismiss."""
+def flag_negative_space(description: str, severity: str = "medium", stage: str = "default") -> dict:
     record_tool_call("flag_negative_space")
-    from pipeline.audit import log_event
-
-    log_event(
-        EventType.NEGATIVE_SPACE_FLAGGED,
-        actor="ai",
-        pathway="mcp",
-        payload={"description": description[:200], "severity": severity},
-    )
-
+    from pipeline.history import log_event
+    log_event(EventType.NEGATIVE_SPACE_FLAGGED, actor="ai", pathway="mcp",
+              payload={"description": description[:200], "severity": severity}, stage=stage)
     return _attach_alerts({
-        "status": "flagged",
-        "description": description,
-        "severity": severity,
-        "version": get_version(),
+        "status": "flagged", "description": description,
+        "severity": severity, "stage": stage, "version": get_version(stage),
     })
 
 
 # ── T3 — PROPOSE ─────────────────────────────────────────────────────────
 
-def propose_commit(judgment_ids: list[str], message: str) -> dict:
-    """Propose a commit. AI proposes, human approves via Friction Gate."""
+def propose_commit(judgment_ids: list[str], message: str, stage: str = "default") -> dict:
     record_tool_call("propose_commit")
-    from pipeline.audit import log_event
+    from pipeline.history import log_event
     from uuid import uuid4
 
     proposal_id = uuid4().hex
-
-    # Validate all judgments exist and are viscous
-    judgments = get_judgments(state=JudgmentState.VISCOUS)
+    judgments = get_judgments(state=JudgmentState.VISCOUS, stage=stage)
     valid_ids = {j["judgment_id"] for j in judgments}
     invalid = [jid for jid in judgment_ids if jid not in valid_ids]
     if invalid:
-        return _attach_alerts({
-            "error": f"Invalid or non-viscous judgment IDs: {invalid}",
-            "proposal_id": None,
-        })
+        return _attach_alerts({"error": f"Invalid or non-viscous judgment IDs: {invalid}", "proposal_id": None})
 
-    log_event(
-        EventType.COMMIT_PROPOSED,
-        actor="ai",
-        pathway="mcp",
-        payload={
-            "proposal_id": proposal_id,
-            "judgment_ids": judgment_ids,
-            "message": message[:500],
-        },
-    )
-
-    logger.info("commit proposed  proposal=%s  judgments=%d",
-                proposal_id, len(judgment_ids))
+    log_event(EventType.COMMIT_PROPOSED, actor="ai", pathway="mcp",
+              payload={"proposal_id": proposal_id, "judgment_ids": judgment_ids, "message": message[:500]},
+              stage=stage)
+    logger.info("commit proposed  stage=%s  proposal=%s  judgments=%d", stage, proposal_id, len(judgment_ids))
     return _attach_alerts({
-        "proposal_id": proposal_id,
-        "judgment_ids": judgment_ids,
-        "message": message,
-        "status": "pending_approval",
+        "proposal_id": proposal_id, "judgment_ids": judgment_ids,
+        "message": message, "stage": stage, "status": "pending_approval",
     })

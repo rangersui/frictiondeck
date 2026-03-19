@@ -131,12 +131,15 @@ def _get_audit_hmac_key() -> str:
         except Exception:  # noqa: S110
             pass
     # 3. Auto-generate and persist — but warn if events already exist
-    _audit_db = os.path.join(_DB_DIR, "audit.db")
-    if os.path.exists(_audit_db):
+    _history_db = os.path.join(_DB_DIR, "default", "history.db")
+    if os.path.exists(_history_db):
         try:
             import sqlite3
-            _c = sqlite3.connect(_audit_db)
-            _n = _c.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0]
+            _c = sqlite3.connect(_history_db)
+            # Check both old and new table names
+            _tables = [r[0] for r in _c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            _tbl = "events" if "events" in _tables else "audit_events" if "audit_events" in _tables else None
+            _n = _c.execute(f"SELECT COUNT(*) FROM {_tbl}").fetchone()[0] if _tbl else 0
             _c.close()
             if _n > 0:
                 logger.warning(

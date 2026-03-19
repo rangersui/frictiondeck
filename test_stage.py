@@ -19,7 +19,7 @@ from pipeline.stage import (
     promote_to_judgment, get_judgments, seal_judgments,
     get_stage_state,
 )
-from pipeline.audit import init_audit_db
+from pipeline.history import init_history_db
 from pipeline.stage import set_broadcast
 
 # Track broadcasts
@@ -35,7 +35,7 @@ def test():
     print()
 
     # 1. Init
-    init_audit_db()
+    init_history_db()
     init_stage_db()
     set_broadcast(_test_broadcast)
 

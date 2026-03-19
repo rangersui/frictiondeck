@@ -1,7 +1,10 @@
-"""FrictionDeck v4 — Audit Layer
+"""FrictionDeck v4 — History Layer (Multi-Stage)
 
 Append-only HMAC-SHA256 hash-chain ledger.
-The black box. Not a firewall. A flight recorder.
+Each stage_name maps to data/{stage_name}/history.db.
+HMAC key is shared across all stages (from data/config.json or env).
+
+Replaces audit.py. File renamed to history.db for clarity.
 """
 
 import hashlib
@@ -15,42 +18,51 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from pipeline.constants import EventType
-
-logger = logging.getLogger("frictiondeck.audit")
+logger = logging.getLogger("frictiondeck.history")
 
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 
-AUDIT_DB_DIR = os.environ.get(
+DATA_ROOT = os.environ.get(
     "FRICTIONDECK_DB_DIR", os.path.join(_PROJECT_ROOT, "data"),
 )
-AUDIT_DB_PATH = os.path.join(AUDIT_DB_DIR, "audit.db")
 
-_conn: sqlite3.Connection | None = None
+# Connection pool: stage_name → Connection
+_conns: dict[str, sqlite3.Connection] = {}
 
 
 # ── Connection ───────────────────────────────────────────────────────────────
 
 
-def _get_conn() -> sqlite3.Connection:
-    global _conn
-    if _conn is None:
-        os.makedirs(AUDIT_DB_DIR, exist_ok=True)
-        _conn = sqlite3.connect(AUDIT_DB_PATH, check_same_thread=False)
-        _conn.row_factory = sqlite3.Row
-        _conn.execute("PRAGMA journal_mode=WAL")
-        _conn.execute("PRAGMA synchronous=FULL")
-    return _conn
+def _db_path(stage: str) -> str:
+    return os.path.join(DATA_ROOT, stage, "history.db")
 
 
-# ── Schema ───────────────────────────────────────────────────────────────────
+def _get_conn(stage: str = "default") -> sqlite3.Connection:
+    if stage not in _conns:
+        db_dir = os.path.join(DATA_ROOT, stage)
+        os.makedirs(db_dir, exist_ok=True)
+        path = _db_path(stage)
+        conn = sqlite3.connect(path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=FULL")
+        _conns[stage] = conn
+        _init_tables(conn, stage)
+    return _conns[stage]
 
 
-def init_audit_db() -> None:
-    conn = _get_conn()
-    logger.info("init_audit_db  path=%s  exists=%s", AUDIT_DB_PATH, os.path.exists(AUDIT_DB_PATH))
+def _init_tables(conn: sqlite3.Connection, stage: str) -> None:
+    logger.info("init history db  stage=%s  path=%s", stage, _db_path(stage))
+    # Migrate: rename old audit_events table if it exists
+    tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+    ).fetchall()]
+    if "audit_events" in tables and "events" not in tables:
+        conn.execute("ALTER TABLE audit_events RENAME TO events")
+        conn.commit()
+        logger.info("migrated audit_events → events  stage=%s", stage)
     conn.executescript("""
-        CREATE TABLE IF NOT EXISTS audit_events (
+        CREATE TABLE IF NOT EXISTS events (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             event_id    TEXT NOT NULL UNIQUE,
             event_type  TEXT NOT NULL,
@@ -63,23 +75,24 @@ def init_audit_db() -> None:
             event_hash  TEXT NOT NULL
         );
 
-        CREATE INDEX IF NOT EXISTS idx_audit_type   ON audit_events(event_type);
-        CREATE INDEX IF NOT EXISTS idx_audit_actor   ON audit_events(actor);
-        CREATE INDEX IF NOT EXISTS idx_audit_pathway ON audit_events(pathway);
+        CREATE INDEX IF NOT EXISTS idx_events_type    ON events(event_type);
+        CREATE INDEX IF NOT EXISTS idx_events_actor   ON events(actor);
+        CREATE INDEX IF NOT EXISTS idx_events_pathway ON events(pathway);
     """)
     conn.commit()
+
+
+def init_history_db(stage: str = "default") -> None:
+    """Ensure a stage's history db is initialized."""
+    _get_conn(stage)
 
 
 # ── Environment snapshot ─────────────────────────────────────────────────────
 
 
 def _collect_environment() -> str:
-    """Collect runtime environment snapshot."""
     from pipeline.config import VERSION
-
-    env: dict[str, Any] = {
-        "frictiondeck_version": VERSION,
-    }
+    env: dict[str, Any] = {"frictiondeck_version": VERSION}
     return json.dumps(env, ensure_ascii=False, sort_keys=True)
 
 
@@ -89,7 +102,6 @@ def _collect_environment() -> str:
 def _compute_hash(event_id: str, event_type: str, timestamp: str,
                   prev_hash: str, environment: str, payload: str,
                   *, key: str) -> str:
-    """Compute HMAC-SHA256 hash for an audit event."""
     canonical = f"{event_id}|{event_type}|{timestamp}|{prev_hash}|{environment}|{payload}"
     return _hmac.new(key.encode(), canonical.encode("utf-8"), hashlib.sha256).hexdigest()
 
@@ -103,16 +115,10 @@ def log_event(
     actor: str = "system",
     pathway: str | None = None,
     payload: dict[str, Any] | None = None,
+    stage: str = "default",
 ) -> str:
-    """Append an audit event to the hash chain.
-
-    Uses BEGIN IMMEDIATE for atomic prev_hash read + insert.
-    Returns the event_id (UUID hex).
-
-    actor:   "ai", "user", "system"
-    pathway: "mcp", "gui", "api", None
-    """
-    conn = _get_conn()
+    """Append an event to the hash chain. Returns event_id."""
+    conn = _get_conn(stage)
     event_id = uuid4().hex
     ts = datetime.now(UTC).isoformat()
     payload_json = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True)
@@ -121,7 +127,7 @@ def log_event(
     conn.execute("BEGIN IMMEDIATE")
     try:
         row = conn.execute(
-            "SELECT event_hash FROM audit_events ORDER BY id DESC LIMIT 1",
+            "SELECT event_hash FROM events ORDER BY id DESC LIMIT 1",
         ).fetchone()
         prev_hash = row["event_hash"] if row else "GENESIS"
 
@@ -132,7 +138,7 @@ def log_event(
         )
 
         conn.execute(
-            "INSERT INTO audit_events "
+            "INSERT INTO events "
             "(event_id, event_type, timestamp, actor, pathway, "
             " payload, environment, prev_hash, event_hash) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -150,14 +156,15 @@ def log_event(
 # ── Query functions ──────────────────────────────────────────────────────────
 
 
-def get_audit_log(
+def get_events(
     limit: int = 50,
     offset: int = 0,
     event_type: str | None = None,
     actor: str | None = None,
     pathway: str | None = None,
+    stage: str = "default",
 ) -> list[dict]:
-    conn = _get_conn()
+    conn = _get_conn(stage)
     clauses: list[str] = []
     params: list[Any] = []
 
@@ -173,7 +180,7 @@ def get_audit_log(
 
     where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
     sql = (
-        f"SELECT * FROM audit_events{where} "
+        f"SELECT * FROM events{where} "
         f"ORDER BY id DESC LIMIT ? OFFSET ?"
     )
     params.extend([limit, offset])
@@ -186,7 +193,6 @@ def get_audit_log(
 
 
 def _break_info(event: dict, index: int, expected: str) -> dict:
-    """Build a chain-break info dict."""
     return {
         "event_index": index,
         "expected": expected,
@@ -196,40 +202,31 @@ def _break_info(event: dict, index: int, expected: str) -> dict:
     }
 
 
-def _fetch_events(limit: int) -> list[dict]:
-    """Fetch audit events for verification."""
-    conn = _get_conn()
-    if limit > 0:
-        rows = conn.execute(
-            "SELECT * FROM audit_events ORDER BY id ASC "
-            "LIMIT ? OFFSET (SELECT MAX(0, COUNT(*) - ?) FROM audit_events)",
-            (limit, limit),
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM audit_events ORDER BY id ASC",
-        ).fetchall()
-    return [dict(r) for r in rows]
-
-
-def verify_chain(limit: int = 0) -> dict:
-    """Verify hash chain integrity."""
+def verify_chain(limit: int = 0, stage: str = "default") -> dict:
     from pipeline.config import AUDIT_HMAC_KEY
 
     base: dict = {
         "valid": True, "degraded": False, "total_events": 0,
-        "verified_events": 0, "unverifiable_events": 0,
-        "anomalies": 0, "first_break": None,
+        "verified_events": 0, "anomalies": 0, "first_break": None,
         "verified_at": datetime.now(UTC).isoformat(),
     }
 
-    events = _fetch_events(limit)
+    conn = _get_conn(stage)
+    if limit > 0:
+        rows = conn.execute(
+            "SELECT * FROM events ORDER BY id ASC "
+            "LIMIT ? OFFSET (SELECT MAX(0, COUNT(*) - ?) FROM events)",
+            (limit, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute("SELECT * FROM events ORDER BY id ASC").fetchall()
+    events = [dict(r) for r in rows]
+
     if not events:
         return base
 
     verified = tampered = 0
     for i, event in enumerate(events):
-        # Chain linkage check
         if i == 0 and event["id"] == 1 and event["prev_hash"] != "GENESIS":
             base.update(valid=False, total_events=len(events), anomalies=1,
                         first_break=_break_info(event, 1, "GENESIS"))
@@ -240,7 +237,6 @@ def verify_chain(limit: int = 0) -> dict:
                         first_break=_break_info(event, i + 1, events[i - 1]["event_hash"]))
             return base
 
-        # Per-event HMAC check
         expected = _compute_hash(
             event["event_id"], event["event_type"], event["timestamp"],
             event["prev_hash"], event["environment"], event["payload"],
@@ -265,8 +261,12 @@ def verify_chain(limit: int = 0) -> dict:
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 
 
-def close_audit() -> None:
-    global _conn
-    if _conn is not None:
-        _conn.close()
-        _conn = None
+def close_history(stage: str | None = None) -> None:
+    if stage:
+        conn = _conns.pop(stage, None)
+        if conn:
+            conn.close()
+    else:
+        for conn in _conns.values():
+            conn.close()
+        _conns.clear()
