@@ -5,7 +5,8 @@
 <iframe id="f" sandbox="allow-scripts allow-same-origin allow-popups" srcdoc=""></iframe>
 <script>
 const s=window.location.pathname.slice(1)||'default';let v=0;
-async function p(){try{const d=await(await fetch('/api/'+s+'/stage')).json();if(d.version>v){v=d.version;document.getElementById('f').srcdoc=d.stage_html||''}}catch(_){}}
+const sync='<script>let _last="";setInterval(()=>{const n=document.body.innerHTML;if(n!==_last){_last=n;fetch("/api/'+s+'/sync",{method:"POST",headers:{"Content-Type":"text/html"},body:n})}},3000)<\/script>';
+async function p(){try{const d=await(await fetch('/api/'+s+'/stage')).json();if(d.version>v){v=d.version;document.getElementById('f').srcdoc=(d.stage_html||'')+sync}}catch(_){}}
 p();setInterval(p,1000);
 </script>
 </body></html>
