@@ -1,244 +1,95 @@
-"""lucy — Elastik OS CLI
+"""lucy — elastik CLI. Zero dependencies."""
+import argparse, os, shutil, socket, sqlite3, subprocess, sys
+from datetime import datetime, timezone
+from pathlib import Path
 
-Usage:
-    lucy start              Start the server (localhost only)
-    lucy start --public     Bind to 0.0.0.0 (LAN accessible)
-    lucy start --safe       Start in enterprise (safe) mode
-    lucy stages             List all stages
-    lucy status             Show server status, stage count, plugin count
-    lucy install <name>     Install plugin from plugins/available/
-    lucy remove <name>      Remove installed plugin
-    lucy list               List installed plugins
-    lucy create <name>      Create a new stage
-"""
-
-import argparse
-import os
-import shutil
-import subprocess
-import sys
-
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-DATA_DIR = os.path.join(PROJECT_ROOT, "data")
-PLUGINS_DIR = os.path.join(PROJECT_ROOT, "plugins")
-AVAILABLE_DIR = os.path.join(PLUGINS_DIR, "available")
-
+ROOT = Path(__file__).parent
+DATA = ROOT / "data"
+PLUGINS = ROOT / "plugins"
+AVAILABLE = PLUGINS / "available"
 
 def cmd_start(args):
     env = os.environ.copy()
-    if args.safe:
-        env["FRICTIONDECK_MODE"] = "enterprise"
-        print("Starting in enterprise (safe) mode...")
-    else:
-        print("Starting in personal mode...")
-    if args.public:
-        env["ELASTIK_HOST"] = "0.0.0.0"
-        print("Binding to 0.0.0.0 (LAN accessible)")
-    subprocess.run(
-        [sys.executable, os.path.join(PROJECT_ROOT, "server.py")],
-        env=env,
-    )
+    if args.public: env["ELASTIK_HOST"] = "0.0.0.0"
+    if args.port: env["ELASTIK_PORT"] = str(args.port)
+    subprocess.run([sys.executable, str(ROOT / "server.py")], env=env)
 
-
-def cmd_stages(args):
-    if not os.path.exists(DATA_DIR):
-        print("No data directory.")
-        return
-    stages = [
-        d for d in sorted(os.listdir(DATA_DIR))
-        if os.path.isdir(os.path.join(DATA_DIR, d))
-    ]
-    if not stages:
-        print("No stages.")
-        return
-    for s in stages:
-        stage_db = os.path.join(DATA_DIR, s, "stage.db")
-        exists = "ok" if os.path.exists(stage_db) else "no db"
-        print(f"  {s}  ({exists})")
-
-
-def cmd_status(args):
-    # Check if server is running
-    import socket
-    port = int(os.environ.get("FRICTIONDECK_PORT", "3004"))
-    running = False
-    try:
-        with socket.create_connection(("localhost", port), timeout=1):
-            running = True
-    except (ConnectionRefusedError, OSError):
-        pass
-    print(f"Server: {'running' if running else 'stopped'}  (port {port})")
-
-    # Count stages
-    stages = 0
-    if os.path.exists(DATA_DIR):
-        stages = len([
-            d for d in os.listdir(DATA_DIR)
-            if os.path.isdir(os.path.join(DATA_DIR, d))
-        ])
-    print(f"Stages: {stages}")
-
-    # Count plugins
-    plugins = 0
-    if os.path.exists(PLUGINS_DIR):
-        plugins = len([
-            f for f in os.listdir(PLUGINS_DIR)
-            if f.endswith(".py") and not f.startswith("_")
-        ])
-    print(f"Plugins: {plugins}")
-
-
-def cmd_install(args):
-    name = args.name
-    src = os.path.join(AVAILABLE_DIR, f"{name}.py")
-    dst = os.path.join(PLUGINS_DIR, f"{name}.py")
-
-    if not os.path.exists(src):
-        print(f"Not found: {src}")
-        available = []
-        if os.path.exists(AVAILABLE_DIR):
-            available = [f[:-3] for f in os.listdir(AVAILABLE_DIR) if f.endswith(".py")]
-        if available:
-            print(f"Available: {', '.join(available)}")
-        return
-
-    if os.path.exists(dst):
-        print(f"Already installed: {name}")
-        return
-
-    os.makedirs(PLUGINS_DIR, exist_ok=True)
-    shutil.copy2(src, dst)
-    print(f"Installed: {name}")
-
-
-def cmd_remove(args):
-    name = args.name
-    path = os.path.join(PLUGINS_DIR, f"{name}.py")
-    if not os.path.exists(path):
-        print(f"Not installed: {name}")
-        return
-    os.remove(path)
-    print(f"Removed: {name}")
-
-
-def cmd_list(args):
-    if not os.path.exists(PLUGINS_DIR):
-        print("No plugins installed.")
-        return
-    plugins = [
-        f[:-3] for f in sorted(os.listdir(PLUGINS_DIR))
-        if f.endswith(".py") and not f.startswith("_")
-    ]
-    if not plugins:
-        print("No plugins installed.")
-        return
-    for p in plugins:
-        print(f"  {p}")
-
+def cmd_stages(_):
+    if not DATA.exists(): print("no stages."); return
+    found = False
+    for d in sorted(DATA.iterdir()):
+        if d.is_dir() and (d / "universe.db").exists():
+            c = sqlite3.connect(str(d / "universe.db"))
+            c.row_factory = sqlite3.Row
+            r = c.execute("SELECT version,updated_at FROM stage_meta WHERE id=1").fetchone()
+            print(f"  {d.name}  v{r['version']}  {r['updated_at']}")
+            c.close(); found = True
+    if not found: print("no stages.")
 
 def cmd_create(args):
     name = "".join(c for c in args.name if c.isalnum() or c in "-_")
-    if not name:
-        print("Invalid stage name.")
-        return
-    stage_dir = os.path.join(DATA_DIR, name)
-    if os.path.exists(stage_dir):
-        print(f"Stage already exists: {name}")
-        return
-    os.makedirs(stage_dir, exist_ok=True)
-
-    # Initialize stage.db
-    import sqlite3
-    from datetime import datetime, timezone
-    conn = sqlite3.connect(os.path.join(stage_dir, "stage.db"))
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS stage_meta (
-            id INTEGER PRIMARY KEY CHECK (id = 1),
-            version INTEGER NOT NULL DEFAULT 0,
-            stage_html TEXT NOT NULL DEFAULT '',
-            updated_at TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS judgment_objects (
-            judgment_id TEXT PRIMARY KEY,
-            claim_text TEXT NOT NULL,
-            params TEXT NOT NULL DEFAULT '[]',
-            state TEXT NOT NULL DEFAULT 'viscous',
-            commit_id TEXT,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL,
-            created_by TEXT NOT NULL DEFAULT 'ai'
-        );
+    if not name: print("invalid name."); return
+    d = DATA / name
+    if d.exists(): print(f"exists: {name}"); return
+    d.mkdir(parents=True)
+    c = sqlite3.connect(str(d / "universe.db"))
+    c.execute("PRAGMA journal_mode=WAL"); c.execute("PRAGMA synchronous=FULL")
+    c.executescript("""
+        CREATE TABLE IF NOT EXISTS stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),
+            stage_html TEXT DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
+            version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '');
+        INSERT OR IGNORE INTO stage_meta(id,updated_at) VALUES(1,datetime('now'));
+        CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT DEFAULT '{}',
+            hmac TEXT NOT NULL, prev_hmac TEXT DEFAULT '');
     """)
-    ts = datetime.now(timezone.utc).isoformat()
-    conn.execute(
-        "INSERT OR IGNORE INTO stage_meta (id, version, stage_html, updated_at) VALUES (1, 0, '', ?)",
-        (ts,),
-    )
-    conn.commit()
-    conn.close()
+    c.commit(); c.close()
+    print(f"created: {name}")
 
-    # Initialize history.db
-    conn = sqlite3.connect(os.path.join(stage_dir, "history.db"))
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            event_id TEXT NOT NULL UNIQUE,
-            event_type TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            actor TEXT NOT NULL DEFAULT 'system',
-            pathway TEXT,
-            payload TEXT NOT NULL DEFAULT '{}',
-            environment TEXT NOT NULL DEFAULT '{}',
-            prev_hash TEXT NOT NULL,
-            event_hash TEXT NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
-    """)
-    conn.commit()
-    conn.close()
+def cmd_status(_):
+    port = int(os.environ.get("ELASTIK_PORT", "3004"))
+    try:
+        with socket.create_connection(("localhost", port), timeout=1): running = True
+    except (ConnectionRefusedError, OSError): running = False
+    stages = len([d for d in DATA.iterdir() if d.is_dir()]) if DATA.exists() else 0
+    plugins = len([f for f in PLUGINS.glob("*.py") if not f.name.startswith("_")]) if PLUGINS.exists() else 0
+    print(f"  server: {'running' if running else 'stopped'} (:{port})")
+    print(f"  stages: {stages}")
+    print(f"  plugins: {plugins}")
 
-    print(f"Created stage: {name}")
+def cmd_install(args):
+    src = AVAILABLE / f"{args.name}.py"
+    dst = PLUGINS / f"{args.name}.py"
+    if not src.exists():
+        avail = [f.stem for f in AVAILABLE.glob("*.py")] if AVAILABLE.exists() else []
+        print(f"not found. available: {', '.join(avail) or 'none'}"); return
+    if dst.exists(): print(f"already installed: {args.name}"); return
+    PLUGINS.mkdir(exist_ok=True); shutil.copy2(src, dst)
+    print(f"installed: {args.name}")
 
+def cmd_remove(args):
+    p = PLUGINS / f"{args.name}.py"
+    if not p.exists(): print(f"not installed: {args.name}"); return
+    p.unlink(); print(f"removed: {args.name}")
+
+def cmd_list(_):
+    if not PLUGINS.exists(): print("no plugins."); return
+    ps = [f.stem for f in sorted(PLUGINS.glob("*.py")) if not f.name.startswith("_")]
+    if not ps: print("no plugins."); return
+    for p in ps: print(f"  {p}")
 
 def main():
-    parser = argparse.ArgumentParser(prog="lucy", description="Elastik OS CLI")
-    sub = parser.add_subparsers(dest="command")
+    ap = argparse.ArgumentParser(prog="lucy", description="elastik CLI")
+    sp = ap.add_subparsers(dest="cmd")
+    s = sp.add_parser("start"); s.add_argument("--public", action="store_true"); s.add_argument("--port", type=int)
+    sp.add_parser("stages"); sp.add_parser("status"); sp.add_parser("list")
+    c = sp.add_parser("create"); c.add_argument("name")
+    i = sp.add_parser("install"); i.add_argument("name")
+    r = sp.add_parser("remove"); r.add_argument("name")
+    args = ap.parse_args()
+    cmds = {"start":cmd_start,"stages":cmd_stages,"create":cmd_create,"status":cmd_status,
+            "install":cmd_install,"remove":cmd_remove,"list":cmd_list}
+    if args.cmd in cmds: cmds[args.cmd](args)
+    else: ap.print_help()
 
-    p_start = sub.add_parser("start", help="Start the server")
-    p_start.add_argument("--safe", action="store_true", help="Enterprise mode")
-    p_start.add_argument("--public", action="store_true", help="Bind 0.0.0.0 (LAN)")
-
-    sub.add_parser("stages", help="List all stages")
-    sub.add_parser("status", help="Show status")
-
-    p_install = sub.add_parser("install", help="Install plugin from available/")
-    p_install.add_argument("name", help="Plugin name")
-
-    p_remove = sub.add_parser("remove", help="Remove installed plugin")
-    p_remove.add_argument("name", help="Plugin name")
-
-    sub.add_parser("list", help="List installed plugins")
-
-    p_create = sub.add_parser("create", help="Create a new stage")
-    p_create.add_argument("name", help="Stage name")
-
-    args = parser.parse_args()
-
-    commands = {
-        "start": cmd_start,
-        "stages": cmd_stages,
-        "status": cmd_status,
-        "install": cmd_install,
-        "remove": cmd_remove,
-        "list": cmd_list,
-        "create": cmd_create,
-    }
-
-    if args.command in commands:
-        commands[args.command](args)
-    else:
-        parser.print_help()
-
-
-if __name__ == "__main__":
-    main()
+if __name__ == "__main__": main()

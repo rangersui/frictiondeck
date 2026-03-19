@@ -1,299 +1,141 @@
-"""FrictionDeck v4 — Single-process server (Multi-Stage)
-
-One port. Three entry points:
-  /             → Stage list
-  /<name>       → Stage view (iframe + poll)
-  /api          → REST API
-  /proxy        → Whitelisted API proxy
-  /ws           → WebSocket broadcast
-
-FastAPI serves everything. Zero Redis. Zero microservices.
-"""
-
-import logging
-import httpx
-
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
-from fastapi.staticfiles import StaticFiles
-
-from pipeline.config import PORT, VERSION, PROXY_WHITELIST, setup_logging
-from pipeline.broadcast import broadcast, subscribe, unsubscribe
-from pipeline.stage import set_broadcast, init_stage_db
-
-# ── Logging ──────────────────────────────────────────────────────────────
-setup_logging()
-logger = logging.getLogger("frictiondeck.server")
-
-# ── App ──────────────────────────────────────────────────────────────────
-app = FastAPI(
-    title="FrictionDeck",
-    version=VERSION,
-    description="Engineering judgment infrastructure.",
-    docs_url="/docs",
-)
-
-
-# ── CSP middleware ────────────────────────────────────────────────────────
-
-CSP = (
-    "default-src 'self' data: blob:; "
-    "script-src 'unsafe-inline' 'unsafe-eval' https: data:; "
-    "style-src 'unsafe-inline' https: data:; "
-    "img-src * data: blob:; "
-    "media-src * data: blob:; "
-    "font-src * data:; "
-    "connect-src 'self'"
-)
-
-
-@app.middleware("http")
-async def add_csp_header(request: Request, call_next):
-    response = await call_next(request)
-    path = request.url.path
-    if not path.startswith(("/api/", "/proxy/", "/static/", "/ws", "/docs")):
-        response.headers["Content-Security-Policy"] = CSP
-    return response
-
-
-# ── Startup ──────────────────────────────────────────────────────────────
-
-@app.on_event("startup")
-async def startup():
-    from pipeline.history import init_history_db
-    from pipeline.plugins import load_all_plugins
-    init_history_db()
-    init_stage_db()
-    set_broadcast(broadcast)
-    loaded = load_all_plugins(app)
-    if loaded:
-        logger.info("plugins loaded: %s", loaded)
-    logger.info("FrictionDeck v%s started on port %d", VERSION, PORT)
-
-
-# ── WebSocket broadcast ──────────────────────────────────────────────────
-
-@app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
-    await ws.accept()
-    queue = subscribe()
-    try:
-        while True:
-            event = await queue.get()
-            await ws.send_json(event)
-    except WebSocketDisconnect:
-        pass
-    except Exception as exc:
-        logger.error("ws error: %s", exc)
-    finally:
-        unsubscribe(queue)
-
-
-# ── API routes ───────────────────────────────────────────────────────────
-
-@app.get("/api/health")
-async def health():
-    from pipeline.stage import get_version
-    from pipeline.history import verify_chain
-    from pipeline.broadcast import subscriber_count
-    chain = verify_chain(limit=10)
-    return {
-        "status": "ok", "version": VERSION,
-        "stage_version": get_version(),
-        "chain_valid": chain["valid"],
-        "chain_events": chain["total_events"],
-        "ws_subscribers": subscriber_count(),
-    }
-
-
-@app.get("/api/stages")
-async def api_stages():
-    from pipeline.stage import list_stages
-    return list_stages()
-
-
-@app.get("/api/{stage_name}/stage")
-async def api_stage(stage_name: str):
-    from pipeline.stage import get_stage_state
-    return get_stage_state(stage_name)
-
-
-@app.post("/api/{stage_name}/sync")
-async def api_sync(stage_name: str, request: Request):
-    """Receive DOM sync from iframe. No version bump, no broadcast."""
-    from pipeline.stage import _get_conn
-    from datetime import datetime, UTC
-    html = (await request.body()).decode("utf-8", errors="replace")
-    conn = _get_conn(stage_name)
-    conn.execute(
-        "UPDATE stage_meta SET stage_html = ?, updated_at = ? WHERE id = 1",
-        (html, datetime.now(UTC).isoformat()),
-    )
-    conn.commit()
-    return {"status": "ok"}
-
-
-@app.post("/api/csp/add")
-async def api_add_csp_domain(category: str, domain: str):
-    from pipeline.gui_adapter import add_csp_domain
-    return add_csp_domain(category, domain)
-
-
-# ── Webhook ──────────────────────────────────────────────────────────────
-
-@app.post("/webhook/{source}")
-async def webhook(source: str, request: Request):
-    from pipeline.history import log_event
-    body = (await request.body()).decode("utf-8", errors="replace")
-    log_event(
-        "webhook_received",
-        actor="external",
-        pathway="webhook",
-        payload={"source": source, "body": body[:10000]},
-    )
-    return {"status": "ok"}
-
-
-# ── Proxy layer ──────────────────────────────────────────────────────────
-
-@app.api_route("/proxy/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
-async def proxy(service: str, path: str, request: Request):
-    from pipeline.history import log_event
-    from pipeline.constants import EventType
-
-    base_url = PROXY_WHITELIST.get(service)
-    if not base_url:
-        return Response(
-            content=f'{{"error":"service not whitelisted: {service}"}}',
-            status_code=403, media_type="application/json",
-        )
-
-    target = f"{base_url}/{path}"
-    if request.url.query:
-        target += f"?{request.url.query}"
-
-    body = await request.body()
-    headers = {
-        k: v for k, v in request.headers.items()
-        if k.lower() not in ("host", "content-length", "transfer-encoding")
-    }
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.request(
-            method=request.method, url=target,
-            headers=headers, content=body if body else None,
-        )
-
-    log_event(
-        EventType.PROXY_FORWARDED, actor="iframe", pathway="proxy",
-        payload={"service": service, "path": f"/{path}",
-                 "method": request.method, "status_code": resp.status_code},
-    )
-
-    return Response(
-        content=resp.content, status_code=resp.status_code,
-        media_type=resp.headers.get("content-type", "application/json"),
-    )
-
-
-# ── Plugin routes (human only) ────────────────────────────────────────────
-
-@app.get("/api/plugins")
-async def api_plugins():
-    from pipeline.plugins import list_installed_plugins
-    return list_installed_plugins()
-
-
-@app.get("/api/plugins/proposals")
-async def api_plugin_proposals(stage: str = "default"):
-    from pipeline.plugins import list_plugin_proposals
-    return list_plugin_proposals(stage)
-
-
-@app.post("/api/plugins/approve")
-async def api_approve_plugin(request: Request):
-    data = await request.json()
-    proposal_id = data.get("proposal_id")
-    stage = data.get("stage", "default")
-    if not proposal_id:
-        return Response(content='{"error":"proposal_id required"}', status_code=400, media_type="application/json")
-    from pipeline.plugins import approve_plugin
-    return approve_plugin(proposal_id, app=app, stage=stage)
-
-
-@app.post("/api/plugins/reject")
-async def api_reject_plugin(request: Request):
-    data = await request.json()
-    proposal_id = data.get("proposal_id")
-    reason = data.get("reason", "")
-    stage = data.get("stage", "default")
-    if not proposal_id:
-        return Response(content='{"error":"proposal_id required"}', status_code=400, media_type="application/json")
-    from pipeline.plugins import reject_plugin
-    return reject_plugin(proposal_id, reason, stage=stage)
-
-
-# ── MCP Tool routes (human only) ──────────────────────────────────────────
-
-@app.get("/api/mcp-tools")
-async def api_mcp_tools():
-    from pipeline.plugins import list_installed_mcp_tools
-    return list_installed_mcp_tools()
-
-
-@app.get("/api/mcp-tools/proposals")
-async def api_mcp_tool_proposals(stage: str = "default"):
-    from pipeline.plugins import list_mcp_tool_proposals
-    return list_mcp_tool_proposals(stage)
-
-
-@app.post("/api/mcp-tools/approve")
-async def api_approve_mcp_tool(request: Request):
-    data = await request.json()
-    proposal_id = data.get("proposal_id")
-    stage = data.get("stage", "default")
-    if not proposal_id:
-        return Response(content='{"error":"proposal_id required"}', status_code=400, media_type="application/json")
-    from pipeline.plugins import approve_mcp_tool
-    # Note: MCP server is a separate process — hot-load only works within that process.
-    # For the HTTP server, we just write the file. MCP server picks it up on restart.
-    return approve_mcp_tool(proposal_id, mcp_instance=None, stage=stage)
-
-
-@app.post("/api/mcp-tools/reject")
-async def api_reject_mcp_tool(request: Request):
-    data = await request.json()
-    proposal_id = data.get("proposal_id")
-    reason = data.get("reason", "")
-    stage = data.get("stage", "default")
-    if not proposal_id:
-        return Response(content='{"error":"proposal_id required"}', status_code=400, media_type="application/json")
-    from pipeline.plugins import reject_mcp_tool
-    return reject_mcp_tool(proposal_id, reason, stage=stage)
-
-
-# ── Static files ─────────────────────────────────────────────────────────
-
-app.mount("/static", StaticFiles(directory="static"), name="static")
-
-
-@app.get("/")
-async def index():
-    return FileResponse("static/index.html")
-
-
-@app.get("/{stage_name}")
-async def stage_view(stage_name: str):
-    from pipeline.stage import init_stage_db
-    from pipeline.history import init_history_db
-    init_stage_db(stage_name)
-    init_history_db(stage_name)
-    return FileResponse("static/index.html")
-
-
-# ── Entry point ──────────────────────────────────────────────────────────
+"""elastik — reference implementation. ~100 lines. One dependency."""
+import hashlib, hmac as _hmac, json, os, secrets, sqlite3
+from pathlib import Path
+
+DATA, PLUGINS = Path("data"), Path("plugins")
+KEY = os.getenv("ELASTIK_KEY", "elastik-dev-key").encode()
+TOKEN = secrets.token_hex(16)
+HOST = os.getenv("ELASTIK_HOST", "127.0.0.1")
+PORT = int(os.getenv("ELASTIK_PORT", "3004"))
+INDEX = Path(__file__).with_name("index.html").read_text()
+CSP = "default-src 'self' data: blob:; script-src 'unsafe-inline' 'unsafe-eval' https: data:; style-src 'unsafe-inline' https: data:; img-src * data: blob:; font-src * data:; connect-src 'self'"
+_db = {}
+
+def conn(name):
+    if name not in _db:
+        d = DATA / name; d.mkdir(parents=True, exist_ok=True)
+        c = sqlite3.connect(str(d / "universe.db"), check_same_thread=False)
+        c.row_factory = sqlite3.Row
+        c.execute("PRAGMA journal_mode=WAL"); c.execute("PRAGMA synchronous=FULL")
+        c.executescript("""
+            CREATE TABLE IF NOT EXISTS stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),
+                stage_html TEXT DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
+                version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '');
+            INSERT OR IGNORE INTO stage_meta(id,updated_at) VALUES(1,datetime('now'));
+            CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT DEFAULT '{}',
+                hmac TEXT NOT NULL, prev_hmac TEXT DEFAULT '');
+        """)
+        _db[name] = c
+    return _db[name]
+
+def log_event(name, etype, payload=None):
+    c = conn(name); p = json.dumps(payload or {}, ensure_ascii=False)
+    row = c.execute("SELECT hmac FROM events ORDER BY id DESC LIMIT 1").fetchone()
+    prev = row["hmac"] if row else ""
+    h = _hmac.new(KEY, (prev + p).encode(), hashlib.sha256).hexdigest()
+    c.execute("INSERT INTO events(timestamp,event_type,payload,hmac,prev_hmac) VALUES(datetime('now'),?,?,?,?)",
+              (etype, p, h, prev))
+    c.commit()
+
+async def recv(receive):
+    b = b""
+    while True:
+        m = await receive(); b += m.get("body", b"")
+        if not m.get("more_body"): return b
+
+async def send_r(send, status, data, ct="application/json", csp=False):
+    h = [[b"content-type", ct.encode()]]
+    if csp: h.append([b"content-security-policy", CSP.encode()])
+    await send({"type": "http.response.start", "status": status, "headers": h})
+    await send({"type": "http.response.body", "body": data.encode() if isinstance(data, str) else data})
+
+_plugins = {}
+def load_plugins():
+    if not PLUGINS.exists(): return
+    for f in PLUGINS.glob("*.py"):
+        if f.name.startswith("_"): continue
+        try:
+            ns = {}; exec(f.read_text(), ns)
+            for path, handler in ns.get("ROUTES", {}).items():
+                _plugins[path] = handler; print(f"  plugin: {path}")
+        except Exception as e: print(f"  plugin {f.name} error: {e}")
+
+async def app(scope, receive, send):
+    if scope["type"] != "http": return
+    path = scope["path"].rstrip("/") or "/"; method = scope["method"]
+    parts = [p for p in path.split("/") if p]
+
+    base_path = path.split("?")[0]
+    if base_path in _plugins:
+        b = await recv(receive)
+        qs = scope.get("query_string", b"").decode()
+        params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
+        result = await _plugins[base_path](method, b, params)
+        return await send_r(send, 200, json.dumps(result))
+
+    if method == "GET" and path == "/stages":
+        stages = []
+        if DATA.exists():
+            for d in sorted(DATA.iterdir()):
+                if d.is_dir() and (d / "universe.db").exists():
+                    r = conn(d.name).execute("SELECT version,updated_at FROM stage_meta WHERE id=1").fetchone()
+                    stages.append({"name": d.name, "version": r["version"], "updated_at": r["updated_at"]})
+        return await send_r(send, 200, json.dumps(stages))
+
+    if method == "POST" and len(parts) == 2 and parts[0] == "webhook":
+        b = (await recv(receive)).decode("utf-8", "replace")
+        log_event("default", "webhook_received", {"source": parts[1], "body": b})
+        return await send_r(send, 200, '{"ok":true}')
+
+    if method == "POST" and len(parts) == 2 and parts[0] == "plugins":
+        b = json.loads(await recv(receive))
+        if parts[1] == "propose":
+            log_event("default", "plugin_proposed", b)
+            return await send_r(send, 200, '{"ok":true}')
+        if parts[1] == "approve":
+            tok = dict(scope.get("headers", [])).get(b"x-approve-token", b"").decode()
+            if tok != TOKEN: return await send_r(send, 403, '{"error":"invalid token"}')
+            n, code = b.get("name", ""), b.get("code", "")
+            if n and code:
+                PLUGINS.mkdir(exist_ok=True); (PLUGINS / f"{n}.py").write_text(code)
+                log_event("default", "plugin_approved", {"name": n})
+            return await send_r(send, 200, '{"ok":true}')
+
+    if len(parts) == 2 and parts[1] in ("read","write","append","pending","result","clear","sync"):
+        name, action = parts; c = conn(name)
+        if method == "GET" and action == "read":
+            r = c.execute("SELECT stage_html,pending_js,js_result,version FROM stage_meta WHERE id=1").fetchone()
+            return await send_r(send, 200, json.dumps(dict(r)))
+        b = (await recv(receive)).decode("utf-8", "replace")
+        if action == "write":
+            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
+            log_event(name, "stage_written", {"len": len(b)})
+            v = c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]
+            return await send_r(send, 200, json.dumps({"version": v}))
+        if action == "append":
+            old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
+            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1",(old+b,)); c.commit()
+            log_event(name, "stage_appended", {"len": len(b)})
+            v = c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]
+            return await send_r(send, 200, json.dumps({"version": v}))
+        if action == "sync":
+            c.execute("UPDATE stage_meta SET stage_html=?,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
+            return await send_r(send, 200, '{"ok":true}')
+        if action == "pending":
+            c.execute("UPDATE stage_meta SET pending_js=?,js_result='',updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
+            return await send_r(send, 200, '{"ok":true}')
+        if action == "result":
+            c.execute("UPDATE stage_meta SET js_result=?,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
+            return await send_r(send, 200, '{"ok":true}')
+        if action == "clear":
+            c.execute("UPDATE stage_meta SET pending_js='',js_result='',updated_at=datetime('now') WHERE id=1"); c.commit()
+            return await send_r(send, 200, '{"ok":true}')
+
+    if method == "GET": return await send_r(send, 200, INDEX, "text/html", csp=True)
+    await send_r(send, 404, '{"error":"not found"}')
 
 if __name__ == "__main__":
-    import uvicorn
-    from pipeline.config import HOST
-    uvicorn.run(app, host=HOST, port=PORT)
+    load_plugins()
+    print(f"\n  elastik → http://{HOST}:{PORT}\n  approve token: {TOKEN}\n")
+    import uvicorn; uvicorn.run(app, host=HOST, port=PORT, log_level="warning")

@@ -1,0 +1,10 @@
+<!DOCTYPE html><html><body style="margin:0"><script>
+const p=location.pathname.slice(1),o=location.origin;
+if(!p){fetch('/stages').then(r=>r.json()).then(d=>{document.body.innerHTML=d.map(s=>'<a href="/'+s.name+'">'+s.name+' (v'+s.version+')</a>').join('<br>')||'<em>no stages yet. say something to your AI.</em>'})}
+else{const f=document.createElement('iframe');f.sandbox='allow-scripts allow-same-origin allow-popups';
+f.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;border:none';document.body.appendChild(f);let v=-1;
+const csp='<meta http-equiv="Content-Security-Policy" content="default-src \'self\' '+o+' data: blob:; script-src \'unsafe-inline\' \'unsafe-eval\' https: data:; style-src \'unsafe-inline\' https: data:; img-src * data: blob:; font-src * data:; connect-src '+o+'">';
+setInterval(async()=>{const r=await(await fetch('/'+p+'/read')).json();
+if(r.version!==v){v=r.version;f.srcdoc=csp+r.stage_html}
+if(r.pending_js){try{const x=f.contentWindow.eval(r.pending_js);fetch('/'+p+'/result',{method:'POST',body:String(x??'')})}catch(e){fetch('/'+p+'/result',{method:'POST',body:'ERROR:'+e.message})}fetch('/'+p+'/clear',{method:'POST'})}},1000)}
+</script></body></html>

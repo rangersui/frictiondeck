@@ -1,269 +1,214 @@
-# Elastik OS
+# elastik
 
-**Everything is a DOM.**
+A protocol for human-AI interaction.
+
+This repo is a reference implementation in Python.
 
 ---
 
-## What is this
+## Protocol
 
-An empty iframe. A backend with `/proxy`. AI fills the rest.
+Five rules. Any language can implement them.
 
-There is no UI. AI builds it. Right now. For you. Based on what you just said.
+1. **Listen on a port.** Accept HTTP requests.
+2. **Send and receive strings over HTTP.** Nothing else. No types. No schemas.
+3. **Store strings in SQLite.** One file per world: `universe.db`.
+4. **Sign strings with HMAC.** Chain-linked. Append-only. Immutable history.
+5. **Render strings in a browser.** One iframe. One polling loop.
 
-There are no apps. There are no templates. There are no components.
-There is a wall. AI draws on it. You use what appears. It disappears when you're done.
-
-Your judgments are silently logged. Your history is immutable. You never notice.
+See [PROTOCOL.md](https://claude.ai/chat/PROTOCOL.md) for the formal specification.
 
 ---
 
 ## Install
 
-```bash
-git clone https://github.com/rangersui/elastik
-cd elastik
-pip install -r requirements.txt
+```
+pip install uvicorn
 python server.py
 ```
 
-Open `http://localhost:3004`. Empty. Say something to your AI. Watch.
+Open `http://localhost:3004`. Empty. Say something to your AI.
+
+---
+
+## What happens
+
+You see an empty wall. Your AI writes a string. The browser renders it. You see something.
+
+You type on the wall. The string syncs back. Your AI reads it. Your AI writes a new string. The wall changes.
+
+That's it. Everything else is emergent.
+
+---
+
+## Three mailboxes
+
+Each world has three string fields:
+
+| Field       | Who writes     | Who reads       | What happens       |
+| ----------- | -------------- | --------------- | ------------------ |
+| `stage`   | AI writes      | Browser renders | You see pixels     |
+| `pending` | AI writes      | Browser evals   | Code executes      |
+| `result`  | Browser writes | AI reads        | AI sees the answer |
+
+Plus a version counter and an HMAC audit chain.
+
+---
+
+## HTTP endpoints
+
+```
+GET  /{name}/read      → read all three mailboxes + version
+POST /{name}/write     → overwrite stage string → version++
+POST /{name}/append    → append to stage string → version++
+POST /{name}/sync      → overwrite stage string → no version bump
+POST /{name}/pending   → write to command mailbox
+POST /{name}/result    → write to reply mailbox
+POST /{name}/clear     → clear pending + result
+GET  /stages           → list all worlds
+GET  /{name}           → serve the browser client
+POST /webhook/{source} → log external event
+POST /plugins/propose  → propose a new route
+POST /plugins/approve  → approve (needs token from terminal)
+```
+
+---
+
+## Multi-world
+
+Every path is a world. Visit a path that doesn't exist — it's created.
+
+```
+localhost:3004/work     → work world
+localhost:3004/albon    → project world
+localhost:3004/home     → personal world
+```
+
+Each world has its own `universe.db`. Independent. Parallel.
+
+```bash
+python lucy.py create myworld
+python lucy.py stages
+```
+
+---
+
+## Proof
+
+AI was testing elastik. The test viewer had a bug.
+AI said: "I have Stage. Why not use it?"
+AI rendered its own test results on the wall.
+
+Nobody told it to. It chose to.
+
+**elastik's first spontaneous user was the AI itself.**
+
+### A/B tested
+
+| Scenario         | With Skill    | Without       | Gap                      |
+| ---------------- | ------------- | ------------- | ------------------------ |
+| Unit Converter   | 4/4           | 3/4           | Style conventions        |
+| Multi-Stage      | 4/4           | 2/4           | Didn't know worlds exist |
+| Realtime Notepad | 4/4           | 4/4           | Tie                      |
+| Plugin Proposal  | 4/4           | 3/4           | Couldn't execute         |
+| Motor Comparison | 4/4           | 4/4           | Tie                      |
+| **Total**  | **90%** | **75%** | **+15%**           |
+
+---
+
+## Security
+
+The browser is a glass room. AI paints freely inside. It can't break the glass.
+
+* **iframe sandbox** — `allow-scripts allow-same-origin allow-popups`
+* **CSP** — `connect-src 'self'` — can only fetch localhost
+* **Approve token** — printed in terminal — AI doesn't have it
+* **HMAC chain** — every action logged, chain-linked, immutable
+
+AI proposes. Human approves. If elastik destroys the world, a human handed over the key.
+
+---
+
+## Plugins
+
+Routes are capabilities. More routes, more capabilities.
+
+```bash
+python lucy.py install fs        # file system access
+python lucy.py install example   # hello world
+python lucy.py list              # what's installed
+python lucy.py remove fs         # revoke
+```
+
+AI can propose new plugins at runtime:
+
+```
+POST /plugins/propose   body: {name, code, description}
+POST /plugins/approve   header: X-Approve-Token: {token}
+```
+
+Approve token is in the terminal. AI can't see it. Physics, not policy.
+
+---
+
+## Files
+
+```
+server.py          ~100 lines    the protocol
+index.html         ~15 lines     one iframe, one polling loop
+mcp_server.py      ~20 lines     MCP-to-HTTP adapter (temporary)
+lucy.py            ~100 lines    CLI
+PROTOCOL.md                      formal spec
+SKILLS.md                        AI behavior guide
+plugins/                         route extensions
+data/                            universes
+```
+
+~235 lines of code. One dependency: `uvicorn`.
 
 ---
 
 ## Connect AI
 
-Any MCP-compatible client works:
+Any MCP-compatible client:
 
 ```json
 {
   "mcpServers": {
     "elastik": {
       "command": "python",
-      "args": ["path/to/elastik/mcp_server.py"]
+      "args": ["path/to/mcp_server.py"]
     }
   }
 }
 ```
 
-Claude Desktop, Gemini CLI, Cursor, Windsurf, VS Code Copilot, Cline, JetBrains — anything with MCP.
-
----
-
-## Architecture
-
-```
-Two processes. Two databases per world. One iframe.
-
-server.py       → HTTP server (human's eyes)
-mcp_server.py   → MCP endpoint (AI's hands)
-
-data/<name>/
-  stage.db      → what's on the wall right now
-  history.db    → everything that ever happened (HMAC signed)
-
-static/
-  index.html    → an iframe and a polling loop. ~10 lines.
-```
-
----
-
-## Multi-Stage
-
-Every URL is a world.
-
-```
-localhost:3004/          → list of all worlds
-localhost:3004/work      → work world
-localhost:3004/project   → project world
-localhost:3004/home      → home world
-
-Visit a URL that doesn't exist → it's created. Empty wall. Ready.
-```
-
-Each world has its own `stage.db` and `history.db`. Independent. Parallel.
-
----
-
-## How it works
-
-```
-AI writes HTML → stored in stage.db → iframe renders it → you see it
-
-That's it.
-
-AI writes <script> tags    → they execute in the iframe
-AI writes onclick handlers → they work
-AI loads CDN libraries     → React, D3, Three.js, Chart.js, anything
-AI builds full applications → calculators, dashboards, editors, games
-
-The wall grows. Or you wipe it clean. The history stays.
-```
-
----
-
-## Backend capabilities
-
-AI can't touch the backend. You can.
-
-```bash
-lucy install fs          # file system access
-lucy install modbus      # industrial protocol
-lucy install terminal    # shell access
-lucy install mqtt        # IoT messaging
-lucy remove fs           # revoke access
-lucy list                # what's installed
-```
-
-Every plugin adds a `/proxy` route. AI discovers it via `get_proxy_whitelist()` and starts using it immediately. No configuration. No restart.
-
-Plugins are reviewed before installation. AI proposes. You approve.
-
----
-
-## Security model
-
-```
-Frontend (iframe):
-  sandbox="allow-scripts allow-same-origin allow-popups"
-  CSP: connect-src 'self' (can only fetch localhost)
-  AI draws freely. Can't escape. Can't reach the internet directly.
-
-Backend (server.py):
-  /proxy whitelist — AI can only call approved APIs
-  Plugin approval — AI proposes code, human reviews and approves
-  History — every action logged, HMAC signed, immutable
-
-AI is in a glass room. It can paint anything.
-It can't break the glass.
-```
-
----
-
-## What dies
-
-```
-Replaced by AI + iframe + /proxy:
-
-  File managers      IDE               Email clients
-  Note-taking apps   Git GUIs          Cloud storage UI
-  Calculators        Search engines    Meeting transcription
-  Browser extensions RAG pipelines     Low-code platforms
-  Desktop widgets    Smart home panels  Arduino IDE
-  Voice assistants   PR review bots    Workflow automation (Zapier)
-
-Not replaced:
-  Social networks (network effects)
-  3A games (GPU rendering)
-  VPN / networking (transport layer)
-  Foundation models (the brain itself)
-  Chips (the compute itself)
-```
-
----
-
-## Elastic Client
-
-AI builds tools on the spot. You use them. They disappear when done.
-
-Need a power calculator? AI builds one with sliders.
-Need a Modbus debugger? AI builds one that talks to your PLC.
-Need a news dashboard? AI builds one with live data.
-Need something that has never existed? AI builds it.
-
-The tool is temporary. Your judgment is permanent.
+The MCP server has one tool: `http(method, path, body)`. It translates MCP calls to HTTP requests. When AI can send HTTP directly, this file disappears.
 
 ---
 
 ## Philosophy
 
 ```
-Linux:    Everything is a file.
-elastik:  Everything is a DOM.
-
-Install     = appendChild
-Uninstall   = element.remove()
-Process     = iframe
-IPC         = postMessage
-Memory      = document.body.innerHTML
-Persistence = stage.db
-Log         = history.db (natural language, HMAC signed)
+TCP/IP  1974  machine ↔ machine
+HTTP    1991  client ↔ server
+elastik 2026  human ↔ AI
 ```
 
-Traditional software is planned economy — product managers guess what users need, developers build it, users adapt.
+We didn't invent anything. HTTP was already there. SQLite was already there. HMAC was already there. iframe was already there. AI was already there.
 
-elastik is free market — users say what they need, AI builds it, instantly.
-
-Applications are nouns. elastik is a verb.
-
----
-
-## Self-evolution
-
-The system grows with you.
-
-```
-Day 1:    empty wall + default MCP tools
-Day 30:   10 plugins + custom tools + AI knows your patterns  
-Day 365:  a system that is uniquely yours
-
-No two elastik instances are alike.
-Because no two people are alike.
-```
-
-Code has no personality. `stage.db` does.
-Code is DNA. The database is a life lived.
-
----
-
-## The emptiness
-
-```
-We removed RAG.
-We removed the LLM.
-We removed embeddings.
-We removed the component library.
-We removed card templates.
-We removed the HTML sanitizer.
-We removed NLI verification.
-We removed the friction gate.
-We removed the tabs.
-We removed the nav bar.
-We removed the UI.
-
-What's left:
-
-  An iframe.
-  A polling loop.
-  Two SQLite files per world.
-  A hash function.
-  A version counter.
-
-本来无一物。
-```
-
----
-
-## Stack
-
-```
-Python:     fastapi + uvicorn
-Frontend:   one iframe
-Database:   SQLite (WAL mode)
-Protocol:   MCP (open standard)
-Signature:  HMAC-SHA256
-AI:         yours (Claude, Gemini, Llama, anything)
-
-Total: ~2000 lines. Dependencies: 2.
-```
+We just removed everything else.
 
 ---
 
 ## Name
 
-**elastik** — because the system takes whatever shape you need.
+**elastik** — the system takes whatever shape you need.
 
-**lucy** — the CLI. Named after our ancestor. One finger. Everything starts. Genesis.
+**lucy** — the CLI. Named after our ancestor. One finger. Everything starts.
+
+**universe.db** — space and time in one file.
 
 ---
 
-*Copyright © 2026 Ranger Chen. AGPL v3.0.*
+*Copyright © 2026 Ranger Chen . MIT License.*
