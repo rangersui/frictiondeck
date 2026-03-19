@@ -71,9 +71,13 @@ async def add_csp_header(request: Request, call_next):
 @app.on_event("startup")
 async def startup():
     from pipeline.history import init_history_db
+    from pipeline.plugins import load_all_plugins
     init_history_db()
     init_stage_db()
     set_broadcast(broadcast)
+    loaded = load_all_plugins(app)
+    if loaded:
+        logger.info("plugins loaded: %s", loaded)
     logger.info("FrictionDeck v%s started on port %d", VERSION, PORT)
 
 
@@ -170,6 +174,43 @@ async def proxy(service: str, path: str, request: Request):
         content=resp.content, status_code=resp.status_code,
         media_type=resp.headers.get("content-type", "application/json"),
     )
+
+
+# ── Plugin routes (human only) ────────────────────────────────────────────
+
+@app.get("/api/plugins")
+async def api_plugins():
+    from pipeline.plugins import list_installed_plugins
+    return list_installed_plugins()
+
+
+@app.get("/api/plugins/proposals")
+async def api_plugin_proposals(stage: str = "default"):
+    from pipeline.plugins import list_plugin_proposals
+    return list_plugin_proposals(stage)
+
+
+@app.post("/api/plugins/approve")
+async def api_approve_plugin(request: Request):
+    data = await request.json()
+    proposal_id = data.get("proposal_id")
+    stage = data.get("stage", "default")
+    if not proposal_id:
+        return Response(content='{"error":"proposal_id required"}', status_code=400, media_type="application/json")
+    from pipeline.plugins import approve_plugin
+    return approve_plugin(proposal_id, app=app, stage=stage)
+
+
+@app.post("/api/plugins/reject")
+async def api_reject_plugin(request: Request):
+    data = await request.json()
+    proposal_id = data.get("proposal_id")
+    reason = data.get("reason", "")
+    stage = data.get("stage", "default")
+    if not proposal_id:
+        return Response(content='{"error":"proposal_id required"}', status_code=400, media_type="application/json")
+    from pipeline.plugins import reject_plugin
+    return reject_plugin(proposal_id, reason, stage=stage)
 
 
 # ── Static files ─────────────────────────────────────────────────────────

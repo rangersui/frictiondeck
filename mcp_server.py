@@ -145,6 +145,34 @@ def create_stage(name: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# PLUGINS
+# ═══════════════════════════════════════════════════════════════════════════
+
+@mcp.tool()
+def propose_plugin(
+    name: str, code: str, description: str,
+    permissions: str = "[]", stage: str = "default",
+) -> str:
+    """Propose a backend plugin for human approval.
+
+    name: Plugin name (alphanumeric + hyphens + underscores)
+    code: Full Python source code of the plugin
+    description: What the plugin does
+    permissions: JSON array of permission strings
+    """
+    from pipeline.mcp_adapter import mcp_propose_plugin as _propose
+    perms = json.loads(permissions) if isinstance(permissions, str) else permissions
+    return _json(_propose(name, code, description, perms, stage))
+
+
+@mcp.tool()
+def list_plugin_proposals(stage: str = "default") -> str:
+    """List pending plugin proposals awaiting human approval."""
+    from pipeline.mcp_adapter import mcp_list_plugin_proposals as _list
+    return _json(_list(stage))
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # DOM operations
 # ═══════════════════════════════════════════════════════════════════════════
 

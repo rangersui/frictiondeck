@@ -131,6 +131,25 @@ def mcp_create_stage(name: str) -> dict:
     return _attach_alerts(result)
 
 
+# ── PLUGINS ──────────────────────────────────────────────────────────────
+
+def mcp_propose_plugin(
+    name: str, code: str, description: str,
+    permissions: list[str] | None = None, stage: str = "default",
+) -> dict:
+    """AI proposes a backend plugin. Human must approve."""
+    record_tool_call("propose_plugin")
+    from pipeline.plugins import propose_plugin
+    return _attach_alerts(propose_plugin(name, code, description, permissions, stage))
+
+
+def mcp_list_plugin_proposals(stage: str = "default") -> dict:
+    """List pending plugin proposals."""
+    record_tool_call("list_plugin_proposals")
+    from pipeline.plugins import list_plugin_proposals
+    return _attach_alerts({"proposals": list_plugin_proposals(stage)})
+
+
 # ── T2 — DOM operations ──────────────────────────────────────────────────
 
 def mutate_stage(selector: str, new_html: str, stage: str = "default") -> dict:

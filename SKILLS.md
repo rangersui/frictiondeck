@@ -111,9 +111,19 @@ History logs everything automatically — judgments are for when precision matte
 - `list_stages()` — list all worlds
 - `create_stage(name)` — create a new world
 - `get_proxy_whitelist()` — list available APIs
+### Plugin tools (self-evolution)
+- `propose_plugin(name, code, description, permissions, stage)` — propose a backend plugin
+- `list_plugin_proposals(stage)` — check status of proposed plugins
+
+You write the plugin code. The human approves it. It hot-loads into the server.
+Use this when you need new backend capabilities (file access, database queries,
+custom API integrations). The plugin gets routes, proxy whitelist entries, everything.
+
 ### Human-only tools
 - approve_commit — human seals judgments
 - reject_commit — human rejects proposals
+- approve_plugin — human approves a proposed plugin
+- reject_plugin — human rejects a proposed plugin
 You cannot approve. You can only propose. Tell the user when approval is needed.
 ## Proxy layer
 Stage JS can call whitelisted APIs:

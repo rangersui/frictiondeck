@@ -39,6 +39,11 @@ Multi-Stage:
   create_stage(name) → create a new Stage.
   Each Stage is independent: own HTML, own judgments, own history chain.
 
+Plugins:
+  Need new backend capability? propose_plugin(name, code, description, permissions).
+  Human approves → plugin hot-loads → new routes + proxy whitelist entries.
+  list_plugin_proposals() to check status.
+
 Mode details:
   personal — iframe has allow-same-origin. Stage JS can fetch /proxy/*.
   enterprise — iframe is fully sandboxed. No allow-same-origin.

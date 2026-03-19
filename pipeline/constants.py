@@ -23,6 +23,11 @@ class EventType:
     # CSP
     CSP_DOMAIN_ADDED = "csp_domain_added"
 
+    # Plugins
+    PLUGIN_PROPOSED = "plugin_proposed"
+    PLUGIN_APPROVED = "plugin_approved"
+    PLUGIN_REJECTED = "plugin_rejected"
+
     # Negative space
     NEGATIVE_SPACE_FLAGGED = "negative_space_flagged"
 
