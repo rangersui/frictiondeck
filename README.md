@@ -16,7 +16,7 @@ Five rules. Any language can implement them.
 4. **Sign strings with HMAC.** Chain-linked. Append-only. Immutable history.
 5. **Render strings in a browser.** One iframe. One polling loop.
 
-See [PROTOCOL.md](https://claude.ai/chat/PROTOCOL.md) for the formal specification.
+See PROTOCOL.md for the formal specification.
 
 ---
 
