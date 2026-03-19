@@ -134,6 +134,21 @@ async def api_add_csp_domain(category: str, domain: str):
     return add_csp_domain(category, domain)
 
 
+# ── Webhook ──────────────────────────────────────────────────────────────
+
+@app.post("/webhook/{source}")
+async def webhook(source: str, request: Request):
+    from pipeline.history import log_event
+    body = (await request.body()).decode("utf-8", errors="replace")
+    log_event(
+        "webhook_received",
+        actor="external",
+        pathway="webhook",
+        payload={"source": source, "body": body[:10000]},
+    )
+    return {"status": "ok"}
+
+
 # ── Proxy layer ──────────────────────────────────────────────────────────
 
 @app.api_route("/proxy/{service}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
