@@ -1,292 +1,268 @@
-# FrictionDeck
+# Elastik OS
 
-**AI draws. You stamp. Judgments are forever.**
-
-**AI 画画。你盖章。判断不可逆。**
+**Everything is a DOM.**
 
 ---
 
-## What is this / 这是什么
+## What is this
 
-FrictionDeck is a persistent Stage where AI renders anything onto a live HTML page.
-You review, promote judgments, and commit them with HMAC signatures.
-Commits are irreversible.
+An empty iframe. A backend with `/proxy`. AI fills the rest.
 
-FrictionDeck 是一面持久的墙。AI 在上面画任何东西。
-你审查、提取判断、签章提交。
-提交不可逆。
+There is no UI. AI builds it. Right now. For you. Based on what you just said.
 
-```
-"埏埴以为器，当其无，有器之用。"
-— 道德经 第十一章
+There are no apps. There are no templates. There are no components.
+There is a wall. AI draws on it. You use what appears. It disappears when you're done.
 
-Shape clay into a vessel; it is the emptiness within that makes it useful.
-```
+Your judgments are silently logged. Your history is immutable. You never notice.
 
 ---
 
-## Philosophy / 设计哲学
-
-FrictionDeck defines nothing. FrictionDeck 什么都不定义。
-
-```
-No card types.        没有卡片类型。
-No component library. 没有组件库。
-No templates.         没有模板。
-No layout system.     没有布局系统。
-No built-in AI.       没有内置 AI。
-No RAG.               没有 RAG。
-No embedding.         没有向量搜索。
-No LLM.               没有大语言模型。
-
-Just an empty page, a signature, and a counter.
-只有一个空页面、一个签名、一个计数器。
-```
-
-AI decides how to present. You decide what to commit.
-AI 决定怎么展示。你决定什么值得提交。
-
----
-
-## How it works / 运作方式
-
-```
-AI connects via MCP          AI 通过 MCP 连接
-       ↓                            ↓
-Renders HTML onto Stage      在 Stage 上渲染 HTML
-       ↓                            ↓
-You see it at localhost:3004 你在浏览器里看到
-       ↓                            ↓
-AI promotes key judgments    AI 提取关键判断
-       ↓                            ↓
-You approve → HMAC signed    你批准 → HMAC 签名
-       ↓                            ↓
-Judgment is forever          判断永久保存
-```
-
-Stage is whatever AI makes it. A comparison table. A news dashboard.
-A power flow diagram. A travel itinerary. A study guide. A full web app.
-
-Stage 是 AI 创造的任何东西。对比表格、新闻仪表盘、
-功率流向图、旅行行程、学习笔记、完整的 web 应用。
-
-You don't design the UI. AI does. Every user's Stage looks different.
-
-你不设计界面。AI 设计。每个用户的 Stage 长得不一样。
-
----
-
-## Quick start / 快速开始
+## Install
 
 ```bash
-git clone https://github.com/rangersui/frictiondeck-v4
-cd frictiondeck-v4
+git clone https://github.com/rangersui/elastik
+cd elastik
 pip install -r requirements.txt
-python server.py          # HTTP server (browser UI)
-python mcp_server.py      # MCP server (Claude Desktop spawns this)
+python server.py
 ```
 
-Open `http://localhost:3004` — you'll see an empty wall.
+Open `http://localhost:3004`. Empty. Say something to your AI. Watch.
 
-打开 `http://localhost:3004` — 你会看到一面空墙。
+---
 
-Connect your AI via MCP. The wall comes alive.
+## Connect AI
 
-连接你的 AI（通过 MCP）。墙会活起来。
-
-### Claude Desktop configuration / Claude Desktop 配置
+Any MCP-compatible client works:
 
 ```json
 {
   "mcpServers": {
-    "frictiondeck": {
+    "elastik": {
       "command": "python",
-      "args": ["path/to/frictiondeck-v4/mcp_server.py"]
+      "args": ["path/to/elastik/mcp_server.py"]
     }
   }
 }
 ```
 
----
-
-## What's on the wall / 墙上有什么
-
-Whatever your AI puts there. 你的 AI 放什么就有什么。
-
-FrictionDeck has been used for: / FrictionDeck 被用来做过：
-
-* Engineering motor selection analysis with interactive comparison tables
-  工程电机选型分析（交互式对比表格）
-* Breaking news dashboards with live source links
-  突发新闻仪表盘（带实时来源链接）
-* Newspaper-style war reporting layouts
-  报纸风格的战事报道排版
-
-We didn't build any of these. AI did. On an empty wall.
-这些都不是我们做的。是 AI 做的。在一面空墙上。
+Claude Desktop, Gemini CLI, Cursor, Windsurf, VS Code Copilot, Cline, JetBrains — anything with MCP.
 
 ---
 
-## Architecture / 架构
+## Architecture
 
 ```
-server.py              → FastAPI (HTTP + static files)
-mcp_server.py          → MCP endpoint (stdio)
-pipeline/stage.py      → stage_html + judgment_objects + version++
-pipeline/audit.py      → HMAC-SHA256 hash chain
-pipeline/commits.py    → Sealed judgments
-pipeline/mcp_adapter.py → AI's hands (append, mutate, query, promote, commit)
-pipeline/gui_adapter.py → Human's hands (approve, reject)
-static/index.html      → Three tabs, a few buttons, an empty div
-```
+Two processes. Two databases per world. One iframe.
 
-```
-Total: ~2000 lines of Python + 1 HTML file
-Dependencies: fastapi, uvicorn, mcp
-Models: none
-Frameworks: none
+server.py       → HTTP server (human's eyes)
+mcp_server.py   → MCP endpoint (AI's hands)
+
+data/<name>/
+  stage.db      → what's on the wall right now
+  history.db    → everything that ever happened (HMAC signed)
+
+static/
+  index.html    → an iframe and a polling loop. ~10 lines.
 ```
 
 ---
 
-## The three tabs / 三个标签页
+## Multi-Stage
+
+Every URL is a world.
 
 ```
-Stage    AI's canvas. An empty <div>. AI fills it.
-         AI 的画布。一个空 <div>。AI 来填。
+localhost:3004/          → list of all worlds
+localhost:3004/work      → work world
+localhost:3004/project   → project world
+localhost:3004/home      → home world
 
-Log      Committed judgments. Raw JSON. Immutable history.
-         已提交的判断。原始 JSON。不可篡改的历史。
+Visit a URL that doesn't exist → it's created. Empty wall. Ready.
+```
 
-Commit   Pending proposals. Approve or reject.
-         待审提案。批准或拒绝。
+Each world has its own `stage.db` and `history.db`. Independent. Parallel.
+
+---
+
+## How it works
+
+```
+AI writes HTML → stored in stage.db → iframe renders it → you see it
+
+That's it.
+
+AI writes <script> tags    → they execute in the iframe
+AI writes onclick handlers → they work
+AI loads CDN libraries     → React, D3, Three.js, Chart.js, anything
+AI builds full applications → calculators, dashboards, editors, games
+
+The wall grows. Or you wipe it clean. The history stays.
 ```
 
 ---
 
-## MCP tools / MCP 工具
+## Backend capabilities
 
-AI operates the Stage through these tools:
-AI 通过这些工具操作 Stage：
+AI can't touch the backend. You can.
 
-```
-DOM operations (AI's hands):
-  append_stage(html)          — Add content
-  mutate_stage(html)          — Replace all content
-  query_stage()               — Read current page
-
-Judgment operations (structured output):
-  promote_to_judgment(selector, claim_text, params)
-  flag_negative_space(description, severity)
-  propose_commit(judgments, reasoning, engineer)
-
-Queries (AI's memory):
-  get_world_state()           — Call this first. Always.
-  get_stage_state()
-  search_commits(...)
-  get_audit_trail(...)
-  wait_for_stage_update(...)
+```bash
+lucy install fs          # file system access
+lucy install modbus      # industrial protocol
+lucy install terminal    # shell access
+lucy install mqtt        # IoT messaging
+lucy remove fs           # revoke access
+lucy list                # what's installed
 ```
 
-AI cannot approve commits. Only humans can.
-AI 不能批准提交。只有人能。
+Every plugin adds a `/proxy` route. AI discovers it via `get_proxy_whitelist()` and starts using it immediately. No configuration. No restart.
+
+Plugins are reviewed before installation. AI proposes. You approve.
 
 ---
 
-## What makes this different / 为什么不同
+## Security model
 
 ```
-Claude Artifacts    → Ephemeral. Close the chat, gone.
-                      临时的。关掉对话就没了。
+Frontend (iframe):
+  sandbox="allow-scripts allow-same-origin allow-popups"
+  CSP: connect-src 'self' (can only fetch localhost)
+  AI draws freely. Can't escape. Can't reach the internet directly.
 
-Notion / Canvas     → You design the structure. AI fills blanks.
-                      你设计结构。AI 填空。
+Backend (server.py):
+  /proxy whitelist — AI can only call approved APIs
+  Plugin approval — AI proposes code, human reviews and approves
+  History — every action logged, HMAC signed, immutable
 
-FrictionDeck        → AI designs everything. You just stamp.
-                      AI 设计一切。你只盖章。
-                      Persistent. Signed. Irreversible.
-                      持久的。签名的。不可逆的。
+AI is in a glass room. It can paint anything.
+It can't break the glass.
 ```
 
 ---
 
-## Security model / 安全模型
+## What dies
 
 ```
-Stage runs in your browser.       Stage 跑在你的浏览器里。
-Data stays on your machine.       数据留在你的电脑上。
-No cloud. No API keys. No LLM.   没有云。没有 API 密钥。没有 LLM。
-AI writes HTML. Browsers render.  AI 写 HTML。浏览器渲染。
+Replaced by AI + iframe + /proxy:
 
-Attack surface: one HTML page.    攻击面：一个 HTML 页面。
-Worst case: refresh the page.     最坏情况：刷新页面。
-```
+  File managers      IDE               Email clients
+  Note-taking apps   Git GUIs          Cloud storage UI
+  Calculators        Search engines    Meeting transcription
+  Browser extensions RAG pipelines     Low-code platforms
+  Desktop widgets    Smart home panels  Arduino IDE
+  Voice assistants   PR review bots    Workflow automation (Zapier)
 
----
-
-## Skill / 技能包
-
-Install the FrictionDeck skill to teach your AI the optimal workflow:
-
-安装 FrictionDeck 技能包，教你的 AI 最佳工作流：
-
-```
-Skill effectiveness (A/B tested):
-
-| Scenario            | With Skill | Without | Δ     |
-|---------------------|-----------|---------|-------|
-| Datasheet Compare   | 100%      | 50%     | +50%  |
-| Session Recovery    | 100%      | 80%     | +20%  |
-| Commit Flow         | 83%       | 83%     | —     |
-| Visual Iteration    | 100%      | 100%    | —     |
-| **Average**         | **96%**   | **78%** | **+18%** |
+Not replaced:
+  Social networks (network effects)
+  3A games (GPU rendering)
+  VPN / networking (transport layer)
+  Foundation models (the brain itself)
+  Chips (the compute itself)
 ```
 
 ---
 
-## Roadmap / 路线图
+## Elastic Client
 
-```
-Done:
-  ✅ Empty wall + MCP + HMAC + commit
-  ✅ AI renders anything onto Stage
-  ✅ Skill with A/B tested effectiveness
+AI builds tools on the spot. You use them. They disappear when done.
 
-Next:
-  □ Cloudflare Tunnel relay (public access, zero server cost)
-  □ E2E encryption (relay sees nothing)
-  □ Cowork plugin (one-click install)
-  □ FrictionHub (push/pull committed knowledge across projects)
-  □ Enterprise mode (multi-user + SSO + iframe sandbox)
-```
+Need a power calculator? AI builds one with sliders.
+Need a Modbus debugger? AI builds one that talks to your PLC.
+Need a news dashboard? AI builds one with live data.
+Need something that has never existed? AI builds it.
+
+The tool is temporary. Your judgment is permanent.
 
 ---
 
-## The emptiness / 空
+## Philosophy
 
 ```
-We removed RAG.               我们砍了 RAG。
-We removed the LLM.           砍了 LLM。
-We removed embeddings.        砍了向量搜索。
-We removed the component library. 砍了组件库。
-We removed card templates.    砍了卡片模板。
-We removed the HTML sanitizer. 砍了 HTML 消毒器。
-We removed NiceGUI.           砍了 NiceGUI。
-We removed the Python sandbox. 砍了 Python 沙箱。
-We removed NLI verification.  砍了 NLI 验证。
-We removed the Friction Gate. 砍了摩擦门。
+Linux:    Everything is a file.
+elastik:  Everything is a DOM.
+
+Install     = appendChild
+Uninstall   = element.remove()
+Process     = iframe
+IPC         = postMessage
+Memory      = document.body.innerHTML
+Persistence = stage.db
+Log         = history.db (natural language, HMAC signed)
+```
+
+Traditional software is planned economy — product managers guess what users need, developers build it, users adapt.
+
+elastik is free market — users say what they need, AI builds it, instantly.
+
+Applications are nouns. elastik is a verb.
+
+---
+
+## Self-evolution
+
+The system grows with you.
+
+```
+Day 1:    empty wall + default MCP tools
+Day 30:   10 plugins + custom tools + AI knows your patterns  
+Day 365:  a system that is uniquely yours
+
+No two elastik instances are alike.
+Because no two people are alike.
+```
+
+Code has no personality. `stage.db` does.
+Code is DNA. The database is a life lived.
+
+---
+
+## The emptiness
+
+```
+We removed RAG.
+We removed the LLM.
+We removed embeddings.
+We removed the component library.
+We removed card templates.
+We removed the HTML sanitizer.
+We removed NLI verification.
+We removed the friction gate.
+We removed the tabs.
+We removed the nav bar.
+We removed the UI.
 
 What's left:
-剩下的：
 
-  An HTTP server.             一个 HTTP 服务器。
-  An HTML file.               一个 HTML 文件。
-  Three SQLite files.         三个 SQLite 文件。
-  A hash function.            一个哈希函数。
-  An incrementing integer.    一个自增整数。
+  An iframe.
+  A polling loop.
+  Two SQLite files per world.
+  A hash function.
+  A version counter.
 
 本来无一物。
 ```
+
+---
+
+## Stack
+
+```
+Python:     fastapi + uvicorn
+Frontend:   one iframe
+Database:   SQLite (WAL mode)
+Protocol:   MCP (open standard)
+Signature:  HMAC-SHA256
+AI:         yours (Claude, Gemini, Llama, anything)
+
+Total: ~2000 lines. Dependencies: 2.
+```
+
+---
+
+## Name
+
+**elastik** — because the system takes whatever shape you need.
+
+**lucy** — the CLI. Named after our ancestor. One finger. Everything starts. Genesis.
 
 ---
 
