@@ -128,6 +128,27 @@ async def api_stage(stage_name: str):
     return get_stage_state(stage_name)
 
 
+@app.post("/api/{stage_name}/sync")
+async def api_sync(stage_name: str, request: Request):
+    """Receive DOM sync from iframe. Writes stage_html without broadcast."""
+    from pipeline.stage import _get_conn, _bump_version
+    from datetime import datetime, UTC
+    html = (await request.body()).decode("utf-8", errors="replace")
+    conn = _get_conn(stage_name)
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        conn.execute(
+            "UPDATE stage_meta SET stage_html = ?, updated_at = ? WHERE id = 1",
+            (html, datetime.now(UTC).isoformat()),
+        )
+        _bump_version(conn)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {"status": "ok"}
+
+
 @app.post("/api/csp/add")
 async def api_add_csp_domain(category: str, domain: str):
     from pipeline.gui_adapter import add_csp_domain
