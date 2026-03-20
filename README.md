@@ -22,12 +22,15 @@ See PROTOCOL.md for the formal specification.
 
 ## Install
 
-```
-pip install uvicorn
+pip install -r requirements.txt
 python server.py
-```
 
-Open `http://localhost:3004`. Empty. Say something to your AI.
+Or with Docker:
+
+docker compose up
+
+Open `http://localhost:3004`. Empty. 
+Say something to your AI.
 
 ---
 
