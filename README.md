@@ -23,6 +23,7 @@ See PROTOCOL.md for the formal specification.
 ## Install
 
 pip install -r requirements.txt
+
 python server.py
 
 Or with Docker:
