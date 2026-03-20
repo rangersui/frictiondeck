@@ -116,18 +116,38 @@ Nobody told it to. It chose to.
 
 ---
 
+
 ## Security
 
-The browser is a glass room. AI paints freely inside. It can't break the glass.
+Three layers. All physical. None semantic.
 
-* **iframe sandbox** — `allow-scripts allow-same-origin allow-popups`
-* **CSP** — `connect-src 'self'` — can only fetch localhost
-* **Approve token** — printed in terminal — AI doesn't have it
-* **HMAC chain** — every action logged, chain-linked, immutable
+**Layer 1 — iframe sandbox** (frontend)
 
-AI proposes. Human approves. If elastik destroys the world, a human handed over the key.
+AI paints freely inside. `connect-src 'self'` — can only fetch localhost.
 
----
+Worst case: refresh the page.
+
+**Layer 2 — Docker container** (backend)
+
+Server runs inside a container. AI can't touch the host.
+
+Worst case: `docker restart`.
+
+**Layer 3 — git merge** (evolution)
+
+AI edits code in dev container. Commits. Pushes.
+
+You review the diff. You merge. Or you don't.
+
+Worst case: `git revert`.
+
+**Approve token** — printed in terminal. AI doesn't have it.
+
+**HMAC chain** — every action logged, immutable.
+
+AI proposes. Human approves. If elastik destroys the world,
+
+a human handed over the key.
 
 ## Plugins
 
