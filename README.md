@@ -236,9 +236,10 @@ The MCP server has one tool: `http(method, path, body)`. It translates MCP calls
 ## Philosophy
 
 ```
-TCP/IP  1974  machine ↔ machine
-HTTP    1991  client ↔ server
-elastik 2026  human ↔ AI
+TCP/IP 1974 — machines talk to machines.
+HTTP 1991 — clients talk to servers.
+Bitcoin 2008 — money without banks.
+elastik 2026 — intelligence and tools belong to you.
 ```
 
 We didn't invent anything. HTTP was already there. SQLite was already there. HMAC was already there. iframe was already there. AI was already there.
