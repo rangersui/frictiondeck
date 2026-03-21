@@ -149,6 +149,16 @@ Worst case: `git revert`.
 
 **HMAC chain** — every action logged, immutable.
 
+The LLM itself is an untrusted HTTP client. 
+
+The same secruity principle that protects web servers from malicious broswers.
+
+The safety rule the web has followed for 30 years.
+
+LLM is just another client.
+
+NO new AI safety methods needed.
+
 AI proposes. Human approves. If elastik destroys the world,
 
 a human handed over the key.
