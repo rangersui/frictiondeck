@@ -1,0 +1,126 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "elastik",
+    "description": "A protocol for human-AI interaction. Read and write strings.",
+    "version": "1.0.0",
+    "license": {"name": "MIT"}
+  },
+  "servers": [{"url": "http://localhost:3004"}],
+  "paths": {
+    "/stages": {
+      "get": {
+        "summary": "List all stages",
+        "operationId": "listStages",
+        "responses": {
+          "200": {
+            "description": "Array of stages",
+            "content": {"application/json": {"schema": {"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string"}, "version": {"type": "integer"}, "updated_at": {"type": "string"}}}}}}
+          }
+        }
+      }
+    },
+    "/{name}/read": {
+      "get": {
+        "summary": "Read stage state",
+        "operationId": "readStage",
+        "parameters": [{"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {
+          "200": {
+            "description": "Stage state",
+            "content": {"application/json": {"schema": {"type": "object", "properties": {"stage_html": {"type": "string"}, "pending_js": {"type": "string"}, "js_result": {"type": "string"}, "version": {"type": "integer"}}}}}
+          }
+        }
+      }
+    },
+    "/{name}/write": {
+      "post": {
+        "summary": "Overwrite stage content",
+        "operationId": "writeStage",
+        "parameters": [{"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"text/plain": {"schema": {"type": "string"}}}},
+        "responses": {"200": {"description": "New version", "content": {"application/json": {"schema": {"type": "object", "properties": {"version": {"type": "integer"}}}}}}}
+      }
+    },
+    "/{name}/append": {
+      "post": {
+        "summary": "Append to stage content",
+        "operationId": "appendStage",
+        "parameters": [{"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"text/plain": {"schema": {"type": "string"}}}},
+        "responses": {"200": {"description": "New version", "content": {"application/json": {"schema": {"type": "object", "properties": {"version": {"type": "integer"}}}}}}}
+      }
+    },
+    "/{name}/sync": {
+      "post": {
+        "summary": "Sync stage content without version bump",
+        "operationId": "syncStage",
+        "parameters": [{"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"text/plain": {"schema": {"type": "string"}}}},
+        "responses": {"200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}}}}}}
+      }
+    },
+    "/{name}/pending": {
+      "post": {
+        "summary": "Write JS to command mailbox (browser evals it)",
+        "operationId": "setPending",
+        "parameters": [{"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"text/plain": {"schema": {"type": "string"}}}},
+        "responses": {"200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}}}}}}
+      }
+    },
+    "/{name}/result": {
+      "post": {
+        "summary": "Write JS result back from browser",
+        "operationId": "postResult",
+        "parameters": [{"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"text/plain": {"schema": {"type": "string"}}}},
+        "responses": {"200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}}}}}}
+      }
+    },
+    "/{name}/clear": {
+      "post": {
+        "summary": "Clear pending JS and result",
+        "operationId": "clearPending",
+        "parameters": [{"name": "name", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "responses": {"200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}}}}}}
+      }
+    },
+    "/webhook/{source}": {
+      "post": {
+        "summary": "Receive webhook from external service",
+        "operationId": "webhook",
+        "parameters": [{"name": "source", "in": "path", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"content": {"text/plain": {"schema": {"type": "string"}}}},
+        "responses": {"200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}}}}}}
+      }
+    },
+    "/plugins/propose": {
+      "post": {
+        "summary": "Propose a new plugin",
+        "operationId": "proposePlugin",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"name": {"type": "string"}, "code": {"type": "string"}, "description": {"type": "string"}, "permissions": {"type": "array", "items": {"type": "string"}}}}}}},
+        "responses": {"200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}}}}}}
+      }
+    },
+    "/plugins/approve": {
+      "post": {
+        "summary": "Approve a proposed plugin (requires X-Approve-Token header)",
+        "operationId": "approvePlugin",
+        "parameters": [{"name": "X-Approve-Token", "in": "header", "required": true, "schema": {"type": "string"}}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "properties": {"name": {"type": "string"}, "code": {"type": "string"}}}}}},
+        "responses": {
+          "200": {"description": "OK", "content": {"application/json": {"schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}}}}},
+          "403": {"description": "Invalid token"}
+        }
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "summary": "OpenAPI spec for this server",
+        "operationId": "getOpenAPI",
+        "responses": {"200": {"description": "OpenAPI JSON", "content": {"application/json": {}}}}
+      }
+    }
+  }
+}

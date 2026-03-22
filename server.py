@@ -5,9 +5,10 @@ from pathlib import Path
 DATA, PLUGINS = Path("data"), Path("plugins")
 KEY = os.getenv("ELASTIK_KEY", "elastik-dev-key").encode()
 TOKEN = secrets.token_hex(16)
-HOST = os.getenv("ELASTIK_HOST", "127.0.0.1")
+HOST = os.getenv("ELASTIK_HOST", "0.0.0.0")
 PORT = int(os.getenv("ELASTIK_PORT", "3004"))
 INDEX = Path(__file__).with_name("index.html").read_text()
+OPENAPI = Path(__file__).with_name("openapi.json").read_text()
 CSP = "default-src 'self' data: blob:; script-src 'unsafe-inline' 'unsafe-eval' https: data:; style-src 'unsafe-inline' https: data:; img-src * data: blob:; font-src * data:; connect-src 'self'"
 _db = {}
 
@@ -73,6 +74,9 @@ async def app(scope, receive, send):
         params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
         result = await _plugins[base_path](method, b, params)
         return await send_r(send, 200, json.dumps(result))
+
+    if method == "GET" and path == "/openapi.json":
+        return await send_r(send, 200, OPENAPI)
 
     if method == "GET" and path == "/stages":
         stages = []
