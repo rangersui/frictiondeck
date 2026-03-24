@@ -7,5 +7,4 @@ services:
     volumes:
       - ./data:/elastik/data
       - ./plugins:/elastik/plugins
-    environment:
-      - ELASTIK_HOST=0.0.0.0
+    env_file: .env

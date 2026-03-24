@@ -23,4 +23,6 @@ Desktop.ini
 # Misc
 screenshot_*.png
 nul
-plugins/fs.py
+# Installed plugins (only plugins/available/ is tracked)
+plugins/*.py
+plugins/mcp_tools/
