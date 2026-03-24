@@ -178,11 +178,6 @@ VS Code extension: `.elastikignore` — sensitive files never synced.
 Terminal output scrubbed — lines with passwords/tokens stripped.
 Opt-in required. Remote server warning on non-localhost.
 
-**Server hardening**
-- Request body capped at 5MB
-- World names restricted to `[a-zA-Z0-9_-]`
-- `ELASTIK_PUBLIC=true` to skip auth (local dev only)
-
 The LLM is an untrusted HTTP client.
 The same security principle that protects web servers from malicious browsers.
 30 years old. Still works.
@@ -281,25 +276,38 @@ data/                            universes
 ## Connect AI
 
 Any MCP-compatible client:
-
 ```json
 {
   "mcpServers": {
     "elastik": {
       "command": "python",
-      "args": ["path/to/mcp_server.py"]
+      "args": ["path/to/mcp_server.py"],
+      "env": {
+        "ELASTIK_TOKEN": "your-token"
+      }
     }
   }
 }
 ```
 
-The MCP server has one tool: http(method, path, body, headers).
+The MCP server has one tool: `http(method, path, body, headers)`.
 It translates MCP calls to HTTP requests.
 
 It also serves as a security layer: the auth token is injected
 from an environment variable. AI uses the key without seeing it.
 
-When AI can send HTTP directly, MCP stays
+Change `ELASTIK_URL` — AI connects to a different machine.
+No restart. No reconfiguration. No awareness.
+AI doesn't know where it is. It just writes strings.
+The pipe decides where the water flows.
+```
+localhost:3004          → your machine
+100.x.x.x:3004         → another machine via Tailscale
+your.domain.com:3004   → your server in the cloud
+```
+
+One tool. Any machine. Any universe.
+When AI can send HTTP directly, MCP stays —
 not as a translator, but as a token isolator.
 
 ---
