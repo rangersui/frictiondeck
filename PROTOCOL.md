@@ -49,6 +49,38 @@ POST /{name}/result    → writes to js_result
 POST /{name}/clear     → clears pending_js + js_result
 ```
 
+## Authentication
+
+All POST routes require `X-Auth-Token` header except:
+- `/{name}/sync` — browser writes back DOM state
+- `/{name}/result` — browser writes back JS execution result  
+- `/{name}/clear` — browser clears pending after consumption
+
+These three are exempt because the browser cannot access the token.
+The token is printed in terminal at startup.
+
+GET routes are public. No token needed to read.
+
+Set `ELASTIK_PUBLIC=true` environment variable to skip all auth checks.
+
+## Request limits
+
+- Request body capped at 5MB. Exceeding returns 413.
+- World names must match `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`. Invalid names return 400.
+
+## JSON body compatibility
+
+POST routes accept both raw strings and JSON.
+If the body starts with `{`, the server attempts to parse it as JSON
+and extracts the value from `body`, `content`, or `text` field.
+
+This allows tool-calling AI platforms (e.g. GPT Actions) 
+that can only send JSON to write strings without server modifications.
+
+curl sends raw string → works.
+MCP sends raw string → works.
+GPT Actions sends {"content": "hello"} → extracts "hello" → works.
+
 ### Infrastructure
 
 ```
@@ -90,13 +122,25 @@ Tampering with any event breaks the chain.
 
 ## Security
 
-- **iframe sandbox**: `allow-scripts allow-same-origin allow-popups`
-- **CSP**: `connect-src 'self'` — browser can only fetch localhost
-- **Approve token**: random, printed in terminal at startup, required for plugin approval
-- **HMAC chain**: immutable history
+- iframe sandbox: allow-scripts allow-same-origin allow-popups
+- CSP: connect-src 'self' — browser can only fetch localhost
+- X-Auth-Token: all POST routes authenticated (except sync/result/clear)
+- Approve token: printed in terminal, required for plugin approval
+- HMAC chain: immutable audit history
+- Body limit: 5MB max
+- World names: alphanumeric, dash, underscore only
+- Three mailboxes are independent: writing pending does not clear result
+
+Six layers of physical isolation:
+1. iframe sandbox — frontend containment
+2. Docker container — backend containment  
+3. Auth token — write permission control
+4. HMAC chain — tamper-evident audit
+5. git merge — evolution gating
+6. Client filtering — sensitive content exclusion
 
 AI cannot approve its own proposals. The token exists only in the terminal.
-This is not a rule. It is physics. The token is not in the iframe's universe.
+This is not a rule. It is physics.
 
 ## Plugins
 
