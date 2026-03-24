@@ -1,5 +1,5 @@
 """elastik — reference implementation. ~100 lines. One dependency."""
-import hashlib, hmac as _hmac, json, os, secrets, sqlite3
+import hashlib, hmac as _hmac, json, os, re, secrets, sqlite3
 from pathlib import Path
 
 DATA, PLUGINS = Path("data"), Path("plugins")
@@ -7,9 +7,12 @@ KEY = os.getenv("ELASTIK_KEY", "elastik-dev-key").encode()
 TOKEN = secrets.token_hex(16)
 HOST = os.getenv("ELASTIK_HOST", "0.0.0.0")
 PORT = int(os.getenv("ELASTIK_PORT", "3004"))
+PUBLIC = os.getenv("ELASTIK_PUBLIC", "").lower() in ("1", "true", "yes")
+MAX_BODY = 5 * 1024 * 1024  # 5MB
 INDEX = Path(__file__).with_name("index.html").read_text()
 OPENAPI = Path(__file__).with_name("openapi.json").read_text()
 CSP = "default-src 'self' data: blob:; script-src 'unsafe-inline' 'unsafe-eval' https: data:; style-src 'unsafe-inline' https: data:; img-src * data: blob:; font-src * data:; connect-src 'self'"
+_VALID_NAME = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
 _db = {}
 
 def conn(name):
@@ -85,10 +88,17 @@ def apply_patch(html, ops):
                 count += 1
     return html, count
 
+def check_auth(scope):
+    """Return True if request is authorized for writes."""
+    if PUBLIC: return True
+    tok = dict(scope.get("headers", [])).get(b"x-auth-token", b"").decode()
+    return tok == TOKEN
+
 async def recv(receive):
     b = b""
     while True:
         m = await receive(); b += m.get("body", b"")
+        if len(b) > MAX_BODY: raise ValueError("body too large")
         if not m.get("more_body"): return b
 
 async def send_r(send, status, data, ct="application/json", csp=False):
@@ -134,13 +144,17 @@ async def app(scope, receive, send):
         return await send_r(send, 200, json.dumps(stages))
 
     if method == "POST" and len(parts) == 2 and parts[0] == "webhook":
-        b = (await recv(receive)).decode("utf-8", "replace")
+        if not check_auth(scope): return await send_r(send, 403, '{"error":"unauthorized"}')
+        try: b = (await recv(receive)).decode("utf-8", "replace")
+        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
         log_event("default", "webhook_received", {"source": parts[1], "body": b})
         return await send_r(send, 200, '{"ok":true}')
 
     if method == "POST" and len(parts) == 2 and parts[0] == "plugins":
-        b = json.loads(await recv(receive))
+        try: b = json.loads(await recv(receive))
+        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
         if parts[1] == "propose":
+            if not check_auth(scope): return await send_r(send, 403, '{"error":"unauthorized"}')
             log_event("default", "plugin_proposed", b)
             return await send_r(send, 200, '{"ok":true}')
         if parts[1] == "approve":
@@ -153,11 +167,16 @@ async def app(scope, receive, send):
             return await send_r(send, 200, '{"ok":true}')
 
     if len(parts) == 2 and parts[1] in ("read","write","append","patch","pending","result","clear","sync"):
-        name, action = parts; c = conn(name)
+        name, action = parts
+        if not _VALID_NAME.match(name):
+            return await send_r(send, 400, '{"error":"invalid world name"}')
+        c = conn(name)
         if method == "GET" and action == "read":
             r = c.execute("SELECT stage_html,pending_js,js_result,version FROM stage_meta WHERE id=1").fetchone()
             return await send_r(send, 200, json.dumps(dict(r)))
-        b = (await recv(receive)).decode("utf-8", "replace")
+        if not check_auth(scope): return await send_r(send, 403, '{"error":"unauthorized"}')
+        try: b = (await recv(receive)).decode("utf-8", "replace")
+        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
         if action == "write":
             c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
             log_event(name, "stage_written", {"len": len(b)})
@@ -199,5 +218,6 @@ async def app(scope, receive, send):
 
 if __name__ == "__main__":
     load_plugins()
-    print(f"\n  elastik → http://{HOST}:{PORT}\n  approve token: {TOKEN}\n")
+    mode = "PUBLIC (no auth)" if PUBLIC else "AUTHENTICATED"
+    print(f"\n  elastik → http://{HOST}:{PORT}  [{mode}]\n  token: {TOKEN}\n")
     import uvicorn; uvicorn.run(app, host=HOST, port=PORT, log_level="warning")
