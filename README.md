@@ -284,6 +284,15 @@ not as a translator, but as a token isolator.
 
 ---
 
+## Roadmap
+
+- [ ] Read authentication — optional token for GET routes (public deploy hardening)
+- [ ] CORS configuration — restrict allowed origins
+- [ ] Rate limiting — per-IP request throttling
+- [ ] HTTPS — native TLS or reverse proxy guide
+- [ ] Token rotation — `lucy rotate-token` command
+- [ ] Access logging — IP, timestamp, route, status code
+
 ## Philosophy
 
 ```
