@@ -1,4 +1,4 @@
-"""File system plugin — read-only access to allowed directories.
+"""File system plugin — access to allowed directories.
 
 Install: lucy install fs
 Configure ALLOWED_DIRS before use.
@@ -7,9 +7,9 @@ Handler signature: async def handler(method, body, params) -> dict
 
 import os
 
-DESCRIPTION = "File system access (read only)"
+DESCRIPTION = "File system access (read + write)"
 ROUTES = {}
-ALLOWED_DIRS = [os.path.expanduser("~/Documents")]
+ALLOWED_DIRS = ["/elastik"]
 
 
 async def handle_list(method, body, params):
@@ -40,7 +40,18 @@ async def handle_read(method, body, params):
         with open(path, "r", encoding="utf-8") as f: content = f.read()
         return {"path": path, "content": content, "size": size}
     except UnicodeDecodeError: return {"error": "binary file"}
+    
+async def handle_write(method, body, params):
+    path = params.get("path", "")
+    if not path: return {"error": "path parameter required"}
+    path = os.path.abspath(path)
+    if not any(path.startswith(d) for d in ALLOWED_DIRS):
+        return {"error": "path not in allowed directories"}
+    content = body.decode("utf-8") if isinstance(body, bytes) else body
+    with open(path, "w", encoding="utf-8") as f: f.write(content)
+    return {"ok": True, "path": path, "size": len(content)}
 
+ROUTES["/proxy/fs/write"] = handle_write
 
 ROUTES["/proxy/fs/list"] = handle_list
 ROUTES["/proxy/fs/read"] = handle_read
