@@ -356,6 +356,16 @@ elastik-vscode       → Lucy in every editor tab
 - [elastik-extension](https://github.com/rangersui/elastik-extension) — Chrome extension, DOM sync, domain blacklist
 - [elastik-vscode](https://github.com/rangersui/elastik-vscode) — VS Code extension, editor context sync, .elastikignore
 
+## Ollama bridge
+
+See `scripts/ollama-bridge.py` for local LLM integration.
+
+```bash
+python scripts/ollama-bridge.py ask "draw a blue hello world" --world default
+python scripts/ollama-bridge.py chat --world default
+python scripts/ollama-bridge.py watch --world default
+```
+
 ## Integrate anything
 
 Any language. Any app. One POST.
