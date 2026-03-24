@@ -1,611 +1,133 @@
 {
-  "openapi": "3.0.3",
+  "openapi": "3.1.0",
   "info": {
     "title": "elastik",
-    "description": "A protocol for human-AI interaction. Read and write strings.",
-    "version": "1.0.0",
-    "license": {
-      "name": "MIT"
-    }
+    "description": "elastik API for GPT Actions. Read and write strings to worlds.",
+    "version": "1.0.0"
   },
   "servers": [
     {
-      "url": "http://localhost:3004"
+      "url": "https://gym-talent-base-connect.trycloudflare.com"
     }
   ],
   "paths": {
     "/stages": {
       "get": {
-        "summary": "List all stages",
         "operationId": "listStages",
+        "summary": "List all worlds",
         "responses": {
-          "200": {
-            "description": "Array of stages",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "name": {
-                        "type": "string"
-                      },
-                      "version": {
-                        "type": "integer"
-                      },
-                      "updated_at": {
-                        "type": "string"
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
+          "200": { "description": "Array of worlds with name, version, updated_at" }
         }
       }
     },
     "/{name}/read": {
       "get": {
-        "summary": "Read stage state",
         "operationId": "readStage",
+        "summary": "Read world state",
         "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
+          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
-          "200": {
-            "description": "Stage state",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "stage_html": {
-                      "type": "string"
-                    },
-                    "pending_js": {
-                      "type": "string"
-                    },
-                    "js_result": {
-                      "type": "string"
-                    },
-                    "version": {
-                      "type": "integer"
-                    }
-                  }
-                }
-              }
-            }
-          }
+          "200": { "description": "Returns stage_html, pending_js, js_result, version" }
         }
       }
     },
     "/{name}/write": {
       "post": {
-        "summary": "Overwrite stage content",
         "operationId": "writeStage",
+        "summary": "Overwrite world content",
+        "x-openai-isConsequential": true,
         "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
+          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "requestBody": {
           "required": true,
           "content": {
-            "text/plain": {
+            "application/json": {
               "schema": {
-                "type": "string"
+                "type": "object",
+                "properties": {
+                  "content": { "type": "string", "description": "The string to write to stage" }
+                },
+                "required": ["content"]
               }
             }
           }
         },
         "responses": {
-          "200": {
-            "description": "New version",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "version": {
-                      "type": "integer"
-                    }
-                  }
-                }
-              }
-            }
-          }
+          "200": { "description": "Returns new version number" }
         }
       }
     },
     "/{name}/append": {
       "post": {
-        "summary": "Append to stage content",
         "operationId": "appendStage",
+        "summary": "Append to world content",
+        "x-openai-isConsequential": true,
         "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
+          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "requestBody": {
           "required": true,
           "content": {
-            "text/plain": {
+            "application/json": {
               "schema": {
-                "type": "string"
+                "type": "object",
+                "properties": {
+                  "content": { "type": "string", "description": "The string to append to stage" }
+                },
+                "required": ["content"]
               }
             }
           }
         },
         "responses": {
-          "200": {
-            "description": "New version",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "version": {
-                      "type": "integer"
-                    }
-                  }
-                }
-              }
-            }
-          }
+          "200": { "description": "Returns new version number" }
         }
       }
     },
     "/{name}/sync": {
       "post": {
-        "summary": "Sync stage content without version bump",
         "operationId": "syncStage",
+        "summary": "Sync world content without version bump",
+        "x-openai-isConsequential": true,
         "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
+          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "requestBody": {
           "required": true,
           "content": {
-            "text/plain": {
+            "application/json": {
               "schema": {
-                "type": "string"
+                "type": "object",
+                "properties": {
+                  "content": { "type": "string", "description": "The string to sync to stage" }
+                },
+                "required": ["content"]
               }
             }
           }
         },
         "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/{name}/pending": {
-      "post": {
-        "summary": "Write JS to command mailbox (browser evals it)",
-        "operationId": "setPending",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "text/plain": {
-              "schema": {
-                "type": "string"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/{name}/result": {
-      "post": {
-        "summary": "Write JS result back from browser",
-        "operationId": "postResult",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "text/plain": {
-              "schema": {
-                "type": "string"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    }
-                  }
-                }
-              }
-            }
-          }
+          "200": { "description": "OK" }
         }
       }
     },
     "/{name}/clear": {
       "post": {
-        "summary": "Clear pending JS and result",
         "operationId": "clearPending",
+        "summary": "Clear pending JS and result mailboxes",
+        "x-openai-isConsequential": true,
         "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
+          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
         ],
         "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/webhook/{source}": {
-      "post": {
-        "summary": "Receive webhook from external service",
-        "operationId": "webhook",
-        "parameters": [
-          {
-            "name": "source",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "text/plain": {
-              "schema": {
-                "type": "string"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/plugins/propose": {
-      "post": {
-        "summary": "Propose a new plugin",
-        "operationId": "proposePlugin",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "name": {
-                    "type": "string"
-                  },
-                  "code": {
-                    "type": "string"
-                  },
-                  "description": {
-                    "type": "string"
-                  },
-                  "permissions": {
-                    "type": "array",
-                    "items": {
-                      "type": "string"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/plugins/approve": {
-      "post": {
-        "summary": "Approve a proposed plugin (requires X-Approve-Token header)",
-        "operationId": "approvePlugin",
-        "parameters": [
-          {
-            "name": "X-Approve-Token",
-            "in": "header",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "name": {
-                    "type": "string"
-                  },
-                  "code": {
-                    "type": "string"
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "OK",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "ok": {
-                      "type": "boolean"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "Invalid token"
-          }
-        }
-      }
-    },
-    "/openapi.json": {
-      "get": {
-        "summary": "OpenAPI spec for this server",
-        "operationId": "getOpenAPI",
-        "responses": {
-          "200": {
-            "description": "OpenAPI JSON",
-            "content": {
-              "application/json": {}
-            }
-          }
-        }
-      }
-    },
-    "/{name}/patch": {
-      "post": {
-        "summary": "Apply composable string operations to stage content",
-        "description": "Accepts a JSON body with an ops array. Each op transforms the stage string in sequence. Supported ops: insert, delete, replace, replace_all, slice, prepend, regex_replace.",
-        "operationId": "patchStage",
-        "parameters": [
-          {
-            "name": "name",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "ops": {
-                    "type": "array",
-                    "items": {
-                      "type": "object",
-                      "properties": {
-                        "op": {
-                          "type": "string",
-                          "enum": [
-                            "insert",
-                            "delete",
-                            "replace",
-                            "replace_all",
-                            "slice",
-                            "prepend",
-                            "regex_replace"
-                          ]
-                        },
-                        "pos": {
-                          "type": "integer",
-                          "description": "insert position (insert)"
-                        },
-                        "start": {
-                          "type": "integer",
-                          "description": "start index (delete, slice)"
-                        },
-                        "end": {
-                          "type": "integer",
-                          "description": "end index (delete, slice)"
-                        },
-                        "find": {
-                          "type": "string",
-                          "description": "string to find (replace, replace_all)"
-                        },
-                        "text": {
-                          "type": "string",
-                          "description": "replacement/insertion text"
-                        },
-                        "count": {
-                          "type": "integer",
-                          "description": "max replacements (replace, regex_replace)"
-                        },
-                        "pattern": {
-                          "type": "string",
-                          "description": "regex pattern (regex_replace)"
-                        }
-                      },
-                      "required": [
-                        "op"
-                      ]
-                    }
-                  }
-                },
-                "required": [
-                  "ops"
-                ]
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Patch result",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "version": {
-                      "type": "integer"
-                    },
-                    "applied": {
-                      "type": "integer",
-                      "description": "Number of ops successfully applied"
-                    },
-                    "length": {
-                      "type": "integer",
-                      "description": "Final string length"
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid JSON"
-          }
+          "200": { "description": "OK" }
         }
       }
     }
+  },
+  "components": {
+    "schemas": {}
   }
 }

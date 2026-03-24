@@ -177,9 +177,16 @@ async def app(scope, receive, send):
         if method == "GET" and action == "read":
             r = c.execute("SELECT stage_html,pending_js,js_result,version FROM stage_meta WHERE id=1").fetchone()
             return await send_r(send, 200, json.dumps(dict(r)))
-        if not check_auth(scope): return await send_r(send, 403, '{"error":"unauthorized"}')
+        if action not in ("sync", "result", "clear") and not check_auth(scope):
+            return await send_r(send, 403, '{"error":"unauthorized"}')
         try: b = (await recv(receive)).decode("utf-8", "replace")
         except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
+        # GPT Actions / any JSON client: extract string from wrapper
+        if b.startswith("{") and action != "patch":
+            try:
+                parsed = json.loads(b)
+                b = parsed.get("body") or parsed.get("content") or parsed.get("text") or b
+            except json.JSONDecodeError: pass
         if action == "write":
             c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
             log_event(name, "stage_written", {"len": len(b)})
