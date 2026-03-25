@@ -19,10 +19,10 @@ async def http(method: str, path: str, body: str = "", headers: str = "", timeou
     timeout: request timeout in seconds (default 30)
     """
     h = {}
-    if TOKEN:
-        h["X-Auth-Token"] = TOKEN
     if headers:
         h.update(json.loads(headers))
+    if TOKEN:
+        h["X-Auth-Token"] = TOKEN  # always last — AI cannot override
     async with httpx.AsyncClient(timeout=timeout) as c:
         r = await c.request(method, BASE + path, content=body if body else None, headers=h)
         return json.dumps({"status": r.status_code, "headers": dict(r.headers), "body": r.text})

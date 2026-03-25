@@ -75,7 +75,9 @@ def load_plugins():
                 _plugins[path] = handler; print(f"  plugin: {path}")
             if "AUTH_MIDDLEWARE" in ns:
                 _auth = ns["AUTH_MIDDLEWARE"]; print(f"  auth: {f.name}")
-            _plugin_meta.append({"name": f.stem, "description": ns.get("DESCRIPTION", ""), "routes": routes})
+            meta = {"name": f.stem, "description": ns.get("DESCRIPTION", ""), "routes": routes,
+                    "params": ns.get("PARAMS_SCHEMA", {}), "ops": ns.get("OPS_SCHEMA", [])}
+            _plugin_meta.append(meta)
         except Exception as e: print(f"  plugin {f.name} error: {e}")
 
 async def app(scope, receive, send):

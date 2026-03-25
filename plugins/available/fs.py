@@ -11,6 +11,34 @@ DESCRIPTION = "File system access (read + write)"
 ROUTES = {}
 ALLOWED_DIRS = ["/elastik"]
 
+PARAMS_SCHEMA = {
+    "/proxy/fs/list": {
+        "method": "POST",
+        "params": {
+            "path": {"type": "string", "required": False, "description": "Directory path, default '.'"}
+        },
+        "example": {"path": "./data"},
+        "returns": {"files": ["string"]}
+    },
+    "/proxy/fs/read": {
+        "method": "POST",
+        "params": {
+            "path": {"type": "string", "required": True, "description": "File path to read"}
+        },
+        "example": {"path": "server.py"},
+        "returns": {"content": "string"}
+    },
+    "/proxy/fs/write": {
+        "method": "POST",
+        "params": {
+            "path": {"type": "string", "required": True, "description": "File path to write"},
+            "content": {"type": "string", "required": True, "description": "File content"}
+        },
+        "example": {"path": "test.txt", "content": "hello"},
+        "returns": {"ok": "boolean"}
+    },
+}
+
 
 async def handle_list(method, body, params):
     path = params.get("path", "")

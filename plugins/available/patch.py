@@ -18,6 +18,36 @@ import json, re
 DESCRIPTION = "String operations: insert, delete, replace, prepend, slice, regex"
 ROUTES = {}
 
+PARAMS_SCHEMA = {
+    "/proxy/patch": {
+        "method": "POST",
+        "params": {
+            "world": {"type": "string", "required": True, "description": "Target world name"},
+            "ops": {"type": "array", "required": True, "description": "Array of operations"},
+        },
+        "example": {
+            "world": "default",
+            "ops": [{"op": "replace", "find": "old", "text": "new"}]
+        },
+        "returns": {"version": "int", "applied": "int", "length": "int"}
+    },
+}
+
+OPS_SCHEMA = [
+    {"op": "insert", "params": {"pos": "int", "text": "string"}},
+    {"op": "delete", "params": {"start": "int", "end": "int"}},
+    {"op": "replace", "params": {"find": "string", "text": "string (replacement)", "count": "int (default 1)"}},
+    {"op": "replace_all", "params": {"find": "string", "text": "string (replacement)"}},
+    {"op": "prepend", "params": {"text": "string"}},
+    {"op": "slice", "params": {"start": "int", "end": "int"}},
+    {"op": "regex_replace", "params": {"pattern": "string", "text": "string (replacement)", "count": "int (default 0 = all)"}},
+]
+
+
+def _txt(op):
+    """Get replacement text from op, accepting multiple field names."""
+    return op.get("text") or op.get("replace") or op.get("with") or op.get("value") or ""
+
 
 def apply_patch(html, ops):
     count = 0
@@ -25,23 +55,24 @@ def apply_patch(html, ops):
         t = op.get("op")
         if t == "insert":
             pos = max(0, min(op.get("pos", 0), len(html)))
-            html = html[:pos] + op.get("text", "") + html[pos:]; count += 1
+            html = html[:pos] + _txt(op) + html[pos:]; count += 1
         elif t == "delete":
             s, e = max(0, op.get("start", 0)), min(len(html), op.get("end", 0))
             html = html[:s] + html[e:]; count += 1
         elif t == "replace":
-            f, txt, n = op.get("find", ""), op.get("text", ""), op.get("count", 1)
-            if f: html = html.replace(f, txt, n); count += 1
+            f = op.get("find", "")
+            n = op.get("count", 1)
+            if f: html = html.replace(f, _txt(op), n); count += 1
         elif t == "replace_all":
-            f, txt = op.get("find", ""), op.get("text", "")
-            if f: html = html.replace(f, txt); count += 1
+            f = op.get("find", "")
+            if f: html = html.replace(f, _txt(op)); count += 1
         elif t == "slice":
             html = html[op.get("start", 0):op.get("end", len(html))]; count += 1
         elif t == "prepend":
-            html = op.get("text", "") + html; count += 1
+            html = _txt(op) + html; count += 1
         elif t == "regex_replace":
-            p, txt, n = op.get("pattern", ""), op.get("text", ""), op.get("count", 0)
-            if p: html = re.sub(p, txt, html, count=n); count += 1
+            p, n = op.get("pattern", ""), op.get("count", 0)
+            if p: html = re.sub(p, _txt(op), html, count=n); count += 1
     return html, count
 
 
