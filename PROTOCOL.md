@@ -17,23 +17,23 @@ Each world has one `universe.db` with two tables:
 
 ### stage_meta
 
-| Column | Type | Description |
-|---|---|---|
-| stage_html | TEXT | Main string. Browser renders this. |
-| pending_js | TEXT | Command string. Browser evals this. |
-| js_result | TEXT | Reply string. Browser writes this back. |
-| version | INTEGER | Increments on each write/append. |
-| updated_at | TEXT | Last modification timestamp. |
+| Column     | Type    | Description                             |
+| ---------- | ------- | --------------------------------------- |
+| stage_html | TEXT    | Main string. Browser renders this.      |
+| pending_js | TEXT    | Command string. Browser evals this.     |
+| js_result  | TEXT    | Reply string. Browser writes this back. |
+| version    | INTEGER | Increments on each write/append.        |
+| updated_at | TEXT    | Last modification timestamp.            |
 
 ### events
 
-| Column | Type | Description |
-|---|---|---|
-| timestamp | TEXT | When it happened. |
-| event_type | TEXT | What happened. |
-| payload | TEXT | Details (JSON string). |
-| hmac | TEXT | HMAC-SHA256(prev_hmac + payload). |
-| prev_hmac | TEXT | Previous event's HMAC. Chain link. |
+| Column     | Type | Description                        |
+| ---------- | ---- | ---------------------------------- |
+| timestamp  | TEXT | When it happened.                  |
+| event_type | TEXT | What happened.                     |
+| payload    | TEXT | Details (JSON string).             |
+| hmac       | TEXT | HMAC-SHA256(prev_hmac + payload).  |
+| prev_hmac  | TEXT | Previous event's HMAC. Chain link. |
 
 ## HTTP endpoints
 
@@ -98,6 +98,25 @@ Tampering with any event breaks the chain.
 AI cannot approve its own proposals. The token exists only in the terminal.
 This is not a rule. It is physics. The token is not in the iframe's universe.
 
+## Deployment modes
+
+Three modes. Three tradeoffs. You choose.
+
+```
+localhost      → sovereignty   → zero third-party trust → one device
+Tailscale      → freedom       → trust WireGuard        → your devices
+Cloudflare     → exposure      → trust Cloudflare       → the world
+```
+
+Each step outward trusts one more layer. Each step outward exposes one more layer.
+
+- `localhost`: data never leaves your network card. Your router, ISP, and cloud providers don't know elastik exists.
+- `Tailscale`: data is encrypted end-to-end via WireGuard. Only your devices can reach each other. No central server sees the content.
+- `Cloudflare Tunnel`: data is encrypted in transit but Cloudflare terminates TLS. Cloudflare can see the content. The world can reach your server (with auth).
+
+This is not a security flaw. It is a tradeoff.
+The protocol doesn't choose for you. You choose for yourself.
+
 ## Plugins
 
 A plugin is a Python file in `plugins/` that exports a `ROUTES` dict.
@@ -151,9 +170,10 @@ A protocol for human-AI interaction.
 
 Five rules describe concepts, not technologies.
 Any implementation that:
+
 - RECEIVES
 - TRANSPORTS
 - STORES
 - SIGNS
 - RENDERS STRINGS
-are elastik-compatible. 
+  are elastik-compatible.
