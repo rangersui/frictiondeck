@@ -152,6 +152,8 @@ def cmd_chat(args):
 # ── main ─────────────────────────────────────────────────────────────────
 
 def main():
+            # Apply overrides
+    global ELASTIK, OLLAMA, TOKEN, MODEL
     ap = argparse.ArgumentParser(prog="ollama-bridge", description="Connect Ollama to elastik")
     ap.add_argument("--elastik", default=ELASTIK, help="elastik URL")
     ap.add_argument("--ollama", default=OLLAMA, help="Ollama URL")
@@ -174,8 +176,7 @@ def main():
 
     args = ap.parse_args()
 
-    # Apply overrides
-    global ELASTIK, OLLAMA, TOKEN, MODEL
+
     ELASTIK = args.elastik
     OLLAMA = args.ollama
     TOKEN = args.token
