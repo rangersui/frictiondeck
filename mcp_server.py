@@ -7,7 +7,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("elastik")
-BASE = os.getenv("ELASTIK_URL", "http://localhost:3005")
+BASE = os.getenv("ELASTIK_URL", "http://localhost:3004")
 TOKEN = os.getenv("ELASTIK_TOKEN", "")
 CONFIG = Path(__file__).with_name("mcp_servers.json")
 

@@ -1,9 +1,3 @@
 {
-  "servers": {
-    "fs": {
-      "command": "npx",
-      "args": ["@modelcontextprotocol/server-filesystem", "C:\\Users\\chenh\\Downloads\\Digital logic Lab2"],
-      "description": "Filesystem: list_directory, read_file, write_file, create_directory, move_file"
-    }
-  }
+  "servers": {}
 }
