@@ -14,11 +14,12 @@ async def auth_middleware(scope, path, method):
     if path.startswith("/auth/"): return True
     # Plugin approve has its own token — let server.py handle it
     if path == "/plugins/approve": return True
-    # Admin routes = modify system = approve token required
-    if path.startswith("/admin/"):
+    # Admin + config worlds = modify system = approve token required
+    if path.startswith("/admin/") or (path.startswith("/config-") and method == "POST"):
         headers = dict(scope.get("headers", []))
         tok = headers.get(b"x-approve-token", b"").decode()
-        return tok == os.getenv("ELASTIK_TOKEN", "")
+        approve = os.getenv("ELASTIK_TOKEN", "")
+        return tok == approve if approve else True
 
     # Everything else — check X-Auth-Token
     token = os.getenv("ELASTIK_TOKEN", "")

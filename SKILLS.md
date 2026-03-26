@@ -338,6 +338,39 @@ Small model writes data every time (simple, may have typos).
 
 Not installed by default. Use `scripts/renderer.py install <name>`.
 
+## CDN Whitelist
+
+CSP script sources are configurable via /config-cdn world.
+
+Default: /config-cdn does not exist → all HTTPS sources allowed.
+Restricted: write domain names (one per line) to /config-cdn.
+
+```
+POST /config-cdn/write body:
+esm.sh
+cdn.jsdelivr.net
+unpkg.com
+cdnjs.cloudflare.com
+```
+
+→ Only these CDN domains can load scripts in the browser.
+→ Takes effect on next page load. No restart.
+→ Write empty string to /config-cdn to re-open all HTTPS.
+
+You (AI) should not modify /config-cdn.
+This is a security configuration. Human manages it.
+
+## Anchor convention
+
+When writing HTML to stage, embed comment anchors for stable patching:
+
+```html
+<!-- #section-name -->
+```
+
+Patch operations can then use short anchor strings instead of fragile long matches.
+This is a convention, not a requirement.
+
 ## Conventions (not rules)
 
 These are suggestions. The protocol treats all worlds equally.

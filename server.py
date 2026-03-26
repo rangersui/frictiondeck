@@ -11,7 +11,19 @@ MAX_BODY = 5 * 1024 * 1024
 INDEX = Path(__file__).with_name("index.html").read_text()
 OPENAPI = Path(__file__).with_name("openapi.json").read_text()
 SW = Path(__file__).with_name("sw.js").read_text()
-CSP = "default-src 'self' data: blob:; script-src 'unsafe-inline' 'unsafe-eval' https: data:; style-src 'unsafe-inline' https: data:; img-src * data: blob:; font-src * data:; connect-src 'self'; worker-src 'self'"
+def _csp():
+    cdn = "https:"
+    try:
+        if (DATA / "config-cdn").exists():
+            c = conn("config-cdn")
+            r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+            if r and r["stage_html"] and r["stage_html"].strip():
+                domains = [d.strip() for d in r["stage_html"].splitlines() if d.strip()]
+                cdn = " ".join(f"https://{d}" for d in domains)
+    except Exception: pass
+    return (f"default-src 'self' data: blob:; script-src 'unsafe-inline' 'unsafe-eval' {cdn} data:; "
+            f"style-src 'unsafe-inline' {cdn} data:; img-src * data: blob:; font-src * data:; "
+            f"connect-src 'self'; worker-src 'self'")
 _VALID_NAME = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
 _db = {}
 
@@ -58,7 +70,7 @@ async def recv(receive):
 
 async def send_r(send, status, data, ct="application/json", csp=False, extra_headers=None):
     h = [[b"content-type", ct.encode()]]
-    if csp: h.append([b"content-security-policy", CSP.encode()])
+    if csp: h.append([b"content-security-policy", _csp().encode()])
     if extra_headers: h.extend(extra_headers)
     await send({"type": "http.response.start", "status": status, "headers": h})
     await send({"type": "http.response.body", "body": data.encode() if isinstance(data, str) else data})
@@ -158,13 +170,21 @@ async def app(scope, receive, send):
             for d in sorted(DATA.iterdir()):
                 if d.is_dir() and (d / "universe.db").exists():
                     if d.name.startswith("renderer-"): renderers.append(d.name)
-                    else: worlds.append(d.name)
+                    elif not d.name.startswith("config-"): worlds.append(d.name)
+        cdn_raw = ""
+        try:
+            if (DATA / "config-cdn").exists():
+                r = conn("config-cdn").execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+                if r: cdn_raw = r["stage_html"]
+        except Exception: pass
+        cdn = [d.strip() for d in cdn_raw.splitlines() if d.strip()] if cdn_raw.strip() else ["* (all HTTPS)"]
         return await send_r(send, 200, json.dumps({
             "routes": list(_plugins.keys()),
             "auth": auth_name,
             "plugins": _plugin_meta,
             "renderers": renderers,
             "worlds": worlds,
+            "cdn": cdn,
             "skills": skills,
         }))
     if method == "GET" and path == "/stages":
