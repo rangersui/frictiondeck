@@ -63,3 +63,18 @@ AI calls GET /info → gets complete self-describing capability map → zero gue
 
 - `plugins/` → installed (loaded at startup)
 - `plugins/available/` → available (install via `lucy install <name>`)
+
+## Hot Plug
+
+Plugins support live loading and unloading.
+
+- `load_plugin(name)` — called by admin plugin or at startup
+- `unload_plugin(name)` — removes routes from memory, file stays
+- Plugins can be reloaded: unload + load = hot update
+
+Plugin code can access these functions via namespace injection:
+  `load_plugin`, `unload_plugin`, `_plugins`, `_plugin_meta`
+  `conn`, `log_event`
+
+Use with care. Loading a plugin with bugs won't crash the server
+(try/except), but may register broken routes.

@@ -216,6 +216,24 @@ GET /info → {routes, auth, plugins: [{name, description, routes, params}], ski
 
 One request. Full capability map. No guessing.
 
+## Hot Plug (you cannot do this)
+
+Plugins can be loaded and unloaded at runtime via `/admin/*` routes.
+These routes require the approve token, which you do not have.
+
+You cannot load plugins.
+You cannot unload plugins.
+You cannot modify system capabilities.
+
+If you need a new capability, propose a plugin:
+```
+POST /plugins/propose {"name": "...", "code": "...", "description": "..."}
+```
+
+The human decides whether to approve and install it.
+
+Do not attempt to call `/admin/*` routes. They will return 403.
+
 ## Renderers — front-end plugins
 
 Renderers separate data from display.

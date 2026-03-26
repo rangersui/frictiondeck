@@ -317,6 +317,26 @@ Each plugin exports ROUTES, DESCRIPTION, and optional PARAMS_SCHEMA.
 `GET /info` returns all plugin metadata. AI reads once, knows everything.
 See plugins/PLUGIN_SPEC.md for the full specification.
 
+## Hot Plug
+
+Load and unload plugins at runtime. No restart.
+
+```
+python scripts/admin-cli.py load fs       # activate filesystem plugin
+python scripts/admin-cli.py unload patch  # deactivate patch plugin
+python scripts/admin-cli.py list          # show all plugins
+python scripts/admin-cli.py interactive   # elastik> prompt
+```
+
+Or via HTTP:
+```
+POST /admin/load?name=fs
+POST /admin/unload?name=fs
+```
+
+First run: admin + auth auto-installed from plugins/available/.
+Protected by approve token. AI cannot modify its own capabilities.
+
 ## Connect AI
 
 Any MCP-compatible client:

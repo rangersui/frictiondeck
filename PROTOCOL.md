@@ -63,6 +63,25 @@ The approve token is the only hardcoded security.
 It protects plugin installation. It is printed in the terminal.
 AI cannot approve its own proposals.
 
+## Hot Plug
+
+Plugins can be loaded and unloaded at runtime without restarting the server.
+
+`load_plugin(name)` — loads a plugin from `plugins/{name}.py`.
+If not found, copies from `plugins/available/{name}.py` first.
+`unload_plugin(name)` — removes all routes registered by that plugin.
+File stays on disk. Next restart will reload it.
+
+The `/admin/*` routes are protected by the approve token,
+not the auth token. This is a constitutional boundary:
+
+- Auth token (`X-Auth-Token`): daily operations. AI has this.
+- Approve token (`X-Approve-Token`): system changes. Only human has this.
+
+Loading a plugin grants new capabilities to the system.
+Granting capabilities is a constitutional act.
+Constitutional acts require the approve token.
+
 ## Request limits
 
 - Request body capped at 5MB. Exceeding returns 413.
