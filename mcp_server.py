@@ -13,11 +13,11 @@ CONFIG = Path(__file__).with_name("mcp_servers.json")
 
 @mcp.tool()
 async def http(method: str, path: str, body: str = "", headers: str = "", timeout: int = 30) -> str:
-    """Send an HTTP request to the elastik server.
+    """elastik HTTP interface.
 
-    IMPORTANT: On first use, call GET /info to discover all capabilities,
-    plugins, worlds, renderers, and CDN whitelist. Then GET /stages for
-    the full world list. Read the skills field in /info for usage guide.
+    FIRST ACTION: call GET /info to discover all routes,
+    plugins, renderers, worlds, and skills.
+    Do this before any other operation.
 
     method: GET or POST
     path: e.g. /default/read, /default/write, /stages

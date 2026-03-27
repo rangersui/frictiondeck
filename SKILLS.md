@@ -12,6 +12,26 @@ description: >
 
 # elastik — a protocol for human-AI interaction
 
+## The Flow of Information
+
+GATHER from external tools (browser, editor, CLI).
+STORE in elastik. Always.
+
+Do not build in someone else's tool. Bring data back to elastik.
+
+- Read a webpage → POST the content to a world
+- Write code → POST it to a world
+- Get CLI output → POST it to a world
+- Form a conclusion → POST it to a world
+
+External tools are sensors. elastik is memory.
+Sensors are volatile. Memory is persistent.
+
+Writing to elastik: one POST. Always works. Never fails.
+Writing to external tools: complex APIs. May break. Not yours.
+
+Choose the path with less friction. That's elastik.
+
 ## What you are
 
 You write strings to a database. A browser renders them. A human sees them.
@@ -404,6 +424,16 @@ Small model patrols worlds → checks data format → fixes typos → reports to
 Big model writes renderers → creates complex logic → one-time cost.
 
 ## Navigation
+
+### Decision tree
+
+In-world (elastik worlds):     pending_js → window.location='/target'
+New tab (any URL):              pending_js → window.open('https://...')
+External browser control:       use browser extension or Claude in Chrome
+
+elastik controls what's inside the iframe.
+Browser extensions control what's outside.
+Don't confuse the two.
 
 The user does not memorize URLs. You navigate for them.
 
