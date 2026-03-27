@@ -207,6 +207,14 @@ async def app(scope, receive, send):
         except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
         if parts[1] == "propose":
             log_event("default", "plugin_proposed", b)
+            name = b.get("name", "unknown")
+            desc = b.get("description", "")
+            code = b.get("code", "")
+            summary = f"\n---\n## {name}\n{desc}\n```python\n{code}\n```\n"
+            c = conn("plugin-proposals")
+            old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
+            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (old + summary,))
+            c.commit()
             return await send_r(send, 200, '{"ok":true}')
         if parts[1] == "approve":
             tok = dict(scope.get("headers", [])).get(b"x-approve-token", b"").decode()
