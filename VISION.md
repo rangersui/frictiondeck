@@ -170,6 +170,42 @@ The Web3 industry spent hundreds of billions of dollars, built countless chains,
 
 235 lines of Python and one SQLite file may have solved it.
 
+## Isomorphic Agent Protocol
+
+Every client is the same pattern:
+  sensor → POST raw data to elastik
+  actuator → poll commands from elastik → execute → report result
+
+Browser extension: /browser-cmd → /browser-result
+VS Code extension: /vscode-cmd → /vscode-result
+IoT device: /device-cmd → /device-result
+CLI tool: /cli-cmd → /cli-result
+
+The command format is universal:
+  {"action":"...", ...params} → execute → {"status":"..."}
+
+Clients are dumb. Maximally thin. Never updated.
+Intelligence lives in universe.db and the AI pipeline.
+Clients are sensors and actuators. Nothing more.
+
+## Permission Inversion
+
+Trust comes from predictability, not intelligence.
+Fine-tuned local model: dumb but predictable → full permissions.
+Cloud model: smart but unpredictable → zero permissions.
+Loyalty > intelligence.
+
+## The Cabinet System
+
+Emperor (you): approve token. Final say.
+Minister (fine-tuned local): full auth. Routes, cleans, writes.
+General (Claude/GPT): zero auth. Pure compute. Doesn't know elastik exists.
+
+Minister reads /map. General reads what minister gives it.
+Minister costs nothing. General costs per token.
+Minister handles 90% of requests. General handles 10%.
+Over time, minister learns from general's outputs → general becomes unnecessary.
+
 ---
 
 *Don't put data on the internet. That's it.*
