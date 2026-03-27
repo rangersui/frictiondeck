@@ -112,9 +112,10 @@ Visit a path that doesn't exist → auto-created. Empty. Ready.
 
 ## Session start
 
-1. `GET /stages` — what worlds exist?
-2. `GET /{name}/read` — what's in the current world?
-3. Brief summary to user.
+1. `GET /info` — full capability map: plugins, worlds, renderers, CDN, skills.
+2. `GET /stages` — all worlds with version and last update.
+3. `GET /{name}/read` — current world state.
+4. Brief summary to user.
 
 ## Workflow
 
