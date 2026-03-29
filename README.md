@@ -1,6 +1,6 @@
-# elastik
+# Elastik
 
-A protocol for human-AI interaction.
+Anything-to-UI. A protocol that turns any string into interface.
 
 This repo is a reference implementation in Python.
 
@@ -397,6 +397,9 @@ elastik 2026 — intelligence and tools belong to you.
 We didn't invent anything. HTTP was already there. SQLite was already there. HMAC was already there. iframe was already there. AI was already there.
 
 We just removed everything else.
+
+An application-layer overlay network.
+Every protocol below is transparent transport.
 
 ---
 
