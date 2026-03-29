@@ -170,6 +170,23 @@ The Web3 industry spent hundreds of billions of dollars, built countless chains,
 
 235 lines of Python and one SQLite file may have solved it.
 
+## JIT at Every Layer
+
+elastik is just-in-time at every layer. Nothing exists until needed.
+
+- Worlds: not pre-created. Visit to create.
+- Plugins: not pre-loaded. Install to activate.
+- Renderers: not pre-installed. Declare to use.
+- CDN libraries: not pre-downloaded. Import to fetch.
+- MCP connections: not pre-opened. Call to connect.
+- AI context: not pre-loaded. Assemble per task.
+
+Default is empty. Need triggers existence. Removal restores emptiness.
+This is only possible because AI handles the "when" judgment.
+Without AI, humans can't manage JIT across 40+ worlds. With AI, it's natural.
+
+The protocol is JIT. AI is the runtime.
+
 ## Isomorphic Agent Protocol
 
 Every client is the same pattern:
@@ -205,6 +222,104 @@ Minister reads /map. General reads what minister gives it.
 Minister costs nothing. General costs per token.
 Minister handles 90% of requests. General handles 10%.
 Over time, minister learns from general's outputs → general becomes unnecessary.
+
+SKILLS.md is not for the general. It's for the minister to memorize.
+
+## Minimum Context Principle
+
+Give AI exactly enough to complete the current task. Not one token more.
+
+- Near-minister assembles context from /map and /knowledge
+- Sends general only the relevant data + one instruction
+- General never sees SKILLS.md, /map, or system architecture
+- General returns clean text. Minister wraps it into protocol.
+
+Less context = cheaper + less hallucination + less data leakage.
+Even if training is on, they only see one task's slice.
+
+## Cognitive Operating System
+
+Traditional OS manages hardware resources.
+elastik manages human intentions.
+
+  Unix process table → elastik /map
+  PID → world name
+  Round-robin scheduler → AI dispatcher (Ollama router)
+  System calls → HTTP POST
+  Filesystem → universe.db
+  Device drivers → plugins
+  Display server → renderers
+
+Operating systems were never meant to face hardware.
+They were meant to face humans.
+In 2026, AI finally made that possible.
+
+## Why Frameworks Existed
+
+Frameworks helped humans manage complexity.
+React managed UI state. Django managed HTTP routing. LangChain managed AI chains.
+
+AI doesn't need help managing complexity. AI writes strings directly.
+The premise of frameworks — "humans write code" — is disappearing.
+When the premise goes, the frameworks go.
+
+elastik is not a simpler framework. It's proof that frameworks are unnecessary
+when AI is the one writing strings.
+
+200 lines. Because the complexity moved from code to AI.
+
+## Business Model — The Linux Path
+
+The protocol is free. Configuration is valuable.
+
+Linux is free. Red Hat makes billions selling configured Linux.
+WordPress is free. Automattic makes billions selling hosted WordPress.
+elastik is free. The business is selling configured elastik.
+
+### What's free (MIT, forever)
+
+server.py + index.html + protocol.
+Anyone can run it. Anyone can extend it.
+The ecosystem grows because the core is free.
+
+### What's valuable
+
+1. Template empires — pre-configured universe.db
+   - Sensor monitoring (plugins + renderers + /map + alerts)
+   - Student workspace (notes + cheat sheets + task management)
+   - Freelancer toolkit (clients + invoices + projects)
+   - Each template = installed plugins + renderers + SKILLS.md + /map
+   - One download. Run server.py. Everything works.
+
+2. Hosted elastik — elastik.cloud
+   - Your universe.db in the cloud
+   - Tailscale auto-configured
+   - Automatic backups
+   - Monthly fee
+
+3. Fine-tuning service — "Your Minister"
+   - Run elastik for 3 months → accumulate events
+   - We fine-tune a local model that knows YOUR system
+   - Deliver a model that routes, cleans, formats — for free forever
+   - One-time fee
+
+4. Enterprise — The Full Cabinet
+   - Minister + dispatch + multi-universe federation
+   - ACL + audit + compliance reporting
+   - Dedicated support
+   - Annual license
+
+### Why this works
+
+Most people don't want sovereignty. They want convenience.
+They won't write SKILLS.md. They won't configure plugins.
+They won't train their own AI.
+
+But they'll pay someone who already did it.
+
+The product is not elastik.
+The product is a configured elastik that works out of the box.
+The protocol stays free. The configuration is the business.
 
 ---
 
