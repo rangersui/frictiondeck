@@ -115,8 +115,34 @@ def unload_plugin(name):
     if not meta: print(f"  not loaded: {name}"); return
     for r in meta["routes"]: _plugins.pop(r, None)
     if name == "auth" or "auth" in meta.get("description", "").lower(): _auth = None
+    _sync_actions_remove(name, meta["routes"])
     _plugin_meta[:] = [m for m in _plugin_meta if m["name"] != name]
     print(f"  unloaded: {name}")
+
+def _sync_actions_add(name):
+    """Register a plugin's routes in config-actions whitelist."""
+    meta = next((m for m in _plugin_meta if m["name"] == name), None)
+    if not meta or not meta["routes"]: return
+    c = conn("config-actions")
+    old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
+    existing = set(l.strip() for l in old.splitlines() if l.strip())
+    added = [r for r in meta["routes"] if r not in existing]
+    if added:
+        new = old.rstrip("\n") + "\n" + "\n".join(added) + "\n" if old.strip() else "\n".join(added) + "\n"
+        c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (new,))
+        c.commit()
+
+def _sync_actions_remove(name, routes):
+    """Remove a plugin's routes from config-actions whitelist."""
+    if not routes: return
+    try:
+        c = conn("config-actions")
+        old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
+        remove = set(routes)
+        lines = [l for l in old.splitlines() if l.strip() and l.strip() not in remove]
+        c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", ("\n".join(lines) + "\n" if lines else "",))
+        c.commit()
+    except Exception: pass
 
 
 def load_plugins():
@@ -222,7 +248,7 @@ async def app(scope, receive, send):
             n, code = b.get("name", ""), b.get("code", "")
             if n and code:
                 PLUGINS.mkdir(exist_ok=True); (PLUGINS / f"{n}.py").write_text(code)
-                load_plugin(n)
+                load_plugin(n); _sync_actions_add(n)
                 log_event("default", "plugin_approved", {"name": n})
             return await send_r(send, 200, '{"ok":true}')
 
