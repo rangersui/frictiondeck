@@ -119,7 +119,7 @@ The Lucy panel is an iframe injected by the extension pointing to `chrome-extens
 
 **The wall:** Connecting to external services requires their SDK, their format, their authentication dance. Notion API → Notion SDK. Slack API → Slack SDK. N services = N dependencies. Each one locks you deeper.
 
-**How elastik passes through:** One tool: `http(method, path, body, headers)`. Call Notion → `http("GET", "https://api.notion.com/...")`. Call Slack → `http("POST", "https://slack.com/api/...")`. Call Ollama → `http("POST", "http://localhost:11434/...")`. Same tool. No SDK. No dependency.
+**How elastik passes through:** One tool: `http(method, path, body, headers, target)`. The `target` parameter selects which elastik instance to hit — local, remote, cloud. Hot-pluggable via `endpoints.json`. Call Notion → `http("GET", "https://api.notion.com/...")`. Call a remote elastik → `http("GET", "/info", target="slim")`. Same tool. No SDK. No dependency. One AI, N machines.
 
 **Technical detail:** Every SaaS API is HTTP underneath. SDKs are convenience wrappers that create dependency. elastik skips the wrapper and speaks HTTP directly. `requests.post(url, headers, body)` is universal. Switch a SaaS → change the URL → code doesn't change.
 

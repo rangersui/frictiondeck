@@ -26,3 +26,5 @@ nul
 # Installed plugins (only plugins/available/ is tracked)
 plugins/*.py
 plugins/mcp_tools/
+
+llama-server/

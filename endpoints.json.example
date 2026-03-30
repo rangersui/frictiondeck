@@ -1,0 +1,6 @@
+{
+  "default": "http://localhost:3005",
+  "slim": "http://100.99.185.64:3005",
+  "home": "http://10.0.0.2:3005",
+  "cloud": "https://my-elastik.fly.dev"
+}

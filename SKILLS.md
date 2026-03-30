@@ -132,10 +132,11 @@ Visit a path that doesn't exist → auto-created. Empty. Ready.
 
 ## Session start
 
-1. `GET /info` — full capability map: plugins, worlds, renderers, CDN, skills.
-2. `GET /stages` — all worlds with version and last update.
-3. `GET /{name}/read` — current world state.
-4. Brief summary to user.
+1. `http(target="__list__")` — discover all connected elastik instances.
+2. `GET /info` — full capability map: plugins, worlds, renderers, CDN, skills.
+3. `GET /stages` — all worlds with version and last update.
+4. `GET /{name}/read` — current world state.
+5. Brief summary to user.
 
 ## Workflow
 
@@ -457,12 +458,32 @@ js_result   = what the browser tells you happened.
 
 Three mailboxes = complete control loop.
 
+## Multi-Target — one AI, many elastik instances
+
+The `http()` tool has a `target` parameter. Default: `"default"` (localhost).
+Targets are configured in `endpoints.json`. Hot-pluggable: edit the file,
+next call picks it up — zero restart.
+
+```
+http('GET', '/info', target='default')   → local machine
+http('GET', '/info', target='slim')      → another machine
+http('GET', '/stages', target='cloud')   → cloud instance
+http('GET', '/info', target='__list__')  → list all endpoints
+```
+
+One AI, one MCP bridge, N elastik instances. Bridge never changes.
+Endpoints are hot-pluggable. Same pattern as MCP server hot-plug.
+
+When operating across targets, always specify which target you're
+reading from or writing to. Don't mix data between instances
+without the user's explicit intent.
+
 ## MCP Aggregator
 
 If `mcp_servers.json` exists, external MCP servers are proxied.
-Each configured server becomes one tool (e.g. `fs`).
-Call: `fs(tool_name="read_file", arguments='{"path":"/etc/hosts"}')`
-Lazy connect on first call. No startup overhead.
+Use `mcp_call(server, tool_name, arguments)` as the universal gateway.
+Hot-pluggable: add/remove a server in the JSON, next call picks it up.
+Use `tool_name="__list__"` to discover available tools on a server.
 
 ## Renderer Security (Figma model)
 

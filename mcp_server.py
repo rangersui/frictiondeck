@@ -1,5 +1,9 @@
-"""elastik MCP aggregator. http() + proxy to configured MCP servers.
-   mcp_servers.json configures external servers. Empty by default.
+"""elastik MCP bridge — one bridge, everything behind it is hot-swappable.
+
+   http(target)   → multi-target elastik instances (endpoints.json, hot-plug)
+   mcp_call()     → external MCP servers (mcp_servers.json, hot-plug)
+
+   Bridge never restarts. Edit a JSON, next call picks it up.
 """
 import json, os, sys
 import httpx
@@ -7,32 +11,71 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("elastik")
-BASE = os.getenv("ELASTIK_URL", "http://localhost:3005")
 TOKEN = os.getenv("ELASTIK_TOKEN", "")
 CONFIG = Path(__file__).with_name("mcp_servers.json")
+ENDPOINTS = Path(__file__).with_name("endpoints.json")
+
+# ── HTTP endpoints hot-plug (same pattern as MCP hot-plug) ────────────────
+
+_endpoints = {}        # name → URL
+_endpoints_mtime = 0   # last mtime of endpoints.json
+_DEFAULT_BASE = os.getenv("ELASTIK_URL", "http://localhost:3005")
+
+def _reload_endpoints():
+    """Re-read endpoints.json if changed on disk. Fallback to env var."""
+    global _endpoints_mtime
+    if not ENDPOINTS.exists():
+        if "default" not in _endpoints:
+            _endpoints["default"] = _DEFAULT_BASE
+        return
+    try:
+        mt = ENDPOINTS.stat().st_mtime
+        if mt == _endpoints_mtime:
+            return
+        _endpoints_mtime = mt
+        data = json.loads(ENDPOINTS.read_text())
+        _endpoints.clear()
+        _endpoints.update(data)
+        # ensure default always exists
+        if "default" not in _endpoints:
+            _endpoints["default"] = _DEFAULT_BASE
+    except (json.JSONDecodeError, OSError):
+        pass
+
 
 @mcp.tool()
-async def http(method: str, path: str, body: str = "", headers: str = "", timeout: int = 30) -> str:
-    """elastik HTTP interface.
+async def http(method: str, path: str, body: str = "", headers: str = "",
+               target: str = "default", timeout: int = 30) -> str:
+    """elastik HTTP interface — hot-pluggable multi-target.
 
-    FIRST ACTION: call GET /info to discover all routes,
-    plugins, renderers, worlds, and skills.
-    Do this before any other operation.
+    FIRST ACTION: call GET /info to discover all routes.
+
+    Targets are configured in endpoints.json. Hot-pluggable: edit the file,
+    next call picks it up — zero restart. Use target="__list__" to see
+    all available endpoints.
 
     method: GET or POST
     path: e.g. /default/read, /default/write, /stages
     body: request body (for POST)
-    headers: JSON string of headers (optional), e.g. '{"X-Custom": "value"}'
+    headers: JSON string of headers (optional)
+    target: endpoint name from endpoints.json (default: "default")
+            use "__list__" to list all configured endpoints
     timeout: request timeout in seconds (default 30)
     """
+    _reload_endpoints()
+    if target == "__list__":
+        return json.dumps(_endpoints, indent=2)
+    if target not in _endpoints:
+        return json.dumps({"error": f"target '{target}' not in endpoints.json. available: {list(_endpoints.keys())}"})
+    base = _endpoints[target]
     h = {}
     if headers:
         h.update(json.loads(headers))
     if TOKEN:
         h["X-Auth-Token"] = TOKEN  # always last — AI cannot override
     async with httpx.AsyncClient(timeout=timeout) as c:
-        r = await c.request(method, BASE + path, content=body if body else None, headers=h)
-        return json.dumps({"status": r.status_code, "headers": dict(r.headers), "body": r.text})
+        r = await c.request(method, base + path, content=body if body else None, headers=h)
+        return json.dumps({"status": r.status_code, "target": target, "base": base, "headers": dict(r.headers), "body": r.text})
 
 
 # ── MCP aggregator — per-call connection to configured servers ────────────
@@ -134,9 +177,12 @@ async def mcp_call(server: str, tool_name: str, arguments: str = "{}") -> str:
 
 if __name__ == "__main__":
     _load_config()
+    _reload_endpoints()
     print(f"\n  elastik MCP aggregator", file=sys.stderr)
-    print(f"  http()  → elastik ({BASE})", file=sys.stderr)
+    print(f"  http targets:", file=sys.stderr)
+    for name, url in _endpoints.items():
+        print(f"    {name} → {url}", file=sys.stderr)
     for name in _configs:
-        print(f"  {name}()  → {name}", file=sys.stderr)
+        print(f"  mcp: {name}", file=sys.stderr)
     print(file=sys.stderr)
     mcp.run(transport="stdio")

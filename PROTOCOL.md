@@ -241,10 +241,15 @@ AI calls `GET /info` once. Knows all capabilities. No guessing.
 
 ## MCP Aggregator
 
-`mcp_server.py` proxies configured MCP servers.
-`mcp_servers.json` lists servers to connect.
-Each server becomes one tool. Lazy connect on first call.
-AI sees one MCP entry point with all tools aggregated.
+`mcp_server.py` is the single bridge between AI and elastik.
+Two hot-pluggable config files, both checked on every call:
+
+- `endpoints.json` — HTTP targets. `http(target="slim")` hits a remote elastik.
+  One AI, one bridge, N elastik instances. Edit the file, next call picks it up.
+- `mcp_servers.json` — external MCP servers. `mcp_call(server="email", ...)`
+  proxies to any stdio MCP server. Add/remove servers, next call picks it up.
+
+Bridge never restarts. Everything behind it is hot-swappable.
 
 ## That's it
 
