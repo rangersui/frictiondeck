@@ -75,7 +75,7 @@ async def http(method: str, path: str, body: str = "", headers: str = "",
         h["X-Auth-Token"] = TOKEN  # always last — AI cannot override
     async with httpx.AsyncClient(timeout=timeout) as c:
         r = await c.request(method, base + path, content=body if body else None, headers=h)
-        return json.dumps({"status": r.status_code, "target": target, "base": base, "headers": dict(r.headers), "body": r.text})
+        return json.dumps({"status": r.status_code, "target": target, "base": base, "body": r.text})
 
 
 # ── MCP aggregator — per-call connection to configured servers ────────────
