@@ -71,6 +71,7 @@ PARAMS_SCHEMA = {
 
 def _ollama(model, messages, think=False, timeout=120):
     """Call Ollama chat API."""
+    print(f"  ollama → {model} ({'think' if think else 'fast'})")
     payload = {"model": model, "messages": messages, "stream": False}
     if not think:
         payload["options"] = {"num_predict": 256}
@@ -130,6 +131,17 @@ async def handle_consult(method, body, params):
     if not selected:
         selected = ["map"]
 
+    # ── cache check ────────────────────────────────────────────────────
+    try:
+        cr = await _call("/proxy/cache/get", body=json.dumps({"key": question, "worlds": selected}).encode())
+        if cr.get("hit"):
+            print(f"  cache hit → skip ollama")
+            cached = json.loads(cr["value"]) if isinstance(cr["value"], str) else cr["value"]
+            cached["_cached"] = True
+            return cached
+    except Exception:
+        pass
+
     # 2. Read selected worlds
     context_parts = []
     for w in selected:
@@ -160,7 +172,13 @@ async def handle_consult(method, body, params):
             {"role": "system", "content": f"You are a knowledgeable advisor. Answer based on the following context:\n\n{context}"},
             {"role": "user", "content": question},
         ], think=True)
-        return {"answer": answer, "advisor": _config["advisor"], "chief": _config["chief"], "worlds_read": selected}
+        result = {"answer": answer, "advisor": _config["advisor"], "chief": _config["chief"], "worlds_read": selected}
+        # ── cache set ──────────────────────────────────────────────────
+        try:
+            await _call("/proxy/cache/set", body=json.dumps({"key": question, "value": json.dumps(result), "worlds": selected}).encode())
+        except Exception:
+            pass
+        return result
     except Exception as e:
         return {"error": str(e), "advisor": _config["advisor"], "chief": _config["chief"], "worlds_read": selected}
 

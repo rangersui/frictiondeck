@@ -3,7 +3,7 @@
 Install: lucy install admin
 Self-checks approve token. Does NOT rely solely on auth middleware.
 """
-import os, hmac as _hmac
+import os, json, hmac as _hmac
 
 DESCRIPTION = "Hot plug admin — load/unload/list plugins at runtime"
 ROUTES = {}
@@ -48,7 +48,11 @@ async def handle_load(method, body, params):
         return {"error": "unauthorized", "_status": 403}
     name = params.get("name", "")
     if not name and body:
-        name = body.decode().strip() if isinstance(body, bytes) else body.strip()
+        raw = body.decode().strip() if isinstance(body, bytes) else body.strip()
+        try:
+            name = json.loads(raw).get("name", raw)
+        except (json.JSONDecodeError, AttributeError):
+            name = raw
     if not name:
         return {"error": "name required"}
     load_plugin(name)
@@ -60,7 +64,11 @@ async def handle_unload(method, body, params):
         return {"error": "unauthorized", "_status": 403}
     name = params.get("name", "")
     if not name and body:
-        name = body.decode().strip() if isinstance(body, bytes) else body.strip()
+        raw = body.decode().strip() if isinstance(body, bytes) else body.strip()
+        try:
+            name = json.loads(raw).get("name", raw)
+        except (json.JSONDecodeError, AttributeError):
+            name = raw
     if not name:
         return {"error": "name required"}
     unload_plugin(name)

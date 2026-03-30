@@ -96,7 +96,13 @@ def load_plugin(name):
     if not f.exists():
         print(f"  not found: {name}"); return
     try:
-        ns = {"__file__": str(f), "_ROOT": Path(__file__).resolve().parent, "conn": conn, "log_event": log_event}
+        async def _call(route, method="POST", body=b"", params=None):
+            """Plugin service binding — call another plugin's handler directly."""
+            h = _plugins.get(route)
+            if not h: return {"error": f"route {route} not found"}
+            return await h(method, body, params or {})
+        ns = {"__file__": str(f), "_ROOT": Path(__file__).resolve().parent,
+              "conn": conn, "log_event": log_event, "_call": _call}
         if name == "admin":
             ns.update({"load_plugin": load_plugin, "unload_plugin": unload_plugin,
                         "_plugins": _plugins, "_plugin_meta": _plugin_meta})
@@ -188,6 +194,7 @@ def load_plugins():
 async def app(scope, receive, send):
     if scope["type"] != "http": return
     path = scope["path"].rstrip("/") or "/"; method = scope["method"]
+    print(f"  {method} {path}")
     raw = scope.get("raw_path", b"").decode("utf-8", "replace")
     if '..' in path or '//' in path or '..' in raw or '//' in raw:
         return await send_r(send, 400, '{"error":"invalid path"}')

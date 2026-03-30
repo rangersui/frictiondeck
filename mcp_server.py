@@ -5,8 +5,9 @@
 
    Bridge never restarts. Edit a JSON, next call picks it up.
 """
-import json, os, sys
-import httpx
+import json, os, sys, asyncio
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
@@ -73,9 +74,17 @@ async def http(method: str, path: str, body: str = "", headers: str = "",
         h.update(json.loads(headers))
     if TOKEN:
         h["X-Auth-Token"] = TOKEN  # always last — AI cannot override
-    async with httpx.AsyncClient(timeout=timeout) as c:
-        r = await c.request(method, base + path, content=body if body else None, headers=h)
-        return json.dumps({"status": r.status_code, "target": target, "base": base, "body": r.text})
+    def _do_request():
+        data = body.encode("utf-8") if body else None
+        req = Request(base + path, data=data, headers=h, method=method)
+        try:
+            resp = urlopen(req, timeout=timeout)
+            return json.dumps({"status": resp.status, "target": target, "base": base, "body": resp.read().decode()})
+        except HTTPError as e:
+            return json.dumps({"status": e.code, "target": target, "base": base, "body": e.read().decode()})
+        except URLError as e:
+            return json.dumps({"status": 0, "target": target, "base": base, "body": str(e.reason)})
+    return await asyncio.to_thread(_do_request)
 
 
 # ── MCP aggregator — per-call connection to configured servers ────────────

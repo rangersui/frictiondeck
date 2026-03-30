@@ -7,6 +7,7 @@ __pycache__/
 models/
 llama.cpp/
 llama-cpp-src/
+llama-server/
 results/
 claude_output/
 *.gguf

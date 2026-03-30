@@ -13,8 +13,8 @@ Env vars:
     OLLAMA_MODEL  (default qwen3:8b)
 """
 
-import os, sys, time
-import requests
+import os, sys, time, json
+from urllib.request import Request, urlopen
 
 ELASTIK = os.getenv("ELASTIK_URL", "http://localhost:3004")
 OLLAMA = os.getenv("OLLAMA_URL", "http://localhost:11434")
@@ -23,22 +23,23 @@ MODEL = os.getenv("OLLAMA_MODEL", "qwen3:8b")
 
 
 def read(world):
-    return requests.get(f"{ELASTIK}/{world}/read").json()
+    return json.loads(urlopen(f"{ELASTIK}/{world}/read").read())
 
 
 def write(world, content):
-    r = requests.post(f"{ELASTIK}/{world}/write", data=content.encode("utf-8"),
-                      headers={"X-Auth-Token": TOKEN} if TOKEN else {})
-    if r.status_code != 200:
-        print(f"Write failed: {r.status_code} {r.text}", file=sys.stderr)
+    h = {"X-Auth-Token": TOKEN} if TOKEN else {}
+    req = Request(f"{ELASTIK}/{world}/write", data=content.encode("utf-8"), headers=h, method="POST")
+    try:
+        urlopen(req)
+    except Exception as e:
+        print(f"Write failed: {e}", file=sys.stderr)
 
 
 def ask(prompt):
-    r = requests.post(f"{OLLAMA}/api/chat", json={
-        "model": MODEL, "stream": False,
-        "messages": [{"role": "user", "content": prompt}],
-    })
-    return r.json()["message"]["content"]
+    body = json.dumps({"model": MODEL, "stream": False,
+                       "messages": [{"role": "user", "content": prompt}]}).encode()
+    req = Request(f"{OLLAMA}/api/chat", data=body, headers={"Content-Type": "application/json"}, method="POST")
+    return json.loads(urlopen(req).read())["message"]["content"]
 
 
 def main():
