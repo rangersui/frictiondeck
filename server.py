@@ -1,12 +1,12 @@
 """elastik — reference implementation. ~300 lines. One dependency."""
-import hashlib, hmac as _hmac, json, os, re, secrets, sqlite3
+import hashlib, hmac as _hmac, json, os, re, secrets, sqlite3, sys
 from pathlib import Path
 
 DATA, PLUGINS = Path("data"), Path("plugins")
 KEY = os.getenv("ELASTIK_KEY", "elastik-dev-key").encode()
 AUTH_TOKEN = os.getenv("ELASTIK_TOKEN", "")
 APPROVE_TOKEN = os.getenv("ELASTIK_APPROVE_TOKEN", "") or secrets.token_hex(16)
-HOST = os.getenv("ELASTIK_HOST", "0.0.0.0")
+HOST = os.getenv("ELASTIK_HOST", "127.0.0.1")
 PORT = int(os.getenv("ELASTIK_PORT", "3004"))
 MAX_BODY = 5 * 1024 * 1024
 INDEX = Path(__file__).with_name("index.html").read_text()
@@ -80,6 +80,8 @@ _plugins, _auth, _plugin_meta = {}, None, []
 
 def load_plugin(name):
     """Load or reload a single plugin by name."""
+    if not _VALID_NAME.match(name):
+        print(f"  rejected invalid plugin name: {name}"); return
     global _auth
     f = PLUGINS / f"{name}.py"
     if not f.exists():
@@ -283,7 +285,7 @@ async def app(scope, receive, send):
             return await send_r(send, 200, '{"ok":true}')
         if parts[1] == "approve":
             tok = dict(scope.get("headers", [])).get(b"x-approve-token", b"").decode()
-            if tok != APPROVE_TOKEN: return await send_r(send, 403, '{"error":"invalid token"}')
+            if not _hmac.compare_digest(tok, APPROVE_TOKEN): return await send_r(send, 403, '{"error":"invalid token"}')
             n, code = b.get("name", ""), b.get("code", "")
             if n and code:
                 PLUGINS.mkdir(exist_ok=True); (PLUGINS / f"{n}.py").write_text(code)
@@ -306,8 +308,7 @@ async def app(scope, receive, send):
             log_event(name, "stage_written", {"len": len(b)})
             return await send_r(send, 200, json.dumps({"version": c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]}))
         if action == "append":
-            old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
-            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1",(old+b,)); c.commit()
+            c.execute("UPDATE stage_meta SET stage_html=stage_html||?,version=version+1,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
             log_event(name, "stage_appended", {"len": len(b)})
             return await send_r(send, 200, json.dumps({"version": c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]}))
         if action == "sync":
@@ -328,7 +329,11 @@ async def app(scope, receive, send):
 
 if __name__ == "__main__":
     load_plugins()
+    if not AUTH_TOKEN:
+        print("\n  ⚠ ELASTIK_TOKEN not set. Refusing to start in public mode.")
+        print("  Set ELASTIK_TOKEN in .env or environment.\n")
+        sys.exit(1)
     print(f"\n  elastik → http://{HOST}:{PORT}")
-    print(f"  auth token:    {'(not set — public mode)' if not AUTH_TOKEN else AUTH_TOKEN}")
+    print(f"  auth token:    {AUTH_TOKEN}")
     print(f"  approve token: {APPROVE_TOKEN}\n")
     import uvicorn; uvicorn.run(app, host=HOST, port=PORT, log_level="warning")

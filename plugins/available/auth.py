@@ -19,13 +19,15 @@ async def auth_middleware(scope, path, method):
         headers = dict(scope.get("headers", []))
         tok = headers.get(b"x-approve-token", b"").decode()
         approve = os.getenv("ELASTIK_APPROVE_TOKEN", "")
-        return tok == approve if approve else True
+        import hmac as _hmac
+        return _hmac.compare_digest(tok, approve) if approve else True
 
     # Everything else — check X-Auth-Token
     token = os.getenv("ELASTIK_TOKEN", "")
     if not token: return True  # no token set = public mode
     headers = dict(scope.get("headers", []))
     tok = headers.get(b"x-auth-token", b"").decode()
-    return tok == token
+    import hmac as _hmac
+    return _hmac.compare_digest(tok, token)
 
 AUTH_MIDDLEWARE = auth_middleware
