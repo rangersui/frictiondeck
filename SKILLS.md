@@ -390,6 +390,79 @@ cdnjs.cloudflare.com
 You (AI) should not modify /config-cdn.
 This is a security configuration. Human manages it.
 
+## Writing strategy — patch vs rewrite
+
+Check GET /info → `available` field for uninstalled plugins.
+If dom_patch is available but not loaded, recommend installing it.
+
+### When to use full rewrite (POST /{name}/write)
+
+- Creating a new world from scratch
+- Restructuring entire page layout
+- Content is short (<50 tokens)
+- No stable element IDs to target
+
+### When to use DOM patch (POST /proxy/dom-patch)
+
+- Updating one value in a large page (temperature, counter, status)
+- Adding/removing items in a list
+- Changing element attributes (class, style, data-*)
+- Any world with stable HTML structure and element IDs
+
+```json
+POST /proxy/dom-patch body:
+{
+  "world": "sensors",
+  "ops": [
+    {"op": "replace", "selector": "#temp-value", "html": "48.1°C"},
+    {"op": "attr", "selector": "#status", "attr": "class", "value": "red"},
+    {"op": "append", "selector": "#alerts", "html": "<li>Sensor offline</li>"},
+    {"op": "remove", "selector": "#old-alert"}
+  ]
+}
+```
+
+6 ops: replace, append, prepend, remove, attr, text.
+All ops atomic — all succeed or none applied.
+Requires plugin: `POST /admin/load?name=dom_patch` (needs approve token).
+
+**Rule: if the page has IDs and you're changing <30% of it, use dom_patch.**
+
+### When to use string patch (POST /proxy/patch)
+
+- Plain text or markdown worlds (no HTML structure)
+- Simple find-replace, regex, insert at position
+- Worlds using renderers (content is data, not HTML)
+
+### When to use translate (POST /translate)
+
+- Converting external HTML to markdown before storing
+- Converting markdown to HTML for display
+- Processing file uploads (docx/pdf → markdown, requires markitdown)
+
+```json
+POST /translate body:
+{"html": "<h1>Report</h1><p>Q1 results...</p>", "to": "markdown"}
+→ {"result": "# Report\nQ1 results...", "engine": "fallback"}
+```
+
+Requires plugin: `POST /admin/load?name=translate` (needs approve token).
+
+### Writing HTML for patchability
+
+When creating HTML pages, embed stable IDs for future patching:
+
+```html
+<div id="sensor-panel">
+  <span id="temp-value">--</span>
+  <span id="humidity-value">--</span>
+  <ul id="alerts"></ul>
+  <div id="status-light" class="gray">Unknown</div>
+</div>
+```
+
+First write: full HTML with IDs. All updates after: dom_patch only.
+
 ## Anchor convention
 
 When writing HTML to stage, embed comment anchors for stable patching:
