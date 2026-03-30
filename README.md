@@ -318,42 +318,35 @@ Approve token is in the terminal. AI can't see it. Physics, not policy.
 
 ## Self-Evolution
 
-~300 lines. Zero frameworks. AI reads the entire codebase in one context window.
+~675 lines. Zero frameworks. AI reads the entire codebase in one context window.
 
 ```bash
-
 python lucy.py evolve   # start dev container (port 3005)
-
 python lucy.py enter    # step inside
-
 python lucy.py deploy   # deploy to production
-
 python lucy.py logs     # watch
-
+```
 
 In the dev container, AI edits server.py, runs pytest, commits.
-
 You review the diff. You merge. New version goes live.
 
 Docker is the training ground. Production is deployment.
-
 git merge is the only approve button.
-```
 
 ## Files
 
 ```
-server.py          ~300 lines    the protocol
-index.html         ~15 lines     one iframe, one polling loop
-mcp_server.py      ~80 lines     MCP aggregator + HTTP adapter
-lucy.py            ~100 lines    CLI
+server.py          ~350 lines    the protocol
+index.html         ~25 lines     one iframe, one polling loop
+mcp_server.py      ~190 lines    MCP aggregator + HTTP adapter
+lucy.py            ~110 lines    CLI
 PROTOCOL.md                      formal spec
 SKILLS.md                        AI behavior guide
 plugins/                         route extensions
 data/                            universes
 ```
 
-~235 lines of code. One dependency: `uvicorn`.
+~675 lines of code. Dependencies: `uvicorn`, `mcp`, `httpx`, `requests`.
 
 ---
 
@@ -499,7 +492,7 @@ Every protocol below is transparent transport.
 
 ## Ecosystem
 ```
-elastik              → protocol + server (~300 lines)
+elastik              → protocol + server (~350 lines)
 elastik-extension    → Lucy in every browser tab
 elastik-vscode       → Lucy in every editor tab
 ```

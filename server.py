@@ -1,4 +1,4 @@
-"""elastik — reference implementation. ~300 lines. One dependency."""
+"""elastik — reference implementation. ~350 lines."""
 import hashlib, hmac as _hmac, json, os, re, secrets, sqlite3, sys
 from pathlib import Path
 
