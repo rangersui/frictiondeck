@@ -19,6 +19,32 @@ import json, re
 from html.parser import HTMLParser
 
 DESCRIPTION = "DOM-aware HTML patch with CSS selectors (zero deps)"
+SKILL = """\
+# Writing Strategy — DOM Patch
+
+POST /proxy/dom-patch body:
+{
+  "world": "status-page",
+  "ops": [
+    {"op": "replace", "selector": "#temp-value", "html": "48.1°C"},
+    {"op": "attr", "selector": "#status", "attr": "class", "value": "red"},
+    {"op": "append", "selector": "#alerts", "html": "<li>New alert</li>"},
+    {"op": "remove", "selector": "#old-item"}
+  ]
+}
+
+6 ops: replace, append, prepend, remove, attr, text.
+Atomic: all succeed or none applied.
+
+When creating HTML for patching, embed stable IDs:
+<div id="sensor-panel">
+  <span id="temp-value">--</span>
+  <ul id="alerts"></ul>
+</div>
+
+dom_patch is the downgrade path — not the daily driver.
+Use renderer + JSON data separation when possible (see /skills-data).
+"""
 ROUTES = {}
 
 PARAMS_SCHEMA = {

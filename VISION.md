@@ -266,7 +266,7 @@ When the premise goes, the frameworks go.
 elastik is not a simpler framework. It's proof that frameworks are unnecessary
 when AI is the one writing strings.
 
-200 lines. Because the complexity moved from code to AI.
+~300 lines. Because the complexity moved from code to AI.
 
 ## Business Model — The Linux Path
 

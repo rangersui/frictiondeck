@@ -1,4 +1,4 @@
-"""elastik — reference implementation. ~100 lines. One dependency."""
+"""elastik — reference implementation. ~300 lines. One dependency."""
 import hashlib, hmac as _hmac, json, os, re, secrets, sqlite3
 from pathlib import Path
 
@@ -20,7 +20,7 @@ def _csp():
             if r and r["stage_html"] and r["stage_html"].strip():
                 domains = [d.strip() for d in r["stage_html"].splitlines() if d.strip()]
                 cdn = " ".join(f"https://{d}" for d in domains)
-    except Exception: pass
+    except Exception as e: print(f"  warn: CDN config read failed: {e}")
     return (f"default-src 'self' data: blob:; script-src 'unsafe-inline' 'unsafe-eval' {cdn} data:; "
             f"style-src 'unsafe-inline' {cdn} data:; img-src * data: blob:; font-src * data:; "
             f"connect-src 'self'; worker-src 'self'")
@@ -105,6 +105,13 @@ def load_plugin(name):
         if "AUTH_MIDDLEWARE" in ns: _auth = ns["AUTH_MIDDLEWARE"]
         _plugin_meta.append({"name": name, "description": ns.get("DESCRIPTION", ""),
             "routes": routes, "params": ns.get("PARAMS_SCHEMA", {}), "ops": ns.get("OPS_SCHEMA", [])})
+        # Auto-create skills world from plugin SKILL field
+        skill_doc = ns.get("SKILL", "")
+        if skill_doc:
+            c = conn(f"skills-{name.replace('_', '-')}")
+            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (skill_doc,))
+            c.commit()
+            print(f"  skill: skills-{name.replace('_', '-')}")
         print(f"  loaded: {name} ({routes})")
     except Exception as e: print(f"  error loading {name}: {e}")
 
@@ -116,6 +123,15 @@ def unload_plugin(name):
     for r in meta["routes"]: _plugins.pop(r, None)
     if name == "auth" or "auth" in meta.get("description", "").lower(): _auth = None
     _sync_actions_remove(name, meta["routes"])
+    # Auto-clear skills world
+    skill_world = f"skills-{name.replace('_', '-')}"
+    try:
+        if (DATA / skill_world).exists():
+            c = conn(skill_world)
+            c.execute("UPDATE stage_meta SET stage_html='',version=version+1,updated_at=datetime('now') WHERE id=1")
+            c.commit()
+            print(f"  skill cleared: {skill_world}")
+    except Exception as e: print(f"  warn: skill cleanup failed for {skill_world}: {e}")
     _plugin_meta[:] = [m for m in _plugin_meta if m["name"] != name]
     print(f"  unloaded: {name}")
 
@@ -142,7 +158,7 @@ def _sync_actions_remove(name, routes):
         lines = [l for l in old.splitlines() if l.strip() and l.strip() not in remove]
         c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", ("\n".join(lines) + "\n" if lines else "",))
         c.commit()
-    except Exception: pass
+    except Exception as e: print(f"  warn: actions cleanup failed: {e}")
 
 
 def load_plugins():
@@ -188,8 +204,13 @@ async def app(scope, receive, send):
     if method == "GET" and path == "/sw.js": return await send_r(send, 200, SW, "application/javascript")
     if method == "GET" and path == "/info":
         skills = ""
-        sp = Path(__file__).with_name("SKILLS.md")
-        if sp.exists(): skills = sp.read_text()
+        try:
+            if (DATA / "skills-core").exists():
+                skills = conn("skills-core").execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
+        except Exception as e: print(f"  warn: skills-core read failed: {e}")
+        if not skills:
+            sp = Path(__file__).with_name("SKILLS.md")
+            if sp.exists(): skills = sp.read_text()
         auth_name = next((p["name"] for p in _plugin_meta if p["name"] == "auth" or "auth" in p.get("description","").lower()), None)
         renderers, worlds = [], []
         if DATA.exists():
@@ -202,7 +223,7 @@ async def app(scope, receive, send):
             if (DATA / "config-cdn").exists():
                 r = conn("config-cdn").execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
                 if r: cdn_raw = r["stage_html"]
-        except Exception: pass
+        except Exception as e: print(f"  warn: CDN config read failed: {e}")
         cdn = [d.strip() for d in cdn_raw.splitlines() if d.strip()] if cdn_raw.strip() else ["* (all HTTPS)"]
         available = []
         avail_dir = PLUGINS / "available"
@@ -217,6 +238,8 @@ async def app(scope, receive, send):
                             except Exception: pass
                             break
                     available.append({"name": f.stem, "description": desc})
+        skill_worlds = [d.name for d in sorted(DATA.iterdir())
+                        if d.is_dir() and d.name.startswith("skills-") and (d / "universe.db").exists()] if DATA.exists() else []
         return await send_r(send, 200, json.dumps({
             "routes": list(_plugins.keys()),
             "auth": auth_name,
@@ -224,6 +247,7 @@ async def app(scope, receive, send):
             "available": available,
             "renderers": renderers,
             "worlds": worlds,
+            "skill_worlds": skill_worlds,
             "cdn": cdn,
             "skills": skills,
         }))

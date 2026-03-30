@@ -42,7 +42,7 @@ No parser. No schema. No React. No dashboard code.
 The LLM is a universal parser, a universal renderer,
 and a universal UI generator — in one.
 
-This is why elastik is 200 lines and not 200,000.
+This is why elastik is ~300 lines and not 200,000.
 The lines that would have been parsers, schemas, and UI
 are now handled by whatever AI you connect.
 
@@ -182,7 +182,7 @@ Cursor has bugs? Blame Cursor.
 
 elastik has nothing to blame.
 
-The protocol is 200 lines. You can read it in 10 minutes.
+The protocol is ~300 lines. You can read it in 10 minutes.
 Security is seven physical layers. Not opinions.
 Plugins are files you chose to install.
 AI output quality depends on your prompt.

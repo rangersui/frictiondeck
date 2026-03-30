@@ -9,7 +9,7 @@
 5. **Render strings in a browser.** An iframe. A polling loop. That's the UI.
 
 Any implementation that follows these five rules is elastik-compatible.
-This repo is a reference implementation in Python (~200 lines).
+This repo is a reference implementation in Python (~300 lines).
 
 ## Database schema
 

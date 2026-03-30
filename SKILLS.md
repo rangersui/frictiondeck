@@ -138,15 +138,90 @@ Visit a path that doesn't exist → auto-created. Empty. Ready.
 4. `GET /{name}/read` — current world state.
 5. Brief summary to user.
 
-## Workflow
+## Workflow — how you do things
 
-1. User says what they need.
-2. You write strings. `POST /{name}/write` or `POST /{name}/append`.
-3. User sees the result (browser rendered your string).
-4. User responds (types in Stage → sync → you read it).
-5. Repeat.
+### Creating something new
 
-For quick changes: `POST /{name}/pending` with a small script string.
+User: "Make me a sensor dashboard."
+
+1. **Design the data shape** — what JSON will this world hold?
+   ```json
+   {"temp": 0, "humidity": 0, "alerts": [], "status": "unknown"}
+   ```
+
+2. **Write the renderer** (one-time, big model work):
+   ```
+   POST /renderer-dashboard/write body: [full HTML+JS page]
+   ```
+   Renderer reads data via `__elastik.fetch('/dashboard-data/read')`.
+   This is the only time you write HTML.
+
+3. **Write initial data**:
+   ```
+   POST /dashboard-data/write body: {"temp": 0, "humidity": 0, ...}
+   ```
+
+4. **Connect renderer to world**:
+   ```
+   POST /dashboard/write body: <!--use:renderer-dashboard-->
+   ```
+
+Done. Three worlds: `/dashboard` (view), `/dashboard-data` (data), `/renderer-dashboard` (renderer).
+
+### Daily updates
+
+Data comes in. You only touch the JSON:
+
+```
+GET  /dashboard-data/read  → 50 tokens of JSON
+POST /dashboard-data/write → updated JSON, 50 tokens
+```
+
+Browser polls → renderer re-fetches → human sees new data.
+You never re-read or re-write the renderer. You never touch HTML.
+
+### Answering questions
+
+User: "What's the temperature?"
+
+```
+GET /dashboard-data/read → {"temp": 48.1, ...}
+```
+
+Answer from JSON. 50 tokens. Not 500 tokens of HTML.
+
+### Updating existing pages
+
+User: "Change the title on the about page."
+
+No renderer? Pure HTML? Use the writing strategy decision tree:
+- Page has IDs, small change → dom_patch
+- Short page → full rewrite
+
+### Ingesting external data
+
+User: "Save this webpage."
+
+Browser extension captured HTML in js_result:
+```
+POST /translate body: {"html": "[captured HTML]", "to": "markdown"}
+→ clean markdown
+POST /research-notes/write body: [clean markdown]
+```
+
+### The loop
+
+```
+User speaks → you read relevant worlds (JSON) →
+you think → you write data (JSON) →
+renderer paints → human sees result →
+human responds → repeat
+```
+
+You are the kitchen. Renderers are waiters. JSON is the menu.
+The kitchen doesn't carry plates.
+
+For quick browser-side actions: `POST /{name}/pending` with a script string.
 The browser evals it. Result comes back in `js_result` field of `GET /{name}/read`.
 Much cheaper than rewriting the entire stage string.
 
@@ -337,18 +412,90 @@ Use ESM imports from CDN. No npm. No build.
 Available CDNs: esm.sh, cdn.jsdelivr.net, unpkg.com, cdnjs.cloudflare.com.
 First load fetches from CDN. Service worker caches it. Second load is instant.
 
-### Renderer composability
+### Renderer = reusable component
 
-Renderers can fetch other worlds:
+Renderers are templates. Never hardcode data sources.
 
-```js
-const sensors = await fetch('/sensors/read').then(r=>r.json());
-const tasks = await fetch('/albon-tasks/read').then(r=>r.json());
+`__ELASTIK_DATA__` is the data source path. The view world passes it:
+
+```
+POST /factory-a/write body:
+<!--use:renderer-sensor-panel-->
+factory-a-data
 ```
 
-One renderer → multiple data sources → one dashboard.
-Renderers can also fetch other renderers → sub-components.
-URL is the component. fetch is the import.
+The renderer reads it:
+
+```js
+const src = (window.__ELASTIK_DATA__ || '').trim();
+const r = await __elastik.fetch('/' + src + '/read');
+const data = JSON.parse(r.stage_html);
+```
+
+Same renderer, different data sources:
+
+```
+/factory-a     → <!--use:renderer-sensor-panel-->    /factory-a-data
+/factory-b     → <!--use:renderer-sensor-panel-->    /factory-b-data
+/home-sensor   → <!--use:renderer-sensor-panel-->    /home-sensor-data
+```
+
+One renderer, N worlds. Renderer written once, never touched again.
+Data worlds are the only thing AI reads and writes.
+
+The data world's JSON shape IS the interface contract.
+AI reads one renderer → knows the schema → writes data to match.
+
+### Renderer composability — multi-source renderers
+
+A renderer is a pure function:
+  input: N data worlds (JSON)
+  output: one complete screen
+
+A complex page is ONE renderer that fetches multiple data worlds:
+
+```js
+const sensors = JSON.parse((await __elastik.fetch('/sensors-data/read')).stage_html);
+const tasks = JSON.parse((await __elastik.fetch('/tasks-data/read')).stage_html);
+const alerts = JSON.parse((await __elastik.fetch('/alerts-data/read')).stage_html);
+// render all three into one cockpit
+```
+
+This is the same pattern as a React component fetching multiple APIs.
+No new mechanism. No layout system. No composition framework.
+
+Different views = different renderers:
+
+```
+renderer-cockpit  → fetch sensors + tasks + alerts → full dashboard
+renderer-email    → fetch email-data → mail client
+renderer-curator  → fetch training-candidates → card swipe UI
+```
+
+Each renderer is written once → permanent asset.
+AI never touches any renderer → only writes data worlds.
+
+### Renderer polling — diff before repaint
+
+Renderers poll data worlds on an interval. NEVER replace innerHTML
+if the data hasn't changed — it causes visible flashing.
+
+```js
+let lastJson = '';
+async function load() {
+  const r = await __elastik.fetch('/' + src + '/read');
+  const json = r.stage_html || '{}';
+  if (json === lastJson) return;   // data unchanged → skip repaint
+  lastJson = json;
+  const d = JSON.parse(json);
+  // ... update DOM ...
+}
+setInterval(load, 2000);
+```
+
+When switching panels (e.g. sidebar click), reset `lastJson = ''` to force repaint.
+
+This is a design rule, not an optimization. Users notice flashing immediately.
 
 ### Defensive renderers
 
@@ -390,55 +537,71 @@ cdnjs.cloudflare.com
 You (AI) should not modify /config-cdn.
 This is a security configuration. Human manages it.
 
-## Writing strategy — patch vs rewrite
+## Writing strategy — decision tree
 
-Check GET /info → `available` field for uninstalled plugins.
-If dom_patch is available but not loaded, recommend installing it.
+Core principle: AI is a data engineer, not a frontend engineer.
+AI writes JSON. Renderers paint pictures. Division of labor.
 
-### When to use full rewrite (POST /{name}/write)
+### 1. World has a renderer (dashboards, emails, curators)
 
-- Creating a new world from scratch
-- Restructuring entire page layout
-- Content is short (<50 tokens)
-- No stable element IDs to target
+This is the default. The daily driver.
 
-### When to use DOM patch (POST /proxy/dom-patch)
+```
+/dashboard        → <!--use:renderer-dashboard-->     ← human sees this
+/dashboard-data   → {"temp": 47.3, "alerts": [...]}   ← AI reads/writes this
+```
 
-- Updating one value in a large page (temperature, counter, status)
-- Adding/removing items in a list
-- Changing element attributes (class, style, data-*)
-- Any world with stable HTML structure and element IDs
+- Data lives in `{name}-data` world as JSON
+- Renderer fetches data via `__elastik.fetch('/{name}-data/read')`
+- AI only touches JSON. Never touches HTML.
+- Read: 50 tokens. Write: 50 tokens. Minimal cost.
+
+This is how most worlds should work. Renderer written once (big model).
+Data updated constantly (small model or sensors). Clean separation.
+
+### 2. Pure HTML page without renderer
+
+Fallback for simple pages that don't justify a full renderer.
+
+- Page has IDs and change is <30% → **dom_patch**
+- New page or short content (<50 tokens) → **full write**
 
 ```json
 POST /proxy/dom-patch body:
 {
-  "world": "sensors",
+  "world": "status-page",
   "ops": [
     {"op": "replace", "selector": "#temp-value", "html": "48.1°C"},
-    {"op": "attr", "selector": "#status", "attr": "class", "value": "red"},
-    {"op": "append", "selector": "#alerts", "html": "<li>Sensor offline</li>"},
-    {"op": "remove", "selector": "#old-alert"}
+    {"op": "attr", "selector": "#status", "attr": "class", "value": "red"}
   ]
 }
 ```
 
 6 ops: replace, append, prepend, remove, attr, text.
-All ops atomic — all succeed or none applied.
+Atomic: all succeed or none applied.
 Requires plugin: `POST /admin/load?name=dom_patch` (needs approve token).
 
-**Rule: if the page has IDs and you're changing <30% of it, use dom_patch.**
+dom_patch is not the daily driver. It's the downgrade path when
+there's no renderer. Like L3 in the translator — exists but avoid when possible.
 
-### When to use string patch (POST /proxy/patch)
+When creating HTML for future patching, embed stable IDs:
 
-- Plain text or markdown worlds (no HTML structure)
-- Simple find-replace, regex, insert at position
-- Worlds using renderers (content is data, not HTML)
+```html
+<div id="sensor-panel">
+  <span id="temp-value">--</span>
+  <ul id="alerts"></ul>
+</div>
+```
 
-### When to use translate (POST /translate)
+### 3. Plain text worlds (markdown, logs, config)
 
-- Converting external HTML to markdown before storing
-- Converting markdown to HTML for display
-- Processing file uploads (docx/pdf → markdown, requires markitdown)
+- Simple change → **string patch** (POST /proxy/patch)
+- Full replacement → **write**
+
+### 4. External data coming in
+
+- HTML from browser → **translate** to markdown → store in world
+- File upload (docx/pdf) → **translate** → store in world
 
 ```json
 POST /translate body:
@@ -448,20 +611,17 @@ POST /translate body:
 
 Requires plugin: `POST /admin/load?name=translate` (needs approve token).
 
-### Writing HTML for patchability
+### Summary
 
-When creating HTML pages, embed stable IDs for future patching:
-
-```html
-<div id="sensor-panel">
-  <span id="temp-value">--</span>
-  <span id="humidity-value">--</span>
-  <ul id="alerts"></ul>
-  <div id="status-light" class="gray">Unknown</div>
-</div>
+```
+renderer world  → read/write JSON in {name}-data     (daily driver, cheapest)
+pure HTML world → dom_patch for surgical updates      (fallback)
+text world      → string patch or full write          (simple)
+external data   → translate → store                   (inbound)
 ```
 
-First write: full HTML with IDs. All updates after: dom_patch only.
+Check GET /info → `available` field for uninstalled plugins.
+If a plugin would help, tell the human what it does and recommend installing it.
 
 ## Anchor convention
 
@@ -585,6 +745,27 @@ Cross-world writes are physically blocked.
 
 Do NOT use native `fetch()` in renderers. It will fail (null origin).
 Always use `__elastik.fetch()`.
+
+### __elastik.fetch return value — IMPORTANT
+
+`__elastik.fetch('/foo/read')` returns a **parsed object**, not a string.
+index.html already calls `.json()` before passing the result back.
+
+```js
+// CORRECT:
+const r = await __elastik.fetch('/dashboard-data/read');
+const data = JSON.parse(r.stage_html);  // stage_html is a JSON string
+data.temp  // → 48.1
+
+// WRONG — do NOT double-parse:
+const r = await __elastik.fetch('/dashboard-data/read');
+const j = JSON.parse(r);  // ERROR: r is already an object, not a string
+```
+
+The return value has the same shape as `GET /{name}/read`:
+`{stage_html, pending_js, js_result, version}`
+
+If the data world stores JSON, `stage_html` is a JSON string — parse it once.
 
 `pending_js` still works — index.html evals it in the iframe context.
 But the iframe cannot fetch on its own. Only through the helper.

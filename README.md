@@ -234,7 +234,7 @@ Approve token is in the terminal. AI can't see it. Physics, not policy.
 
 ## Self-Evolution
 
-~200 lines. Zero frameworks. AI reads the entire codebase in one context window.
+~300 lines. Zero frameworks. AI reads the entire codebase in one context window.
 
 ```bash
 
@@ -259,7 +259,7 @@ git merge is the only approve button.
 ## Files
 
 ```
-server.py          ~100 lines    the protocol
+server.py          ~300 lines    the protocol
 index.html         ~15 lines     one iframe, one polling loop
 mcp_server.py      ~80 lines     MCP aggregator + HTTP adapter
 lucy.py            ~100 lines    CLI
@@ -415,7 +415,7 @@ Every protocol below is transparent transport.
 
 ## Ecosystem
 ```
-elastik              → protocol + server (~200 lines)
+elastik              → protocol + server (~300 lines)
 elastik-extension    → Lucy in every browser tab
 elastik-vscode       → Lucy in every editor tab
 ```
