@@ -204,10 +204,24 @@ async def app(scope, receive, send):
                 if r: cdn_raw = r["stage_html"]
         except Exception: pass
         cdn = [d.strip() for d in cdn_raw.splitlines() if d.strip()] if cdn_raw.strip() else ["* (all HTTPS)"]
+        available = []
+        avail_dir = PLUGINS / "available"
+        if avail_dir.exists():
+            loaded = {m["name"] for m in _plugin_meta}
+            for f in sorted(avail_dir.glob("*.py")):
+                if f.stem not in loaded:
+                    desc = ""
+                    for line in f.read_text(encoding="utf-8").splitlines():
+                        if line.startswith("DESCRIPTION"):
+                            try: desc = line.split("=", 1)[1].strip().strip('"').strip("'")
+                            except Exception: pass
+                            break
+                    available.append({"name": f.stem, "description": desc})
         return await send_r(send, 200, json.dumps({
             "routes": list(_plugins.keys()),
             "auth": auth_name,
             "plugins": _plugin_meta,
+            "available": available,
             "renderers": renderers,
             "worlds": worlds,
             "cdn": cdn,
