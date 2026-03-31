@@ -60,6 +60,38 @@ Open `http://localhost:3004`. Empty. Say something to your AI.
 
 </details>
 
+<details>
+<summary>Zero-dependency mode</summary>
+
+No pip, no install. Just Python:
+
+```bash
+python server.py
+```
+
+Falls back to a built-in ASGI server if uvicorn is missing.
+Works on iOS (a-Shell), Android (Termux), or any device with Python 3.8+.
+
+</details>
+
+<details>
+<summary>Single-file distribution (.pyz)</summary>
+
+```bash
+python scripts/build-pyz.py    # build dist/elastik.pyz (113 KB)
+```
+
+Run anywhere:
+
+```bash
+python elastik.pyz             # first run: extract + start
+python elastik.pyz             # subsequent: just start
+```
+
+The entire system in one file. PEP 441.
+
+</details>
+
 ## Configuration
 
 Create a `.env` file (copy from `.env.example`):
