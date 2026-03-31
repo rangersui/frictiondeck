@@ -315,6 +315,7 @@ async def app(scope, receive, send):
             tok = dict(scope.get("headers", [])).get(b"x-approve-token", b"").decode()
             if not _hmac.compare_digest(tok, APPROVE_TOKEN): return await send_r(send, 403, '{"error":"invalid token"}')
             n, code = b.get("name", ""), b.get("code", "")
+            if n and not _VALID_NAME.match(n): return await send_r(send, 400, '{"error":"invalid plugin name"}')
             if n and code:
                 PLUGINS.mkdir(exist_ok=True); (PLUGINS / f"{n}.py").write_text(code)
                 load_plugin(n); _sync_actions_add(n)
@@ -369,10 +370,39 @@ def _sync_dir(directory, glob_pattern, world_name_fn, label):
             c.commit()
             print(f"  {label}: synced {name}")
 
+def _sync_map():
+    """Sync map.md + append undocumented worlds. map.md is source of truth."""
+    f = Path(__file__).resolve().parent / "map.md"
+    if not f.exists(): return
+    text = f.read_text(encoding="utf-8")
+    # Parse documented world names from map.md
+    documented = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#"):
+            name = stripped.split("—")[0].split("–")[0].strip()
+            if name: documented.add(name)
+    # Find all worlds, append undocumented ones
+    suffix = ""
+    for db in sorted(DATA.iterdir()) if DATA.exists() else []:
+        if db.is_dir() and db.name not in documented:
+            suffix += f"{db.name:<21}— (undocumented)\n"
+    content = text.rstrip("\n") + "\n"
+    if suffix:
+        content += suffix
+    # Write to map world if changed
+    c = conn("map")
+    old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+    if old["stage_html"] != content:
+        c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (content,))
+        c.commit()
+        print(f"  map: synced ({len(documented)} documented" + (f", {suffix.count(chr(10))} undocumented)" if suffix else ")"))
+
 if __name__ == "__main__":
     load_plugins()
     _sync_dir("skills", "*.md", lambda f: f"skills-{f.stem}", "skills")
     _sync_dir("renderers", "renderer-*.html", lambda f: f.stem, "renderers")
+    _sync_map()
     if not AUTH_TOKEN:
         print("\n  ⚠ ELASTIK_TOKEN not set. Refusing to start in public mode.")
         print("  Set ELASTIK_TOKEN in .env or environment.\n")

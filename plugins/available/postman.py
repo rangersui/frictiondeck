@@ -67,6 +67,8 @@ async def handle_postman(method, body, params):
     url = params.get("url") or b.get("url", "")
     if not url:
         return {"error": "url required", "container": _in_container}
+    if not url.startswith(("http://", "https://")):
+        return {"error": "only http/https allowed", "container": _in_container}
     host = urlparse(url).hostname or ""
     if not _config["hosts"]:
         return {"error": "no allowed hosts configured. Set postman.json or POSTMAN_HOSTS env var", "container": _in_container}

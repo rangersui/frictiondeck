@@ -48,6 +48,8 @@ def _safe_path(path):
     resolved = str(Path(os.path.abspath(path)).resolve())
     if not any(Path(resolved).is_relative_to(Path(d).resolve()) for d in ALLOWED_DIRS):
         return None, "path not in allowed directories"
+    if Path(resolved).is_relative_to(Path(__file__).resolve().parents[1]):
+        return None, "plugins directory is restricted"
     return resolved, None
 
 
