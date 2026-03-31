@@ -30,4 +30,4 @@ nul
 plugins/*.py
 plugins/mcp_tools/
 
-llama-server/
+llama-server/dist/
