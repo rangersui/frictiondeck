@@ -13,6 +13,7 @@ _MCAST_GROUP = "224.0.251.99"
 _PORT = 3006
 _NODE = os.getenv("ELASTIK_NODE", socket.gethostname())
 _APP_PORT = int(os.getenv("ELASTIK_PORT", "3004"))
+_SEED_PEERS = [ip.strip() for ip in os.getenv("ELASTIK_PEERS", "").split(",") if ip.strip()]
 _peers = {}  # ip -> {name, port, version, last_seen}
 _sock = None
 
@@ -38,10 +39,15 @@ def _broadcast():
     # Fallback: broadcast
     try: _sock.sendto(msg, ("255.255.255.255", _PORT))
     except OSError: pass
-    # Unicast reply to known peers (iOS can't send multicast)
-    for ip in list(_peers):
+    # Seed peers: containers, cloud, cross-subnet
+    for ip in _SEED_PEERS:
         try: _sock.sendto(msg, (ip, _PORT))
         except OSError: pass
+    # Unicast reply to known peers (iOS can't send multicast)
+    for ip in list(_peers):
+        if ip not in _SEED_PEERS:
+            try: _sock.sendto(msg, (ip, _PORT))
+            except OSError: pass
 
 
 def _collect():
