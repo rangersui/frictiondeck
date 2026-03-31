@@ -32,6 +32,8 @@ td:first-child{color:#aaa;width:80px}
 .via{font-size:11px;color:#557;font-style:italic}
 .c-gossip{background:#161616;border:1px solid #222a3a;border-radius:8px;padding:16px}
 .dot-via{background:#47a}
+.tag{display:inline-block;background:#1a2a1a;color:#4a4;padding:2px 6px;border-radius:3px;font-size:11px;margin:2px}
+.caps{margin-top:8px}
 </style>
 </head><body>
 <h1>peer discovery</h1>
@@ -84,7 +86,10 @@ async function submitTrust() {
 
 function render(d) {
   if (!d || !d.node) return;
-  document.getElementById('sub').textContent = 'this node: ' + d.node + ' :' + d.port;
+  const myCaps = d.caps || {};
+  const myPlugins = (myCaps.plugins || []).filter(p => p !== 'auth');
+  document.getElementById('sub').textContent = 'this node: ' + d.node + ' :' + d.port
+    + (myPlugins.length ? ' -- ' + myPlugins.join(', ') : '');
   const grid = document.getElementById('grid');
   const peers = d.peers || {};
   const known = d.known || {};
@@ -110,6 +115,7 @@ function render(d) {
       + '<tr><td>version</td><td>' + (p.version || '?') + '</td></tr>'
       + '<tr><td>seen</td><td>' + (p.ago || 0) + 's ago</td></tr>'
       + '</table>'
+      + (p.plugins && p.plugins.length ? '<div class="caps">' + p.plugins.filter(function(x){return x!=='auth'}).map(function(x){return '<span class="tag">'+x+'</span>'}).join('') + '</div>' : '')
       + '<button class="btn" id="' + bid + '" onclick="openTrust(\'' + ip + '\',' + p.port + ',\'' + (p.name || ip).replace(/'/g, "\\'") + '\')">trust and connect</button>'
       + '</div>';
   }
@@ -129,6 +135,7 @@ function render(d) {
         + '<tr><td>port</td><td>' + p.port + '</td></tr>'
         + '<tr><td>version</td><td>' + (p.version || '?') + '</td></tr>'
         + '</table>'
+        + (p.plugins && p.plugins.length ? '<div class="caps">' + p.plugins.filter(function(x){return x!=='auth'}).map(function(x){return '<span class="tag">'+x+'</span>'}).join('') + '</div>' : '')
         + '<button class="btn" id="' + bid + '" onclick="openTrust(\'' + ip + '\',' + p.port + ',\'' + (p.name || ip).replace(/'/g, "\\'") + '\')">trust and connect</button>'
         + '</div>';
     }
