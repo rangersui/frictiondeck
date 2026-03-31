@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html><head>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#0a0a0a;color:#e0e0e0;font:14px/1.6 'SF Mono',Consolas,monospace;padding:24px}
+h1{font-size:18px;color:#fff;margin-bottom:6px;font-weight:500}
+.sub{color:#666;font-size:12px;margin-bottom:20px}
+.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px}
+.c{background:#161616;border:1px solid #2a2a2a;border-radius:8px;padding:16px}
+.c h2{font-size:13px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;font-weight:400}
+.self{border-color:#2a4a2a}
+table{width:100%;border-collapse:collapse;font-size:13px}
+td{padding:6px 8px;border-bottom:1px solid #222}
+td:first-child{color:#aaa;width:80px}
+.dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px}
+.dot-on{background:#4a4}.dot-off{background:#a44}
+.name{font-size:16px;color:#fff;font-weight:600}
+.btn{background:#1a2a1a;color:#4a4;border:1px solid #2a4a2a;border-radius:4px;padding:6px 14px;cursor:pointer;font:13px/1 'SF Mono',Consolas,monospace;margin-top:10px}
+.btn:hover{background:#2a3a2a}
+.btn-done{background:#161616;color:#666;border-color:#333;cursor:default}
+.empty{color:#666;text-align:center;padding:40px}
+.ts{text-align:right;color:#444;font-size:11px;margin-top:16px}
+.modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.7);z-index:10;align-items:center;justify-content:center}
+.modal.show{display:flex}
+.modal-box{background:#1a1a1a;border:1px solid #333;border-radius:8px;padding:24px;width:340px}
+.modal-box h3{color:#fff;font-size:15px;margin-bottom:16px;font-weight:500}
+.modal-box input{width:100%;background:#0a0a0a;border:1px solid #333;border-radius:4px;padding:8px 10px;color:#e0e0e0;font:13px/1.4 'SF Mono',Consolas,monospace;margin-bottom:12px}
+.modal-box input:focus{outline:none;border-color:#4a4}
+.modal-row{display:flex;gap:8px;justify-content:flex-end}
+.btn-cancel{background:#222;color:#888;border:1px solid #333;border-radius:4px;padding:6px 14px;cursor:pointer;font:13px/1 'SF Mono',Consolas,monospace}
+</style>
+</head><body>
+<h1>peer discovery</h1>
+<div class="sub" id="sub"></div>
+<div class="g" id="grid"></div>
+<div class="ts" id="ts"></div>
+
+<div class="modal" id="modal">
+  <div class="modal-box">
+    <h3 id="modal-title">trust peer</h3>
+    <input id="modal-token" type="password" placeholder="paste peer auth token">
+    <div class="modal-row">
+      <button class="btn-cancel" onclick="closeModal()">cancel</button>
+      <button class="btn" onclick="submitTrust()">trust</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let _trustTarget = null;
+
+function closeModal() {
+  document.getElementById('modal').classList.remove('show');
+  document.getElementById('modal-token').value = '';
+  _trustTarget = null;
+}
+
+function openTrust(ip, port, name) {
+  _trustTarget = {ip, port, name};
+  document.getElementById('modal-title').textContent = 'trust ' + name + ' (' + ip + ')';
+  document.getElementById('modal').classList.add('show');
+  document.getElementById('modal-token').focus();
+}
+
+async function submitTrust() {
+  if (!_trustTarget) return;
+  const token = document.getElementById('modal-token').value.trim();
+  if (!token) return;
+  try {
+    await __elastik.action('/proxy/discovery/trust',
+      JSON.stringify({ip: _trustTarget.ip, port: _trustTarget.port, name: _trustTarget.name, token: token}));
+    const btn = document.getElementById('btn-' + _trustTarget.ip.replace(/\./g, '-'));
+    if (btn) { btn.textContent = 'trusted'; btn.className = 'btn btn-done'; btn.onclick = null; }
+  } catch (e) {
+    console.error('trust failed:', e);
+  }
+  closeModal();
+}
+
+function render(d) {
+  if (!d || !d.node) return;
+  document.getElementById('sub').textContent = 'this node: ' + d.node + ' :' + d.port;
+  const grid = document.getElementById('grid');
+  const peers = d.peers || {};
+  const ips = Object.keys(peers);
+  if (ips.length === 0) {
+    grid.innerHTML = '<div class="empty">no peers discovered yet<br><span style="font-size:11px;color:#555">broadcasting on UDP ' + 3006 + ' every 30s</span></div>';
+    document.getElementById('ts').textContent = d.ts ? d.ts.slice(0,19) + 'Z' : '';
+    return;
+  }
+  let html = '';
+  for (const ip of ips) {
+    const p = peers[ip];
+    const fresh = (p.ago || 0) < 60;
+    const dot = '<span class="dot ' + (fresh ? 'dot-on' : 'dot-off') + '"></span>';
+    const bid = 'btn-' + ip.replace(/\./g, '-');
+    html += '<div class="c">'
+      + '<div class="name">' + dot + (p.name || '?') + '</div>'
+      + '<table>'
+      + '<tr><td>ip</td><td>' + ip + '</td></tr>'
+      + '<tr><td>port</td><td>' + p.port + '</td></tr>'
+      + '<tr><td>version</td><td>' + (p.version || '?') + '</td></tr>'
+      + '<tr><td>seen</td><td>' + (p.ago || 0) + 's ago</td></tr>'
+      + '</table>'
+      + '<button class="btn" id="' + bid + '" onclick="openTrust(\'' + ip + '\',' + p.port + ',\'' + (p.name || ip).replace(/'/g, "\\'") + '\')">trust and connect</button>'
+      + '</div>';
+  }
+  grid.innerHTML = html;
+  document.getElementById('ts').textContent = d.ts ? d.ts.slice(0,19) + 'Z -- auto-refresh 30s' : '';
+}
+
+const data = window.__ELASTIK_DATA__ || '{}';
+try { render(JSON.parse(data)); } catch(e) { console.error('render:', e); }
+</script>
+</body></html>
