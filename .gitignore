@@ -1,5 +1,7 @@
 # Secrets
 .env
+_env
+.env.local
 endpoints.json
 
 # Python

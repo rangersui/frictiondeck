@@ -3,6 +3,16 @@ import asyncio, hashlib, hmac as _hmac, json, os, re, secrets, sqlite3, sys, tim
 from pathlib import Path
 
 DATA, PLUGINS = Path("data"), Path("plugins")
+# Load env file: .env, _env, .env.local (iOS doesn't support dotfiles)
+for _ef in (".env", "_env", ".env.local"):
+    _ep = Path(__file__).resolve().parent / _ef
+    if _ep.exists():
+        for _line in _ep.read_text(encoding="utf-8").splitlines():
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                k, v = _line.split("=", 1)
+                os.environ.setdefault(k.strip(), v.strip())
+        break
 KEY = os.getenv("ELASTIK_KEY", "elastik-dev-key").encode()
 AUTH_TOKEN = os.getenv("ELASTIK_TOKEN", "")
 APPROVE_TOKEN = os.getenv("ELASTIK_APPROVE_TOKEN", "") or secrets.token_hex(16)
@@ -11,9 +21,9 @@ PORT = int(os.getenv("ELASTIK_PORT", "3004"))
 IN_CONTAINER = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv") or os.getenv("CONTAINER") == "1"
 _DANGEROUS_PLUGINS = {"exec", "fs"}
 MAX_BODY = 5 * 1024 * 1024
-INDEX = Path(__file__).with_name("index.html").read_text()
-OPENAPI = Path(__file__).with_name("openapi.json").read_text()
-SW = Path(__file__).with_name("sw.js").read_text()
+INDEX = Path(__file__).with_name("index.html").read_text(encoding="utf-8")
+OPENAPI = Path(__file__).with_name("openapi.json").read_text(encoding="utf-8")
+SW = Path(__file__).with_name("sw.js").read_text(encoding="utf-8")
 def _csp():
     cdn = "https:"
     try:
@@ -33,9 +43,19 @@ _db = {}
 def conn(name):
     if name not in _db:
         d = DATA / name; d.mkdir(parents=True, exist_ok=True)
-        c = sqlite3.connect(str(d / "universe.db"), check_same_thread=False)
+        db_path = d / "universe.db"
+        # Clean stale WAL/SHM files that can block startup (Windows Docker volume mounts)
+        for ext in ("-shm", "-wal"):
+            stale = d / f"universe.db{ext}"
+            try: stale.unlink(missing_ok=True)
+            except OSError: pass
+        c = sqlite3.connect(str(db_path), check_same_thread=False)
         c.row_factory = sqlite3.Row
-        c.execute("PRAGMA journal_mode=WAL"); c.execute("PRAGMA synchronous=FULL")
+        try:
+            c.execute("PRAGMA journal_mode=WAL")
+            c.execute("PRAGMA synchronous=FULL")
+        except sqlite3.OperationalError:
+            pass  # stale WAL on shared volume — proceed without WAL
         c.executescript("""
             CREATE TABLE IF NOT EXISTS stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),
                 stage_html TEXT DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
@@ -87,14 +107,14 @@ def load_plugin(name):
     if not _VALID_NAME.match(name):
         print(f"  rejected invalid plugin name: {name}"); return
     if name in _DANGEROUS_PLUGINS and not IN_CONTAINER and not os.getenv("ELASTIK_ALLOW_DANGEROUS"):
-        print(f"  \u26a0 {name} blocked — bare metal mode. Set ELASTIK_ALLOW_DANGEROUS=1 to override"); return
+        print(f"  ! {name} blocked -- bare metal mode. Set ELASTIK_ALLOW_DANGEROUS=1 to override"); return
     global _auth
     f = PLUGINS / f"{name}.py"
     if not f.exists():
         src = PLUGINS / "available" / f"{name}.py"
         if src.exists():
             PLUGINS.mkdir(exist_ok=True)
-            f.write_text(src.read_text())
+            f.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
             print(f"  installed from available: {name}")
         else:
             print(f"  not found: {name}"); return
@@ -111,7 +131,7 @@ def load_plugin(name):
         }
         ns = {"__file__": str(f), "_ROOT": Path(__file__).resolve().parent,
               "conn": conn, "log_event": log_event, "_call": _call}
-        text = f.read_text()
+        text = f.read_text(encoding="utf-8")
         needs_match = re.search(r'NEEDS\s*=\s*\[([^\]]*)\]', text)
         if needs_match:
             needed = [s.strip().strip('"').strip("'") for s in needs_match.group(1).split(",") if s.strip()]
@@ -200,7 +220,7 @@ def load_plugins():
             for name in ["admin.py", "auth.py"]:
                 src = available / name
                 if src.exists():
-                    (PLUGINS / name).write_text(src.read_text())
+                    (PLUGINS / name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
                     print(f"  installed default: {name}")
     if not PLUGINS.exists(): return
     for f in PLUGINS.glob("*.py"):
@@ -241,7 +261,7 @@ async def app(scope, receive, send):
         except Exception as e: print(f"  warn: skills-core read failed: {e}")
         if not skills:
             sp = Path(__file__).with_name("SKILLS.md")
-            if sp.exists(): skills = sp.read_text()
+            if sp.exists(): skills = sp.read_text(encoding="utf-8")
         auth_name = next((p["name"] for p in _plugin_meta if p["name"] == "auth" or "auth" in p.get("description","").lower()), None)
         renderers, worlds = [], []
         if DATA.exists():
@@ -404,16 +424,16 @@ if __name__ == "__main__":
     _sync_dir("renderers", "renderer-*.html", lambda f: f.stem, "renderers")
     _sync_map()
     if not AUTH_TOKEN:
-        print("\n  ⚠ ELASTIK_TOKEN not set. Refusing to start in public mode.")
+        print("\n  ! ELASTIK_TOKEN not set. Refusing to start in public mode.")
         print("  Set ELASTIK_TOKEN in .env or environment.\n")
         sys.exit(1)
     mode = "container" if IN_CONTAINER else "bare metal"
-    print(f"\n  elastik → http://{HOST}:{PORT}  [{mode}]")
+    print(f"\n  elastik -> http://{HOST}:{PORT}  [{mode}]")
     print(f"  auth token:    {AUTH_TOKEN}")
     print(f"  approve token: {APPROVE_TOKEN}")
     if not IN_CONTAINER:
-        print(f"  \u26a0 bare metal — dangerous plugins ({', '.join(_DANGEROUS_PLUGINS)}) blocked")
-        if os.getenv("ELASTIK_ALLOW_DANGEROUS"): print(f"  \u26a0 ELASTIK_ALLOW_DANGEROUS override active")
+        print(f"  ! bare metal -- dangerous plugins ({', '.join(_DANGEROUS_PLUGINS)}) blocked")
+        if os.getenv("ELASTIK_ALLOW_DANGEROUS"): print(f"  ! ELASTIK_ALLOW_DANGEROUS override active")
     print()
     async def _cron_loop():
         while True:
@@ -427,9 +447,69 @@ if __name__ == "__main__":
                     except Exception as e:
                         print(f"  cron {name}: {e}")
 
-    async def _serve():
-        config = uvicorn.Config(app, host=HOST, port=PORT, log_level="warning")
-        server = uvicorn.Server(config)
-        await asyncio.gather(server.serve(), _cron_loop())
+    async def _mini_serve(app, host, port):
+        """Zero-dependency ASGI server. ~40 lines. Enough for single-user localhost."""
+        async def handle(reader, writer):
+            try:
+                line = await reader.readline()
+                if not line: writer.close(); return
+                parts = line.decode("utf-8", "replace").strip().split(" ", 2)
+                if len(parts) < 2: writer.close(); return
+                method, full_path = parts[0], parts[1]
+                headers = []
+                while True:
+                    h = await reader.readline()
+                    if h in (b"\r\n", b"\n", b""): break
+                    decoded = h.decode("utf-8", "replace").strip()
+                    if ": " in decoded:
+                        k, v = decoded.split(": ", 1)
+                        headers.append([k.lower().encode(), v.encode()])
+                content_length = 0
+                for k, v in headers:
+                    if k == b"content-length": content_length = int(v); break
+                body = await reader.readexactly(content_length) if content_length else b""
+                path_part = full_path.split("?")[0]
+                qs = full_path.split("?", 1)[1] if "?" in full_path else ""
+                scope = {
+                    "type": "http", "method": method, "path": path_part,
+                    "raw_path": path_part.encode(), "query_string": qs.encode(),
+                    "headers": headers,
+                }
+                response = {}
+                async def receive():
+                    return {"type": "http.request", "body": body}
+                async def send(msg):
+                    if msg["type"] == "http.response.start":
+                        response["status"] = msg["status"]
+                        response["headers"] = msg.get("headers", [])
+                    elif msg["type"] == "http.response.body":
+                        out = f"HTTP/1.1 {response['status']} OK\r\n".encode()
+                        for k, v in response["headers"]:
+                            out += k + b": " + v + b"\r\n"
+                        out += b"\r\n" + msg.get("body", b"")
+                        writer.write(out)
+                        await writer.drain()
+                await app(scope, receive, send)
+            except Exception as e:
+                try:
+                    writer.write(b"HTTP/1.1 500 Internal Server Error\r\n\r\n")
+                    await writer.drain()
+                except Exception: pass
+            finally:
+                try: writer.close()
+                except Exception: pass
+        srv = await asyncio.start_server(handle, host, port)
+        await srv.serve_forever()
 
-    import uvicorn; asyncio.run(_serve())
+    try:
+        import uvicorn
+        async def _serve():
+            config = uvicorn.Config(app, host=HOST, port=PORT, log_level="warning")
+            server = uvicorn.Server(config)
+            await asyncio.gather(server.serve(), _cron_loop())
+        asyncio.run(_serve())
+    except ImportError:
+        print("  (uvicorn not found -- using built-in server)")
+        async def _serve():
+            await asyncio.gather(_mini_serve(app, HOST, PORT), _cron_loop())
+        asyncio.run(_serve())

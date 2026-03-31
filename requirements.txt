@@ -1,2 +1,2 @@
-uvicorn
-mcp
+# optional: uvicorn (production performance, auto-detected)
+# optional: mcp (for mcp_server.py only, not needed by server.py)

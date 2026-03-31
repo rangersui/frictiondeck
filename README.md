@@ -69,6 +69,9 @@ ELASTIK_TOKEN=your-auth-token
 ELASTIK_APPROVE_TOKEN=your-approve-token
 ```
 
+Server auto-loads the first file found: `.env`, `_env`, `.env.local`.
+iOS (a-Shell, iSH) doesn't support dotfiles — use `_env` instead.
+
 Two tokens, two purposes:
 
 | Token | Header | Who has it | What it does |
