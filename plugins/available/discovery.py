@@ -1,11 +1,13 @@
-"""Local network peer discovery -- multicast on 224.0.251.99:3006.
+"""Local network peer discovery -- multicast + gossip on 224.0.251.99:3006.
 
-Every 30s: multicast self, collect peers, write to discovery world.
-Trust route: human clicks trust in renderer, writes to config-endpoints.
+Every 30s: multicast self, collect peers, gossip with known peers,
+write to discovery world. Trust route: human clicks trust in renderer,
+writes to config-endpoints.
 """
 import asyncio, json, os, socket, time
+from urllib.request import urlopen
 
-DESCRIPTION = "Local network peer discovery (multicast + broadcast fallback)"
+DESCRIPTION = "Local network peer discovery (multicast + gossip)"
 CRON = 30
 ROUTES = {}
 
@@ -14,13 +16,27 @@ _PORT = 3006
 _NODE = os.getenv("ELASTIK_NODE", socket.gethostname())
 _APP_PORT = int(os.getenv("ELASTIK_PORT", "3004"))
 _SEED_PEERS = [ip.strip() for ip in os.getenv("ELASTIK_PEERS", "").split(",") if ip.strip()]
-_peers = {}  # ip -> {name, port, version, last_seen}
+_peers = {}   # ip -> {name, port, version, last_seen} — direct UDP
+_known = {}   # ip -> {name, port, version, via, last_seen} — gossip
 _sock = None
+_my_ip = None
+
+
+def _get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return None
 
 
 def _init_socket():
-    global _sock
+    global _sock, _my_ip
     if _sock: return
+    _my_ip = _get_local_ip()
     _sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     _sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     _sock.setblocking(False)
@@ -67,23 +83,55 @@ def _collect():
                 "version": peer.get("v", "?"),
                 "last_seen": now,
             }
+            # If we learned about this via gossip before, promote to direct
+            _known.pop(ip, None)
         except (BlockingIOError, OSError):
             break
     for ip in [k for k, v in _peers.items() if now - v["last_seen"] > 120]:
         del _peers[ip]
 
 
+def _gossip():
+    """Ask each direct peer who they know. Build routing table."""
+    now = time.time()
+    for ip, peer in list(_peers.items()):
+        try:
+            r = urlopen(f"http://{ip}:{peer['port']}/proxy/discovery/peers", timeout=2)
+            data = json.loads(r.read())
+            for their_ip, their_peer in data.get("peers", {}).items():
+                # Skip self and already-direct peers
+                if their_ip == _my_ip or their_ip in _peers:
+                    continue
+                _known[their_ip] = {
+                    "name": their_peer.get("name", "?"),
+                    "port": their_peer.get("port", 3004),
+                    "version": their_peer.get("version", "?"),
+                    "via": ip,
+                    "last_seen": now,
+                }
+        except Exception:
+            pass
+    # Expire gossip peers not refreshed in 120s
+    for ip in [k for k, v in _known.items() if now - v["last_seen"] > 120]:
+        del _known[ip]
+
+
 async def _tick():
     _init_socket()
     _broadcast()
     _collect()
+    _gossip()
     # Write to discovery world for renderer
+    now = time.time()
     snap = {
         "node": _NODE,
         "port": _APP_PORT,
         "peers": {ip: {"name": p["name"], "port": p["port"], "version": p["version"],
-                        "ago": int(time.time() - p["last_seen"])}
+                        "ago": int(now - p["last_seen"])}
                   for ip, p in _peers.items()},
+        "known": {ip: {"name": p["name"], "port": p["port"], "version": p["version"],
+                        "via": p["via"], "ago": int(now - p["last_seen"])}
+                  for ip, p in _known.items()},
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     payload = "<!--use:renderer-discovery-->\n" + json.dumps(snap)
@@ -98,7 +146,8 @@ CRON_HANDLER = _tick
 
 
 async def handle_peers(method, body, params):
-    return {"node": _NODE, "peers": {ip: p for ip, p in _peers.items()}}
+    return {"node": _NODE, "peers": {ip: p for ip, p in _peers.items()},
+            "known": {ip: p for ip, p in _known.items()}}
 
 
 async def handle_trust(method, body, params):

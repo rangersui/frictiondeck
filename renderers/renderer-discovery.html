@@ -28,11 +28,16 @@ td:first-child{color:#aaa;width:80px}
 .modal-box input:focus{outline:none;border-color:#4a4}
 .modal-row{display:flex;gap:8px;justify-content:flex-end}
 .btn-cancel{background:#222;color:#888;border:1px solid #333;border-radius:4px;padding:6px 14px;cursor:pointer;font:13px/1 'SF Mono',Consolas,monospace}
+.section{font-size:14px;color:#888;margin:20px 0 10px;font-weight:400}
+.via{font-size:11px;color:#557;font-style:italic}
+.c-gossip{background:#161616;border:1px solid #222a3a;border-radius:8px;padding:16px}
+.dot-via{background:#47a}
 </style>
 </head><body>
 <h1>peer discovery</h1>
 <div class="sub" id="sub"></div>
 <div class="g" id="grid"></div>
+<div id="known-section"></div>
 <div class="ts" id="ts"></div>
 
 <div class="modal" id="modal">
@@ -82,12 +87,15 @@ function render(d) {
   document.getElementById('sub').textContent = 'this node: ' + d.node + ' :' + d.port;
   const grid = document.getElementById('grid');
   const peers = d.peers || {};
+  const known = d.known || {};
   const ips = Object.keys(peers);
-  if (ips.length === 0) {
-    grid.innerHTML = '<div class="empty">no peers discovered yet<br><span style="font-size:11px;color:#555">broadcasting on UDP ' + 3006 + ' every 30s</span></div>';
+  const kips = Object.keys(known);
+  if (ips.length === 0 && kips.length === 0) {
+    grid.innerHTML = '<div class="empty">no peers discovered yet<br><span style="font-size:11px;color:#555">multicast on 224.0.251.99:3006 every 30s</span></div>';
     document.getElementById('ts').textContent = d.ts ? d.ts.slice(0,19) + 'Z' : '';
     return;
   }
+  // Direct peers
   let html = '';
   for (const ip of ips) {
     const p = peers[ip];
@@ -106,6 +114,29 @@ function render(d) {
       + '</div>';
   }
   grid.innerHTML = html;
+  // Gossip peers
+  const ks = document.getElementById('known-section');
+  if (kips.length > 0) {
+    let khtml = '<div class="section">gossip -- heard from peers</div><div class="g">';
+    for (const ip of kips) {
+      const p = known[ip];
+      const bid = 'btn-' + ip.replace(/\./g, '-');
+      khtml += '<div class="c-gossip">'
+        + '<div class="name"><span class="dot dot-via"></span>' + (p.name || '?') + '</div>'
+        + '<div class="via">via ' + (p.via || '?') + '</div>'
+        + '<table>'
+        + '<tr><td>ip</td><td>' + ip + '</td></tr>'
+        + '<tr><td>port</td><td>' + p.port + '</td></tr>'
+        + '<tr><td>version</td><td>' + (p.version || '?') + '</td></tr>'
+        + '</table>'
+        + '<button class="btn" id="' + bid + '" onclick="openTrust(\'' + ip + '\',' + p.port + ',\'' + (p.name || ip).replace(/'/g, "\\'") + '\')">trust and connect</button>'
+        + '</div>';
+    }
+    khtml += '</div>';
+    ks.innerHTML = khtml;
+  } else {
+    ks.innerHTML = '';
+  }
   document.getElementById('ts').textContent = d.ts ? d.ts.slice(0,19) + 'Z -- auto-refresh 30s' : '';
 }
 
