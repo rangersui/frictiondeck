@@ -110,14 +110,16 @@ def load_plugin(name):
         print(f"  ! {name} blocked -- bare metal mode. Set ELASTIK_ALLOW_DANGEROUS=1 to override"); return
     global _auth
     f = PLUGINS / f"{name}.py"
-    if not f.exists():
-        src = PLUGINS / "available" / f"{name}.py"
-        if src.exists():
-            PLUGINS.mkdir(exist_ok=True)
-            f.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-            print(f"  installed from available: {name}")
-        else:
-            print(f"  not found: {name}"); return
+    src = PLUGINS / "available" / f"{name}.py"
+    if src.exists():
+        PLUGINS.mkdir(exist_ok=True)
+        new_text = src.read_text(encoding="utf-8")
+        old_text = f.read_text(encoding="utf-8") if f.exists() else ""
+        if new_text != old_text:
+            f.write_text(new_text, encoding="utf-8")
+            print(f"  updated from available: {name}")
+    elif not f.exists():
+        print(f"  not found: {name}"); return
     try:
         async def _call(route, method="POST", body=b"", params=None):
             """Plugin service binding — call another plugin's handler directly."""
