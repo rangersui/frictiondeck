@@ -44,20 +44,22 @@ Agent C (alerter)    →  reads analysis       →  writes to: alerts
 
 No agent references another. If Agent B dies, Agent A and C keep working. If a fourth agent appears and starts writing to `analysis`, Agent C picks up its output too. The system scales by adding agents, not by editing wiring.
 
-### Ghost scripts — cross-agent code injection
+### Ghost scripts — cross-agent coordination via worlds
 
-`pending_js` in `stage_meta` is a command mailbox. One agent writes JavaScript; the browser (or another agent) executes it. The result lands in `js_result`.
+Agents coordinate exclusively through world read/write. One agent writes a result to a world; another agent reads it. No special mechanisms — just the same `read_world()` / `write_world()` that every agent uses.
 
 ```python
-# Agent A injects code for the browser to run
-write_pending("dashboard", "document.querySelectorAll('.error').length")
+# Agent A writes a command to a coordination world
+write_world("commands", json.dumps({"action": "analyze", "target": "sensor-data"}))
 
-# Later, any agent (or Agent A itself) reads the result
-r = read_world("dashboard")
-error_count = int(r["js_result"])  # browser wrote this back
+# Agent B reads the command world and acts on it
+cmd = json.loads(read_world("commands")["stage_html"])
+if cmd["action"] == "analyze":
+    result = do_analysis(read_world(cmd["target"]))
+    write_world("analysis-output", result)
 ```
 
-This is already implemented in index.html (poll loop) and tyrant/index.html (`_elastik_exec` postMessage). The blackboard pattern makes it a general-purpose inter-agent RPC where the browser is just another agent.
+No RPC, no message passing, no special fields. Worlds are the only shared surface.
 
 ### World as OS process table
 
@@ -85,8 +87,6 @@ Agents writing to the same world will overwrite each other (last writer wins, sa
 When running multiple AI instances simultaneously (Claude via MCP + Ollama via API + WebLLM in browser). Each becomes an agent on the blackboard. The first test case is having Claude write analysis that WebLLM summarizes for display.
 
 ## Related
-- `pending_js` / `js_result` in `stage_meta` (server.py line 60-62)
-- Poll loop in index.html (1-second interval, checks `pending_js`)
-- `_elastik_exec` postMessage handler in tyrant/index.html (line 241)
+- `GET /{name}/read` and `POST /{name}/write` — the only API agents need
 - `POST /{name}/append` for non-destructive multi-agent writes
 - sync.py conflict resolution (high version wins)

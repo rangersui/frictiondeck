@@ -1,9 +1,32 @@
 # Honeypot + Tarpit + Auto-LOCKDOWN
 
 ## Concept
-Detect unauthorized access attempts, slow them down with exponential delays (tarpit), and auto-lock endpoints after a failure threshold.
+Two-layer detection: (1) port honeypots on common attack targets (22/23/80/8080) that instantly flag scanners, and (2) auth failure tarpit with exponential delays and auto-lockdown after threshold.
 
 ## Design
+
+### Layer 1: Port honeypots
+
+Listen on ports that elastik never uses but attackers always probe: 22 (SSH), 23 (Telnet), 80 (HTTP), 8080 (alt HTTP). Any connection attempt = instant attacker signature. No legitimate user will ever connect to these.
+
+```python
+HONEYPOT_PORTS = [22, 23, 80, 8080]
+
+async def honeypot_listener(port):
+    """Accept connection, log IP, close. That's it."""
+    server = await asyncio.start_server(
+        lambda r, w: _honeypot_hit(w, port), '0.0.0.0', port)
+
+async def _honeypot_hit(writer, port):
+    ip = writer.get_extra_info('peername')[0]
+    _blacklist.add(ip)
+    log_event("security-log", "honeypot_trip", {"ip": ip, "port": port})
+    writer.close()
+```
+
+One connection to a honeypot port → immediate blacklist. No tarpit, no warnings. Legitimate users never touch these ports.
+
+### Layer 2: Auth failure tarpit
 
 Failed auth attempts are tracked per IP in a `security-log` world. Each failure increments a counter and doubles the response delay. After N failures from a single IP, that IP is blacklisted and all requests are rejected until manual review.
 

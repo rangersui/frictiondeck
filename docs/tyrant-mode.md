@@ -77,20 +77,20 @@ These are not separate products. They are points on a spectrum of where compute 
 ```
   Server-heavy ←————————————————————————→ Client-heavy
 
-  NORMAL        PARASITE      BLACKBOARD      TYRANT
+  NORMAL          TYRANT        PARASITE       BLACKBOARD
 ```
 
 **Normal** (`server.py` + `index.html`):
 Server runs plugins, CRON jobs, LLM proxies. Browser renders results. Traditional client-server. The server is smart, the client is a viewer.
 
-**Parasite** (`server.py` + `tyrant/index.html`):
-Server has plugins, but the browser ignores them. The browser uses its own compute (WebLLM, local JS) and writes results back to the server for storage. The server is a database the parasite feeds on.
-
-**Blackboard** (`bus.py` + `index.html`):
-bus.py is a pure read/write pipe with no plugins. Multiple clients (browsers, scripts, other servers) read and write to the same worlds. The bus is a shared blackboard. Coordination happens through convention, not enforcement.
-
 **Tyrant** (`bus.py` + `tyrant/index.html`):
-The server is an empty pipe. The browser does everything: LLM inference (WebLLM/WebGPU), UI rendering, state management. The server is a SQLite API that happens to be reachable over HTTP. The browser is the operating system.
+The server shrinks to a dumb pipe. The browser does everything: LLM inference (WebLLM/WebGPU), UI rendering, state management. The server is a SQLite API that happens to be reachable over HTTP. The browser is the operating system.
+
+**Parasite** (zero backend + `tyrant/index.html`):
+No backend at all. The HTML is hosted on a static platform (Cloudflare Worker, GitHub Pages, S3) and connects to an external bus via `?bus=`. The client is a parasite feeding on someone else's storage.
+
+**Blackboard** (`bus.py` + multiple agents):
+bus.py is a pure read/write pipe. Multiple clients (browsers, scripts, AI agents, other servers) read and write to the same worlds. No central coordinator. Intelligence emerges from shared state. See `docs/blackboard.md`.
 
 ### Why bus.py exists separately
 

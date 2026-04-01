@@ -15,8 +15,10 @@ Peer A  ──[ARP poisoned]──  Attacker  ──  Peer B
          HTTP world sync is plaintext
 ```
 
-**2. Passive sniffing**
+**2. Passive sniffing (UNDETECTABLE)**
 Without ARP spoofing, any device on the same network segment can capture broadcast/multicast traffic. sync.py currently uses HTTP — world content is readable by any packet sniffer on the LAN.
+
+**Critical: passive sniffing is fundamentally undetectable.** A device in promiscuous mode emits no traffic, generates no logs, triggers no alerts. You cannot know it is happening. There is no defense except encrypting everything in transit (TLS). Detection-based security (IDS, honeypots) is useless against passive sniffing because there is nothing to detect.
 
 **3. Supply chain — malicious plugin via sync**
 If sync.py is extended to sync plugins (not just worlds), an attacker who compromises one peer can inject a malicious plugin that propagates to all peers. The `exec` and `fs` plugins are already flagged as dangerous in server.py (`_DANGEROUS_PLUGINS`), but a crafted plugin could bypass this.
@@ -82,6 +84,28 @@ On first sync with a new peer, store the peer's TLS certificate fingerprint in `
 
 **Version ceiling**
 Add a maximum version delta per sync cycle. If a received version is more than 1000 ahead of local version, reject it as suspicious.
+
+### Why blacklists don't work — whitelist-only model
+
+IP blacklists are security theater for LAN environments:
+- Attacker changes MAC → gets new DHCP IP → blacklist entry is useless
+- Attacker uses a second device → different IP → blacklist entry is useless
+- Attacker spoofs a whitelisted IP → blacklist doesn't even trigger
+
+**The only effective access control is a whitelist.** `config-endpoints` should list exactly which peers are allowed to sync. Any peer not in the list is rejected, regardless of IP, headers, or tokens. The whitelist is the source of truth.
+
+```python
+# In sync.py — reject unknown peers
+ALLOWED_PEERS = set()  # loaded from config-endpoints
+
+def accept_sync(peer_ip):
+    if peer_ip not in ALLOWED_PEERS:
+        log_event("security-log", "unknown_peer_rejected", {"ip": peer_ip})
+        return False
+    return True
+```
+
+Combined with TLS + cert pinning (TOFU), this means: only known peers, only encrypted, only verified certificates. A new peer must be explicitly added — there is no auto-discovery of sync partners.
 
 ## Implementation estimate
 - HMAC chain verification function: ~15 lines
