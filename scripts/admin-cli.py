@@ -8,7 +8,7 @@ Usage:
     python scripts/admin.py reload auth
     python scripts/admin.py status
 """
-import json, os, sys, urllib.request, urllib.error
+import http.client as _http, json, os, sys, urllib.parse
 from pathlib import Path
 
 env_file = Path(__file__).parent.parent / ".env"
@@ -18,19 +18,24 @@ if env_file.exists():
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip())
 
-BASE = os.getenv("ELASTIK_URL", "http://localhost:3004")
+_port = os.getenv("ELASTIK_PORT", "3004")
+BASE = f"http://127.0.0.1:{_port}"
 TOKEN = os.getenv("ELASTIK_APPROVE_TOKEN", "")
 
 def http(method, path):
-    url = BASE + path
-    req = urllib.request.Request(url, method=method)
-    if TOKEN: req.add_header("X-Approve-Token", TOKEN)
+    parsed = urllib.parse.urlparse(BASE)
     try:
-        with urllib.request.urlopen(req, timeout=10) as r:
-            return json.loads(r.read().decode())
-    except urllib.error.HTTPError as e:
-        return {"error": e.read().decode(), "status": e.code}
-    except urllib.error.URLError as e:
+        c = _http.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=10)
+        headers = {}
+        if TOKEN: headers["X-Approve-Token"] = TOKEN
+        c.request(method, path, headers=headers)
+        r = c.getresponse()
+        body = r.read().decode()
+        c.close()
+        if r.status >= 400:
+            return {"error": body, "status": r.status}
+        return json.loads(body)
+    except Exception as e:
         return {"error": str(e)}
 
 cmd = sys.argv[1] if len(sys.argv) > 1 else "help"

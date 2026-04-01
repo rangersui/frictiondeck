@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0a;color:#e0e0e0;padding:24px}
+h1{font-size:18px;font-weight:600;margin-bottom:4px}
+.meta{font-size:13px;color:#888;margin-bottom:20px}
+.peer{background:#141414;border:1px solid #222;border-radius:8px;padding:16px;margin-bottom:12px}
+.peer-header{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.dot.ok{background:#22c55e}.dot.unreachable{background:#555}.dot.error{background:#ef4444}
+.peer-name{font-weight:600;font-size:15px}
+.peer-status{font-size:13px;color:#888;margin-left:auto}
+.detail{font-size:13px;color:#aaa;margin-left:18px}
+.detail span{color:#22c55e}.detail .push{color:#3b82f6}
+.empty{color:#555;font-style:italic;margin-top:40px;text-align:center}
+button{background:#222;color:#e0e0e0;border:1px solid #333;border-radius:6px;padding:8px 20px;
+  font-size:14px;cursor:pointer;margin-top:16px}
+button:hover{background:#333}
+button:active{background:#444}
+button:disabled{opacity:0.5;cursor:not-allowed}
+</style></head>
+<body>
+<h1>Sync Status</h1>
+<div class="meta" id="last-sync">—</div>
+<div id="peers"></div>
+<button id="btn-sync" onclick="doSync()">Sync Now</button>
+
+<script>
+let lastJson = '';
+
+function render(d) {
+  if (!d || !d.last_sync) {
+    document.getElementById('last-sync').textContent = 'No sync yet';
+    document.getElementById('peers').innerHTML = '<div class="empty">Configure config-endpoints and config-sync to start</div>';
+    return;
+  }
+  const ago = timeSince(new Date(d.last_sync));
+  document.getElementById('last-sync').textContent = 'Last sync: ' + ago + ' ago';
+
+  const peers = d.peers || {};
+  const names = Object.keys(peers);
+  if (!names.length) {
+    document.getElementById('peers').innerHTML = '<div class="empty">No peers configured</div>';
+    return;
+  }
+  let html = '';
+  for (const name of names) {
+    const p = peers[name];
+    const st = p.status || 'unknown';
+    html += '<div class="peer"><div class="peer-header">';
+    html += '<div class="dot ' + st + '"></div>';
+    html += '<div class="peer-name">' + esc(name) + '</div>';
+    html += '<div class="peer-status">' + st + '</div></div>';
+    if (st === 'ok') {
+      if (p.pulled && p.pulled.length)
+        html += '<div class="detail">↓ pulled: <span>' + p.pulled.map(esc).join(', ') + '</span></div>';
+      if (p.pushed && p.pushed.length)
+        html += '<div class="detail">↑ pushed: <span class="push">' + p.pushed.map(esc).join(', ') + '</span></div>';
+      if (p.skipped)
+        html += '<div class="detail">— skipped: ' + p.skipped + '</div>';
+      if (!p.pulled?.length && !p.pushed?.length && !p.skipped)
+        html += '<div class="detail">nothing to sync</div>';
+    } else if (p.error) {
+      html += '<div class="detail" style="color:#ef4444">' + esc(p.error) + '</div>';
+    }
+    html += '</div>';
+  }
+  document.getElementById('peers').innerHTML = html;
+}
+
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function timeSince(date) {
+  const s = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'min';
+  if (s < 86400) return Math.floor(s / 3600) + 'h';
+  return Math.floor(s / 86400) + 'd';
+}
+
+async function doSync() {
+  const btn = document.getElementById('btn-sync');
+  btn.disabled = true; btn.textContent = 'Syncing...';
+  try {
+    const r = await __elastik.action('/proxy/sync/run', '{}');
+    render(r);
+  } catch (e) {
+    console.error('sync failed:', e);
+  }
+  btn.disabled = false; btn.textContent = 'Sync Now';
+}
+
+async function load() {
+  try {
+    const r = await __elastik.fetch('/sync-log/read');
+    const json = r.stage_html || '{}';
+    if (json === lastJson) return;
+    lastJson = json;
+    render(JSON.parse(json));
+  } catch (e) {}
+}
+
+load();
+setInterval(load, 30000);
+</script>
+</body></html>
