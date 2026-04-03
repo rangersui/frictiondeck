@@ -2,6 +2,9 @@
 
 Anything-to-UI. A protocol that turns any string into interface.
 
+**E.L.A.S.T.I.K.**
+**Elastik Links All Strings Through Invisible Kernels**
+
 This repo is a reference implementation in Python.
 
 ---
