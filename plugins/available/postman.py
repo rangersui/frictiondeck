@@ -70,6 +70,10 @@ async def handle_postman(method, body, params):
     if not url.startswith(("http://", "https://")):
         return {"error": "only http/https allowed", "container": _in_container}
     host = urlparse(url).hostname or ""
+    # never allow loopback — postman is for external APIs, not self-access
+    _loopback = {"localhost", "127.0.0.1", "::1", "0.0.0.0", "host.docker.internal"}
+    if host in _loopback or host.startswith("172.") or host.startswith("10.") or host.startswith("192.168."):
+        return {"error": f"postman cannot access internal hosts: {host}", "container": _in_container}
     if not _config["hosts"]:
         return {"error": "no allowed hosts configured. Set postman.json or POSTMAN_HOSTS env var", "container": _in_container}
     if host not in _config["hosts"]:
