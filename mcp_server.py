@@ -56,13 +56,12 @@ def _do_http(method, path, body="", headers="", target="default", timeout=30):
         path = "/" + path
     if "@" in path or path.startswith("//") or "\\" in path or "\r" in path or "\n" in path or "\0" in path:
         return json.dumps({"error": "invalid path"})
+    _ALLOWED_HEADERS = {"content-type", "accept", "user-agent"}
     h = {}
     if headers:
-        h.update(json.loads(headers))
-    # strip approve token -- AI must never be able to send it
-    for k in list(h):
-        if k.lower() == "x-approve-token":
-            del h[k]
+        for k, v in json.loads(headers).items():
+            if k.lower() in _ALLOWED_HEADERS:
+                h[k] = v
     if TOKEN:
         h["X-Auth-Token"] = TOKEN  # always last -- AI cannot override
     data = body.encode("utf-8") if body else None

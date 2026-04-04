@@ -53,7 +53,7 @@ def _is_allowed(cmd):
             return False, f"blocked character: {ch}"
     # match against allow patterns
     for pattern in _ALLOW:
-        if fnmatch.fnmatch(cmd, pattern) or fnmatch.fnmatch(cmd, pattern.rstrip(" *")):
+        if fnmatch.fnmatch(cmd, pattern):
             return True, pattern
     return False, f"not in whitelist. allowed: {_ALLOW}"
 
