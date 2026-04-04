@@ -50,6 +50,11 @@ def _do_http(method, path, body="", headers="", target="default", timeout=30):
     if target not in _endpoints:
         return json.dumps({"error": f"target '{target}' not in endpoints.json. available: {list(_endpoints.keys())}"})
     base = _endpoints[target]
+    # guard: path must be a path, not a URL or authority injection
+    if not path.startswith("/"):
+        path = "/" + path
+    if "@" in path or path.startswith("//") or "\\" in path or "\r" in path or "\n" in path or "\0" in path:
+        return json.dumps({"error": "invalid path"})
     h = {}
     if headers:
         h.update(json.loads(headers))
