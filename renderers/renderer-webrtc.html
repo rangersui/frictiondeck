@@ -1,0 +1,249 @@
+<!-- elastik-renderer
+     name: webrtc
+     tier_1: full
+     tier_2: none
+     tier_3: none
+     min_tier: 1
+-->
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0a;color:#e0e0e0;padding:24px}
+h1{font-size:18px;font-weight:600;margin-bottom:4px}
+.meta{font-size:13px;color:#888;margin-bottom:20px}
+.id-box{background:#141414;border:1px solid #222;border-radius:8px;padding:16px;margin-bottom:16px}
+.id-label{font-size:13px;color:#888;margin-bottom:4px}
+.id-value{font-family:monospace;font-size:20px;color:#22c55e;letter-spacing:2px}
+.conn{display:flex;gap:8px;margin-bottom:16px}
+.conn input{flex:1;background:#141414;border:1px solid #333;border-radius:6px;padding:8px 12px;
+  font-family:monospace;font-size:14px;color:#e0e0e0}
+.conn input::placeholder{color:#555}
+button{background:#222;color:#e0e0e0;border:1px solid #333;border-radius:6px;padding:8px 20px;
+  font-size:14px;cursor:pointer}
+button:hover{background:#333}
+button:active{background:#444}
+button:disabled{opacity:0.5;cursor:not-allowed}
+.peer{background:#141414;border:1px solid #222;border-radius:8px;padding:16px;margin-bottom:12px}
+.peer-header{display:flex;align-items:center;gap:8px}
+.dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
+.dot.connecting{background:#eab308;animation:pulse 1s infinite}
+.dot.connected{background:#22c55e}
+.dot.failed{background:#ef4444}
+.peer-id{font-family:monospace;font-weight:600;font-size:15px}
+.peer-status{font-size:13px;color:#888;margin-left:auto}
+.peer-detail{font-size:13px;color:#aaa;margin-top:6px;margin-left:18px}
+.log{background:#0f0f0f;border:1px solid #1a1a1a;border-radius:6px;padding:12px;margin-top:16px;
+  font-family:monospace;font-size:12px;color:#888;max-height:200px;overflow-y:auto}
+.log div{margin-bottom:2px}
+.log .ok{color:#22c55e}.log .err{color:#ef4444}.log .info{color:#3b82f6}
+.empty{color:#555;font-style:italic;text-align:center;margin:40px 0}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:0.4}}
+</style></head>
+<body>
+<h1>WebRTC Peers</h1>
+<div class="meta">P2P connections via DataChannel. Signaling through world read/write.</div>
+
+<div class="id-box">
+  <div class="id-label">Your peer ID</div>
+  <div class="id-value" id="my-id">—</div>
+</div>
+
+<div class="conn">
+  <input id="peer-input" placeholder="Enter peer ID to connect..." />
+  <button id="btn-connect" onclick="doConnect()">Connect</button>
+  <button id="btn-listen" onclick="doListen()">Listen</button>
+</div>
+
+<div id="peers"></div>
+<div class="log" id="log"></div>
+
+<script>
+const myId = Math.random().toString(36).slice(2,8);
+document.getElementById('my-id').textContent = myId;
+
+const peers = {};  // peerId -> {pc, dc, state}
+const STUN = {iceServers:[{urls:'stun:stun.l.google.com:19302'}]};
+
+function log(msg, cls) {
+  const d = document.getElementById('log');
+  const el = document.createElement('div');
+  el.className = cls || '';
+  el.textContent = new Date().toLocaleTimeString() + ' ' + msg;
+  d.appendChild(el);
+  d.scrollTop = d.scrollHeight;
+}
+
+function renderPeers() {
+  const el = document.getElementById('peers');
+  const ids = Object.keys(peers);
+  if (!ids.length) { el.innerHTML = '<div class="empty">No peers connected</div>'; return; }
+  el.innerHTML = ids.map(id => {
+    const p = peers[id];
+    return '<div class="peer"><div class="peer-header">' +
+      '<div class="dot ' + p.state + '"></div>' +
+      '<div class="peer-id">' + id + '</div>' +
+      '<div class="peer-status">' + p.state + '</div></div>' +
+      (p.transport ? '<div class="peer-detail">transport: DataChannel (' + p.transport + ')</div>' : '') +
+      '</div>';
+  }).join('');
+}
+
+function setPeerState(id, state, transport) {
+  if (!peers[id]) peers[id] = {};
+  peers[id].state = state;
+  if (transport) peers[id].transport = transport;
+  renderPeers();
+}
+
+async function doConnect() {
+  const peerId = document.getElementById('peer-input').value.trim();
+  if (!peerId) return;
+  document.getElementById('btn-connect').disabled = true;
+  setPeerState(peerId, 'connecting');
+  log('connecting to ' + peerId + '...', 'info');
+
+  try {
+    const pc = new RTCPeerConnection(STUN);
+    const dc = pc.createDataChannel('elastik');
+    peers[peerId] = {pc, dc, state: 'connecting'};
+
+    // collect ICE candidates
+    const iceCandidates = [];
+    pc.onicecandidate = e => {
+      if (e.candidate) iceCandidates.push(JSON.stringify(e.candidate));
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === 'failed') {
+        setPeerState(peerId, 'failed');
+        log('ICE failed for ' + peerId, 'err');
+      }
+    };
+
+    // create offer
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    // wait for ICE gathering
+    await new Promise(ok => {
+      if (pc.iceGatheringState === 'complete') return ok();
+      pc.onicegatheringchange = () => { if (pc.iceGatheringState === 'complete') ok(); };
+      setTimeout(ok, 3000); // timeout
+    });
+
+    // write offer + candidates to signal world
+    const signalData = JSON.stringify({offer: pc.localDescription, ice: iceCandidates});
+    await __elastik.write('signal-' + myId + '-to-' + peerId, signalData);
+    log('offer sent, waiting for answer...', 'info');
+
+    // poll for answer
+    const poll = setInterval(async () => {
+      try {
+        const r = await __elastik.read('signal-' + peerId + '-to-' + myId);
+        if (r.stage_html) {
+          clearInterval(poll);
+          const data = JSON.parse(r.stage_html);
+          await pc.setRemoteDescription(data.answer);
+          if (data.ice) for (const c of data.ice) await pc.addIceCandidate(JSON.parse(c));
+          log('answer received from ' + peerId, 'ok');
+        }
+      } catch(e) {}
+    }, 1000);
+
+    dc.onopen = () => {
+      clearInterval(poll);
+      setPeerState(peerId, 'connected', 'udp');
+      log('DataChannel open to ' + peerId, 'ok');
+      _stopListening();
+    };
+    dc.onmessage = e => log('← ' + peerId + ': ' + e.data.slice(0, 80));
+
+  } catch(e) {
+    setPeerState(peerId, 'failed');
+    log('error: ' + e.message, 'err');
+  }
+  document.getElementById('btn-connect').disabled = false;
+}
+
+let _listening = false, _listenInterval = null;
+function _stopListening() {
+  if (_listenInterval) { clearInterval(_listenInterval); _listenInterval = null; }
+  _listening = false;
+  document.getElementById('btn-listen').disabled = false;
+  document.getElementById('btn-listen').textContent = 'Listen';
+}
+async function doListen() {
+  if (_listening) return;
+  _listening = true;
+  document.getElementById('btn-listen').disabled = true;
+  document.getElementById('btn-listen').textContent = 'Listening...';
+  log('listening for incoming connections...', 'info');
+
+  _listenInterval = setInterval(async () => {
+    try {
+      const stages = await __elastik.stages();
+      const incoming = (stages || []).filter(s =>
+        s.name.startsWith('signal-') && s.name.endsWith('-to-' + myId) && !peers[s.name.replace('signal-','').replace('-to-'+myId,'')]
+      );
+      for (const sig of incoming) {
+        const peerId = sig.name.replace('signal-','').replace('-to-'+myId,'');
+        if (peers[peerId]) continue;
+        await acceptPeer(peerId, sig.name);
+      }
+    } catch(e) {}
+  }, 2000);
+}
+
+async function acceptPeer(peerId, sigWorld) {
+  setPeerState(peerId, 'connecting');
+  log('incoming from ' + peerId, 'info');
+
+  try {
+    const r = await __elastik.read(sigWorld);
+    const data = JSON.parse(r.stage_html);
+
+    const pc = new RTCPeerConnection(STUN);
+    const iceCandidates = [];
+    pc.onicecandidate = e => {
+      if (e.candidate) iceCandidates.push(JSON.stringify(e.candidate));
+    };
+
+    pc.ondatachannel = e => {
+      const dc = e.channel;
+      peers[peerId].dc = dc;
+      dc.onopen = () => {
+        setPeerState(peerId, 'connected', 'udp');
+        log('DataChannel open from ' + peerId, 'ok');
+        _stopListening();
+      };
+      dc.onmessage = ev => log('← ' + peerId + ': ' + ev.data.slice(0, 80));
+    };
+
+    peers[peerId] = {pc, state: 'connecting'};
+    await pc.setRemoteDescription(data.offer);
+    if (data.ice) for (const c of data.ice) await pc.addIceCandidate(JSON.parse(c));
+
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    await new Promise(ok => {
+      if (pc.iceGatheringState === 'complete') return ok();
+      pc.onicegatheringchange = () => { if (pc.iceGatheringState === 'complete') ok(); };
+      setTimeout(ok, 3000);
+    });
+
+    const answerData = JSON.stringify({answer: pc.localDescription, ice: iceCandidates});
+    await __elastik.write('signal-' + myId + '-to-' + peerId, answerData);
+    log('answer sent to ' + peerId, 'ok');
+
+  } catch(e) {
+    setPeerState(peerId, 'failed');
+    log('accept error: ' + e.message, 'err');
+  }
+}
+
+renderPeers();
+log('peer ID: ' + myId, 'info');
+</script>
+</body></html>

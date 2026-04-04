@@ -5,7 +5,7 @@ if(!p){fetch('/stages').then(r=>r.json()).then(d=>{document.body.innerHTML=d.map
 else{const f=document.createElement('iframe');f.sandbox='allow-scripts allow-popups';
 f.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;border:none';document.body.appendChild(f);let v=-1,lp='';
 let _awl=null,_awlT=0;async function _loadAwl(){if(_awl&&Date.now()-_awlT<30000)return _awl;try{const r=await(await fetch('/config-actions/read')).json();_awl=new Set((r.stage_html||'').split('\n').map(s=>s.trim()).filter(Boolean));_awlT=Date.now()}catch(e){_awl=_awl||new Set()}return _awl}
-const helper='<script>window.__elastik={_p:{},_w:"'+p+'",fetch:function(path){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"fetch",path:path,_id:id},"*")})},action:function(route,body){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"action",route:route,body:body||"",_id:id},"*")})},sync:function(d){window.parent.postMessage({_elastik:true,action:"sync",payload:d},"*")},result:function(d){window.parent.postMessage({_elastik:true,action:"result",payload:d},"*")},clear:function(){window.parent.postMessage({_elastik:true,action:"clear"},"*")}};window.addEventListener("message",function(e){if(e.data&&e.data._elastik_response&&e.data._id){var q=window.__elastik._p[e.data._id];if(q){delete window.__elastik._p[e.data._id];if(e.data.error)q.reject(new Error(e.data.error));else q.resolve(e.data.result)}}if(e.data&&e.data._elastik_exec){var code=e.data.code;var nm=code.match(/window\\.location\\s*=\\s*[\'"]([^\'"]+)[\'"]/);if(nm){window.parent.postMessage({_elastik:true,action:"navigate",url:nm[1]},"*");return}var hm=code.match(/location\\.href\\s*=\\s*[\'"]([^\'"]+)[\'"]/);if(hm){window.parent.postMessage({_elastik:true,action:"navigate",url:hm[1]},"*");return}try{var r=eval(code);window.parent.postMessage({_elastik:true,action:"result",payload:String(r==null?"":r)},"*")}catch(err){window.parent.postMessage({_elastik:true,action:"result",payload:"ERROR:"+err.message},"*")}}})<\/script>';
+const helper='<script>window.__elastik={_p:{},_w:"'+p+'",fetch:function(path){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"fetch",path:path,_id:id},"*")})},read:function(world){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"world_read",world:world,_id:id},"*")})},write:function(world,body){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"world_write",world:world,body:body||"",_id:id},"*")})},append:function(world,body){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"world_append",world:world,body:body||"",_id:id},"*")})},stages:function(){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"stages",_id:id},"*")})},action:function(route,body){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"action",route:route,body:body||"",_id:id},"*")})},sync:function(d){window.parent.postMessage({_elastik:true,action:"sync",payload:d},"*")},result:function(d){window.parent.postMessage({_elastik:true,action:"result",payload:d},"*")},clear:function(){window.parent.postMessage({_elastik:true,action:"clear"},"*")}};window.addEventListener("message",function(e){if(e.data&&e.data._elastik_response&&e.data._id){var q=window.__elastik._p[e.data._id];if(q){delete window.__elastik._p[e.data._id];if(e.data.error)q.reject(new Error(e.data.error));else q.resolve(e.data.result)}}if(e.data&&e.data._elastik_exec){var code=e.data.code;var nm=code.match(/window\\.location\\s*=\\s*[\'"]([^\'"]+)[\'"]/);if(nm){window.parent.postMessage({_elastik:true,action:"navigate",url:nm[1]},"*");return}var hm=code.match(/location\\.href\\s*=\\s*[\'"]([^\'"]+)[\'"]/);if(hm){window.parent.postMessage({_elastik:true,action:"navigate",url:hm[1]},"*");return}try{var r=eval(code);window.parent.postMessage({_elastik:true,action:"result",payload:String(r==null?"":r)},"*")}catch(err){window.parent.postMessage({_elastik:true,action:"result",payload:"ERROR:"+err.message},"*")}}})<\/script>';
 function injectHelper(html){if(html.includes('</head>'))return html.replace('</head>',helper+'</head>');if(html.includes('<body'))return html.replace(/<body[^>]*>/i,function(m){return m+helper});return helper+html}
 window.addEventListener('message',async function(e){
 if(!e.data||!e.data._elastik)return;
@@ -15,9 +15,49 @@ else if(action==='sync'){fetch('/'+p+'/sync',{method:'POST',body:payload||''})}
 else if(action==='result'){fetch('/'+p+'/result',{method:'POST',body:payload||''})}
 else if(action==='clear'){fetch('/'+p+'/clear',{method:'POST'})}
 else if(action==='action'){const rt=e.data.route;if(!_awl)_awl=await _loadAwl();if(_awl.has(rt)){try{const r=await(await fetch(rt,{method:'POST',body:e.data.body||''})).json();f.contentWindow.postMessage({_elastik_response:true,_id,result:r},'*')}catch(err){f.contentWindow.postMessage({_elastik_response:true,_id,error:err.message},'*')}}else{f.contentWindow.postMessage({_elastik_response:true,_id,error:'action not allowed: '+rt},'*')}}
+else if(action==='world_read'){try{const r=await(await fetch('/'+e.data.world+'/read')).json();f.contentWindow.postMessage({_elastik_response:true,_id,result:r},'*')}catch(err){f.contentWindow.postMessage({_elastik_response:true,_id,error:err.message},'*')}}
+else if(action==='world_write'||action==='world_append'){const op=action==='world_write'?'write':'append';try{const r=await(await fetch('/'+e.data.world+'/'+op,{method:'POST',body:e.data.body||''})).json();f.contentWindow.postMessage({_elastik_response:true,_id,result:r},'*')}catch(err){f.contentWindow.postMessage({_elastik_response:true,_id,error:err.message},'*')}}
+else if(action==='stages'){try{const r=await(await fetch('/stages')).json();f.contentWindow.postMessage({_elastik_response:true,_id,result:r},'*')}catch(err){f.contentWindow.postMessage({_elastik_response:true,_id,error:err.message},'*')}}
 else if(action==='navigate'){window.location=e.data.url}
 });
-setInterval(async()=>{const r=await(await fetch('/'+p+'/read')).json();
+// --- WebRTC transport (manual peer connect) ---
+let _rtc=null,_dc=null,_myId=Math.random().toString(36).slice(2,8);
+async function rtcConnect(peerId){
+const pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+const dc=pc.createDataChannel('elastik');
+pc.onicecandidate=e=>{if(e.candidate)fetch('/signal-'+_myId+'-to-'+peerId+'/append',{method:'POST',body:JSON.stringify(e.candidate)})};
+const offer=await pc.createOffer();await pc.setLocalDescription(offer);
+await fetch('/signal-'+_myId+'-to-'+peerId+'/write',{method:'POST',body:JSON.stringify(offer)});
+// poll for answer
+const ans=await new Promise(ok=>{const t=setInterval(async()=>{try{const r=await(await fetch('/signal-'+peerId+'-to-'+_myId+'/read')).json();if(r.stage_html){clearInterval(t);ok(r.stage_html)}}catch(e){}},500)});
+const answer=JSON.parse(ans);
+if(answer.type)await pc.setRemoteDescription(answer);
+// poll ICE candidates
+const ci=setInterval(async()=>{try{const r=await(await fetch('/signal-'+peerId+'-to-'+_myId+'-ice/read')).json();if(r.stage_html){for(const c of r.stage_html.split('\n').filter(Boolean))await pc.addIceCandidate(JSON.parse(c))}}catch(e){}},500);
+dc.onopen=()=>{clearInterval(ci);_rtc=pc;_dc=dc;console.log('WebRTC connected to '+peerId)};
+dc.onmessage=e=>{const msg=JSON.parse(e.data);if(msg.type==='update')_rtcWorld=msg};
+return dc}
+async function rtcAccept(){
+// poll for incoming offers
+const prefix='signal-';
+const stages=await(await fetch('/stages')).json();
+const incoming=stages.find(s=>s.name.startsWith('signal-')&&s.name.endsWith('-to-'+_myId)&&!s.name.includes('-ice'));
+if(!incoming)return null;
+const peerId=incoming.name.replace('signal-','').replace('-to-'+_myId,'');
+const offer=JSON.parse((await(await fetch('/'+incoming.name+'/read')).json()).stage_html);
+const pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+pc.onicecandidate=e=>{if(e.candidate)fetch('/signal-'+_myId+'-to-'+peerId+'-ice/append',{method:'POST',body:JSON.stringify(e.candidate)})};
+pc.ondatachannel=e=>{const dc=e.channel;dc.onopen=()=>{_rtc=pc;_dc=dc;console.log('WebRTC accepted from '+peerId)};dc.onmessage=ev=>{const msg=JSON.parse(ev.data);if(msg.type==='update')_rtcWorld=msg}};
+await pc.setRemoteDescription(offer);
+const answer=await pc.createAnswer();await pc.setLocalDescription(answer);
+await fetch('/signal-'+_myId+'-to-'+peerId+'/write',{method:'POST',body:JSON.stringify(answer)});
+return pc}
+let _rtcWorld=null;
+async function readWorld(){
+if(_dc&&_dc.readyState==='open'){_dc.send(JSON.stringify({op:'read',world:p}));return _rtcWorld||await(await fetch('/'+p+'/read')).json()}
+return await(await fetch('/'+p+'/read')).json()}
+// --- end WebRTC ---
+setInterval(async()=>{const r=await readWorld();
 if(r.version!==v){v=r.version;let html=r.stage_html,rendered=false;
 const um=/^<!--use:([a-zA-Z0-9_-]+)-->\n?([\s\S]*)/.exec(html);
 if(um){try{const rr=await(await fetch('/'+um[1]+'/read')).json();if(rr.stage_html){f.srcdoc=injectHelper(rr.stage_html.replace('</head>','<script>window.__ELASTIK_DATA__='+JSON.stringify(um[2])+'<\/script></head>'));rendered=true}}catch(e){console.error('Renderer:',e)}}

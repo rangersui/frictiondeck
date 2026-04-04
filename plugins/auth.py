@@ -10,6 +10,8 @@ async def auth_middleware(scope, path, method):
     # Browser routes — no token available
     parts = [p for p in path.split("/") if p]
     if len(parts) == 2 and parts[1] in ("sync", "result", "clear"): return True
+    # Signal worlds — ephemeral WebRTC signaling, no auth needed
+    if len(parts) >= 1 and parts[0].startswith("signal-"): return True
     # Auth plugin routes must be open
     if path.startswith("/auth/"): return True
     # Plugin approve has its own token — let server.py handle it
