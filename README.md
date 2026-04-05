@@ -30,6 +30,34 @@ See [docs/protocol.md](docs/protocol.md) for the formal specification.
 
 ## Install
 
+Two paths. Different audiences. Zero overlap.
+
+### Go Lite — zero dependencies
+
+One binary. No Python. No toolchain. Download and run.
+
+**macOS / Linux**:
+```bash
+curl -fsSL https://raw.githubusercontent.com/rangersui/Elastik/master/get-elastik-go.sh | sh
+./elastik-go
+```
+
+**Windows** (PowerShell):
+```powershell
+iwr -useb https://raw.githubusercontent.com/rangersui/Elastik/master/get-elastik-go.ps1 | iex
+.\elastik-go.exe
+```
+
+The script picks the right binary for your OS/arch from the latest
+GitHub Release, verifies its SHA-256, drops it in the current directory.
+No sudo. No admin rights. Nothing global. Delete the file to uninstall.
+
+Go Lite is the protocol only: worlds, HMAC chain, three mailboxes,
+static assets. No plugins, no MCP, no Claude Desktop integration.
+For that, use the Python path below.
+
+### Python Pro — full system
+
 **Windows** — double-click `install.cmd`
 
 **macOS / Linux** — open terminal:
