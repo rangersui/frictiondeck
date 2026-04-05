@@ -1,15 +1,13 @@
-# Elastik
+# E.L.A.S.T.I.K.
+
+*Elastik Links All Strings Through Invisible Kernels*
 
 Anything-to-UI. A protocol that turns any string into interface.
+Five rules. Three mailboxes. ~300 lines.
 
 The reference implementation uses HTTP. The protocol is transport-agnostic.
-
-HTTP, WebRTC, WebSocket, stdin/stdout, JSON-RPC...
-
-If it carries strings, it works.
-
-**E.L.A.S.T.I.K.**
-**Elastik Links All Strings Through Invisible Kernels**
+HTTP, WebRTC, WebSocket, stdin/stdout, NFC, sound —
+if it carries strings, it works.
 
 This repo is a reference implementation in Python.
 
@@ -21,8 +19,11 @@ Five rules. Any language can implement them.
 
 1. Listen. Accept connections.
 2. Send and receive strings. Nothing else. No types. No schemas.
-3. Sign strings with HMAC. Chain-linked. Append-only. Immuatble history.
-4. Renders string in a browser. One reactive loop.
+3. Store strings in SQLite. One file per world: `universe.db`.
+4. Sign strings with HMAC. Chain-linked. Append-only. Immutable history.
+5. Render strings in a browser. One reactive loop.
+
+Flow (1, 2, 5) · store (3) · verify (4). Miss one and it isn't elastik.
 
 See [docs/protocol.md](docs/protocol.md) for the formal specification.
 
