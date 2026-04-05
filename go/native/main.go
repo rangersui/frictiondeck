@@ -155,8 +155,17 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Root — serve index.html (matches server.py GET / fallback).
-	if r.Method == http.MethodGet && path == "/" {
+	// GET fallback — matches server.py's final `if method == "GET"`
+	// branch. Serves index.html for / and for any single-segment world
+	// path (/work, /home, etc.). The browser entry point; JS inside
+	// index.html then calls /{name}/read to fetch the world data.
+	if r.Method == http.MethodGet && (path == "/" || len(parts) == 1) {
+		// Guard: reject single-segment paths that aren't valid world
+		// names so we don't hand index.html out on garbage URLs.
+		if len(parts) == 1 && !core.ValidName(parts[0]) {
+			writeErr(w, 400, "invalid world name")
+			return
+		}
 		s.serveIndex(w)
 		return
 	}
