@@ -2,11 +2,16 @@
 
 ## Five rules
 
-1. **Listen on a port.** Accept HTTP connections.
-2. **Send and receive strings over HTTP.** No other protocol required.
+1. **Listen.** Accept connections.
+2. **Send and receive strings.** Nothing else. No types. No schemas.
 3. **Store strings in SQLite.** One file per world: `universe.db`.
 4. **Sign strings with HMAC.** Chain-linked. Append-only. Immutable history.
-5. **Render strings in a browser.** An iframe. A polling loop. That's the UI.
+5. **Render strings in a browser.** One reactive loop.
+
+The reference implementation uses HTTP. The protocol is transport-agnostic.
+HTTP, WebRTC, WebSocket, stdin/stdout, NFC, sound — if it carries strings,
+it works. Flow (1, 2, 5) · store (3) · verify (4). Miss one and it isn't
+elastik.
 
 Any implementation that follows these five rules is elastik-compatible.
 This repo is a reference implementation in Python (~300 lines).
@@ -35,7 +40,10 @@ Each world has one `universe.db` with two tables:
 | hmac       | TEXT | HMAC-SHA256(prev_hmac + payload).  |
 | prev_hmac  | TEXT | Previous event's HMAC. Chain link. |
 
-## HTTP endpoints
+## HTTP endpoints (reference implementation)
+
+HTTP is one transport. These are the routes the Python reference exposes.
+Other transports map the same operations to their own framing.
 
 ### String operations
 
@@ -47,6 +55,17 @@ POST /{name}/sync      → overwrites stage_html → no version bump
 POST /{name}/pending   → writes to pending_js
 POST /{name}/result    → writes to js_result
 POST /{name}/clear     → clears pending_js + js_result
+```
+
+### Infrastructure
+
+```
+GET  /stages           → lists all worlds [{name, version, updated_at}]
+GET  /{name}           → returns index.html (browser entry point)
+GET  /                 → returns index.html (stage list)
+POST /webhook/{source} → logs event
+POST /plugins/propose  → logs plugin proposal event
+POST /plugins/approve  → writes plugin file + registers route (requires token)
 ```
 
 ## Authentication
@@ -99,17 +118,6 @@ that can only send JSON to write strings without server modifications.
 curl sends raw string → works.
 MCP sends raw string → works.
 GPT Actions sends {"content": "hello"} → extracts "hello" → works.
-
-### Infrastructure
-
-```
-GET  /stages           → lists all worlds [{name, version, updated_at}]
-GET  /{name}           → returns index.html (browser entry point)
-GET  /                 → returns index.html (stage list)
-POST /webhook/{source} → logs event
-POST /plugins/propose  → logs plugin proposal event
-POST /plugins/approve  → writes plugin file + registers route (requires token)
-```
 
 ## Three mailboxes
 
@@ -201,7 +209,8 @@ Plugins are loaded at startup. New plugins require approval.
 
 Every path is a world. `data/{name}/universe.db`.
 
-Visit a path that doesn't exist → auto-created. Empty. Ready.
+Write to a path that doesn't exist → auto-created. Empty. Ready.
+Read a world that doesn't exist → 404. Reading never creates.
 
 ```
 localhost:3004/work     → work world
@@ -213,23 +222,21 @@ localhost:3004/anything → anything world
 
 ## Implementations
 
-The protocol is language-agnostic. Any language that can:
+The protocol is language- and transport-agnostic. Any runtime that can:
 
-- Listen on a port
-- Handle HTTP
-- Read/write SQLite
+- Accept connections (any transport)
+- Carry strings
+- Read/write SQLite (or any append-only store)
 - Compute HMAC-SHA256
 
 ...can implement elastik.
 
 ```
-elastik (this repo)    →  Python + uvicorn
-elastik-node           →  Node.js (future)
-elastik-go             →  Go (future)
-elastik-rust           →  Rust (future)
+elastik (this repo)    →  Python + uvicorn    (reference)
+go/                    →  Go (core + native)  (in-tree, zero-dep)
 ```
 
-## Self-describing API
+## Self-describing API (reference implementation)
 
 `GET /info` returns:
 - `routes` — all registered plugin routes
@@ -239,7 +246,7 @@ elastik-rust           →  Rust (future)
 
 AI calls `GET /info` once. Knows all capabilities. No guessing.
 
-## MCP Aggregator
+## MCP Aggregator (reference implementation)
 
 `mcp_server.py` is the single bridge between AI and elastik.
 Two hot-pluggable config files, both checked on every call:
@@ -254,14 +261,7 @@ Bridge never restarts. Everything behind it is hot-swappable.
 ## That's it
 
 Five rules. Three mailboxes. One integer. One hash chain.
-A protocol for human-AI interaction.
 
 Five rules describe concepts, not technologies.
-Any implementation that:
-
-- RECEIVES
-- TRANSPORTS
-- STORES
-- SIGNS
-- RENDERS STRINGS
-  are elastik-compatible.
+Any implementation that receives, transports, stores, signs, and
+renders strings is elastik-compatible.
