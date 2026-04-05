@@ -24,7 +24,7 @@ Five rules. Any language can implement them.
 3. Sign strings with HMAC. Chain-linked. Append-only. Immuatble history.
 4. Renders string in a browser. One reactive loop.
 
-See PROTOCOL.md for the formal specification.
+See [docs/protocol.md](docs/protocol.md) for the formal specification.
 
 ---
 
@@ -215,7 +215,7 @@ POST /plugins/approve  → approve (needs token from terminal)
 
 ## Multi-world
 
-Every path is a world. Visit a path that doesn't exist — it's created.
+Every path is a world. Writing to a path that doesn't exist creates it. Reading a non-existent world returns 404.
 
 ```
 localhost:3004/work     → work world
@@ -348,21 +348,22 @@ Bare metal:  exec, fs blocked at load time — no override available to AI
 
 To override on bare metal (you know what you're doing):
 ```
-ELASTIK_ALLOW_DANGEROUS=1
+ELASTIK_MODE=2
 ```
 
-This is checked in `load_plugin()`. Not middleware, not a prompt.
-Approve token can't override it. It's above the token system.
+Mode system: environment detection is the ceiling. `ELASTIK_MODE` cannot exceed what the environment allows.
+Container → ceiling 2 (autonomous). Bare metal → ceiling 1 (executor).
+`ELASTIK_MODE=2` on bare metal is still capped at 1 unless you also set the environment flag.
 
 ### Permission hierarchy
 
 Four levels. Each is a physical gate, not a rule.
 
 ```
-Constitution:  IN_CONTAINER check    — highest — nobody bypasses
-Seal:          ELASTIK_APPROVE_TOKEN — human only — admin, plugin install
-Badge:         ELASTIK_TOKEN         — AI has this — daily read/write
-Public:        GET requests          — no token — anyone
+Constitution:  _ENV_CEILING           — highest — environment detection, nobody bypasses
+Seal:          ELASTIK_APPROVE_TOKEN  — human only — admin, plugin install
+Badge:         ELASTIK_TOKEN          — AI has this — daily read/write
+Public:        GET requests           — no token — anyone
 ```
 
 ### Server hardening
@@ -398,7 +399,7 @@ Approve token is in the terminal. AI can't see it. Physics, not policy.
 
 ## Self-Evolution
 
-~600 lines across 3 files. Zero frameworks. AI reads the entire codebase in one context window.
+~530 lines across 3 files. Zero frameworks. AI reads the entire codebase in one context window.
 
 ```bash
 python lucy.py evolve   # start dev container (port 3005)
@@ -423,13 +424,13 @@ elastik.py         ~510 lines    launcher (detect + server + browser)
 index.html          ~25 lines    one iframe, one polling loop
 mcp_server.py      ~190 lines    MCP aggregator + HTTP adapter
 lucy.py            ~110 lines    CLI
-map.md                           world index (source of truth)
-PROTOCOL.md                      formal spec
-SKILLS.md                        AI behavior guide
+SKILLS.md                        AI behavior guide (read by MCP clients before /info)
+conf/                            machine-local config (*.example.json → *.json)
 plugins/                         route extensions
 renderers/                       HTML renderers (synced at boot)
-skills/                          skill docs (synced at boot)
+skills/                          skill docs + map.md (synced at boot)
 scripts/                         deployment, backup, build tools
+docs/                            design docs, protocol spec, vision
 data/                            universes
 ```
 
@@ -447,7 +448,7 @@ Zero-dependency mode: just `python server.py` (bare protocol) or `python boot.py
 ## MCP Aggregator
 
 elastik's MCP server is also an aggregator.
-Configure any MCP server in mcp_servers.json —
+Configure any MCP server in conf/mcp_servers.json —
 elastik proxies all their tools through one entry point.
 
 ```json
@@ -463,7 +464,7 @@ elastik proxies all their tools through one entry point.
 ```
 
 AI sees one MCP server. Behind it, any number of tools.
-No config change in Claude Desktop. Just edit mcp_servers.json.
+No config change in Claude Desktop. Just edit conf/mcp_servers.json.
 
 ## Three ways in
 

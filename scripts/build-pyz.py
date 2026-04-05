@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DIST = ROOT / "dist"
 
 # Files to bundle
-CORE_FILES = ["server.py", "plugins.py", "boot.py", "index.html", "openapi.json", "sw.js", "map.md"]
+CORE_FILES = ["server.py", "plugins.py", "boot.py", "index.html", "openapi.json", "sw.js"]
 DIRS = {
     "plugins/available": "plugins/available",
     "skills": "skills",

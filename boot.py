@@ -52,8 +52,8 @@ def _sync_dir(directory, glob_pattern, world_name_fn, label):
 
 
 def _sync_map():
-    """Sync map.md + append undocumented worlds. map.md is source of truth."""
-    f = Path(__file__).resolve().parent / "map.md"
+    """Sync skills/map.md + append undocumented worlds. map.md is source of truth."""
+    f = Path(__file__).resolve().parent / "skills" / "map.md"
     if not f.exists(): return
     text = f.read_text(encoding="utf-8")
     documented = set()
