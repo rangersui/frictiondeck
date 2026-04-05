@@ -145,10 +145,13 @@ async def app(scope, receive, send):
     if len(parts) == 2 and parts[1] in ("read","write","append","pending","result","clear","sync"):
         name, action = parts
         if not _VALID_NAME.match(name): return await send_r(send, 400, '{"error":"invalid world name"}')
-        c = conn(name)
         if method == "GET" and action == "read":
+            if not (DATA / name / "universe.db").exists():
+                return await send_r(send, 404, '{"error":"world not found"}')
+            c = conn(name)
             r = c.execute("SELECT stage_html,pending_js,js_result,version FROM stage_meta WHERE id=1").fetchone()
             return await send_r(send, 200, json.dumps(dict(r)))
+        c = conn(name)
         try: b = (await recv(receive)).decode("utf-8", "replace")
         except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
         b = _extract(b, action)
