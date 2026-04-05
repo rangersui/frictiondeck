@@ -36,10 +36,32 @@ esac
 asset="elastik-go-${goos}-${goarch}"
 
 # ── resolve tag ─────────────────────────────────────────────────────
+#
+# GitHub's /releases/latest skips prereleases AND does not filter by
+# asset content, so asking it for "latest" returns whatever the most
+# recent stable tag is — which may be a docs/refactor release that
+# has no Go binaries at all. Walk the /releases list instead and pick
+# the first entry that actually has `elastik-go-*` assets attached.
+# This works for both stable and prerelease Go Lite tags.
 if [ "$VERSION" = "latest" ]; then
-    tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" \
-        | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)
-    [ -n "$tag" ] || { echo "error: could not resolve latest tag (has a release been published?)" >&2; exit 1; }
+    # stderr is suppressed here only: awk exits early when it finds the
+    # matching tag, which closes the pipe and makes curl print a
+    # "Failure writing output" warning. Harmless — awk got what it
+    # needed — but noisy. Any real download failure will reappear
+    # below because $tag comes out empty and we bail.
+    tag=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases?per_page=30" 2>/dev/null \
+        | awk '
+            /"tag_name":/ {
+                line = $0
+                sub(/.*"tag_name": *"/, "", line)
+                sub(/".*/, "", line)
+                tag = line
+            }
+            /"name": *"elastik-go-/ {
+                if (tag != "") { print tag; exit }
+            }
+        ')
+    [ -n "$tag" ] || { echo "error: no release with elastik-go-* assets found (has a Go Lite release been published?)" >&2; exit 1; }
 else
     tag="$VERSION"
 fi

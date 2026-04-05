@@ -21,6 +21,11 @@ param(
 $ErrorActionPreference = "Stop"
 $Repo = "rangersui/Elastik"
 
+# Windows PowerShell 5.x defaults to TLS 1.0/1.1 which GitHub
+# rejects. Force TLS 1.2 before any network call. PowerShell 7+ uses
+# TLS 1.2+ by default so this is harmless there.
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
 # ── detect arch ──────────────────────────────────────────────────────
 switch ($env:PROCESSOR_ARCHITECTURE) {
     "AMD64" { $goarch = "amd64" }
@@ -36,13 +41,26 @@ if ($goarch -ne "amd64") {
 }
 
 # ── resolve tag ──────────────────────────────────────────────────────
+#
+# GitHub's /releases/latest skips prereleases AND does not filter by
+# asset content, so asking it for "latest" returns whatever the most
+# recent stable tag is — which may be a docs/refactor release with
+# no Go binaries at all. Walk /releases and pick the first entry that
+# actually has `elastik-go-*` assets attached. Works for both stable
+# and prerelease Go Lite tags.
 if ($Version -eq "latest") {
     try {
-        $release = Invoke-RestMethod -UseBasicParsing "https://api.github.com/repos/$Repo/releases/latest"
-        $tag = $release.tag_name
+        $releases = Invoke-RestMethod -UseBasicParsing "https://api.github.com/repos/$Repo/releases?per_page=30"
     } catch {
-        throw "could not resolve latest tag (has a release been published?)"
+        throw "could not reach GitHub releases API: $_"
     }
+    $match = $releases | Where-Object {
+        $_.assets | Where-Object { $_.name -like 'elastik-go-*' }
+    } | Select-Object -First 1
+    if (-not $match) {
+        throw "no release with elastik-go-* assets found (has a Go Lite release been published?)"
+    }
+    $tag = $match.tag_name
 } else {
     $tag = $Version
 }
@@ -57,10 +75,18 @@ try {
     $checksumPath = Join-Path $tmp.FullName "SHA256SUMS.txt"
 
     Write-Host "==> downloading $asset"
-    Invoke-WebRequest -UseBasicParsing "$base/$asset" -OutFile $assetPath
+    try {
+        Invoke-WebRequest -UseBasicParsing "$base/$asset" -OutFile $assetPath
+    } catch {
+        throw "failed to download $asset from tag $tag (does this release have Go Lite binaries?)"
+    }
 
     Write-Host "==> downloading SHA256SUMS.txt"
-    Invoke-WebRequest -UseBasicParsing "$base/SHA256SUMS.txt" -OutFile $checksumPath
+    try {
+        Invoke-WebRequest -UseBasicParsing "$base/SHA256SUMS.txt" -OutFile $checksumPath
+    } catch {
+        throw "failed to download SHA256SUMS.txt from tag $tag"
+    }
 
     # ── verify ───────────────────────────────────────────────────────
     Write-Host "==> verifying checksum"
