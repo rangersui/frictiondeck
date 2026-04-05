@@ -380,8 +380,81 @@ func TestHMACChain(t *testing.T) {
 			t.Errorf("event %d type=%q want %q", i, w.events[i].EventType, et)
 		}
 	}
-	if w.events[0].Payload != `{"len":1}` {
+	if w.events[0].Payload != `{"len": 1}` {
 		t.Errorf("payload = %q", w.events[0].Payload)
+	}
+}
+
+// TestPayloadLenIsCodepoints pins the cross-language compatibility
+// rule: server.py logs {"len": len(body)} where len() counts
+// codepoints, not bytes. Go must do the same or the HMAC chain
+// diverges for any non-ASCII input.
+//
+// If this test fails because someone switched back to len(body),
+// they've just broken every Chinese/Japanese/emoji-containing event
+// log. Do not "fix" by updating the expected value.
+func TestPayloadLenIsCodepoints(t *testing.T) {
+	db := newMock()
+	key := []byte("k")
+
+	orig := Now
+	Now = func() string { return "2025-01-01 00:00:00" }
+	defer func() { Now = orig }()
+
+	// "中文" — 2 codepoints, 6 UTF-8 bytes.
+	if _, err := WriteWorld(db, key, "w", "中文"); err != nil {
+		t.Fatal(err)
+	}
+	// "café" — 4 codepoints, 5 UTF-8 bytes.
+	if _, err := AppendWorld(db, key, "w", "café"); err != nil {
+		t.Fatal(err)
+	}
+	// Mixed emoji — "a🙂b" — 3 codepoints, 6 bytes.
+	if _, err := AppendWorld(db, key, "w", "a🙂b"); err != nil {
+		t.Fatal(err)
+	}
+
+	events := db.worlds["w"].events
+	wantPayloads := []string{
+		`{"len": 2}`, // 中文
+		`{"len": 4}`, // café
+		`{"len": 3}`, // a🙂b
+	}
+	for i, want := range wantPayloads {
+		if events[i].Payload != want {
+			t.Errorf("event %d payload = %q, want %q (Python len() counts codepoints)",
+				i, events[i].Payload, want)
+		}
+	}
+}
+
+// TestEncodePayloadPythonCompat pins the Python-compat format.
+// Every case here should match json.dumps(x, ensure_ascii=False)
+// byte-for-byte in Python 3.
+func TestEncodePayloadPythonCompat(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload any
+		want    string
+	}{
+		{"nil", nil, "{}"},
+		{"single int", map[string]any{"len": 5}, `{"len": 5}`},
+		{"single string", map[string]any{"kind": "write"}, `{"kind": "write"}`},
+		{"unicode value", map[string]any{"v": "中文"}, `{"v": "中文"}`},
+		{"colon inside string", map[string]any{"k": "a:b"}, `{"k": "a:b"}`},
+		{"comma inside string", map[string]any{"k": "a,b"}, `{"k": "a,b"}`},
+		{"escaped quote", map[string]any{"k": `a"b`}, `{"k": "a\"b"}`},
+		{"html chars not escaped", map[string]any{"k": "<x>&"}, `{"k": "<x>&"}`},
+	}
+	for _, c := range cases {
+		got, err := encodePayload(c.payload)
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("%s: got %q want %q", c.name, got, c.want)
+		}
 	}
 }
 

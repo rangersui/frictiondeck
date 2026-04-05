@@ -1,11 +1,13 @@
 package core
 
 import (
+	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -30,31 +32,88 @@ var Now = func() string {
 	return time.Now().UTC().Format("2006-01-02 15:04:05")
 }
 
-// encodePayload serializes a value for the HMAC chain.
+// encodePayload serializes a value for the HMAC chain, byte-identical
+// to Python's `json.dumps(payload or {}, ensure_ascii=False)`.
 //
-// Python server.py uses `json.dumps(payload or {}, ensure_ascii=False)`
-// which means:
-//   - nil / empty → "{}"
-//   - default separators (", ", ": ") with spaces
-//   - unicode kept raw
+// Python defaults:
+//   - separators: ", " and ": " (with spaces)
+//   - ensure_ascii=False — raw UTF-8 for non-ASCII
+//   - HTML chars not escaped
+//   - dict insertion order preserved (Python 3.7+)
 //
-// Go's encoding/json uses minimal separators ("," and ":"). This means
-// the Go HMAC chain is INTERNALLY consistent but NOT byte-identical to
-// a chain produced by the Python server for the same payload. That's
-// acceptable for v2.0 — each server signs its own chain. v3.0 (browser
-// node) ships the same Go code on both sides so the chain is identical
-// by construction.
+// Go's encoding/json defaults differ on three axes:
+//  1. minimal separators "," and ":" — we post-process to add spaces
+//  2. HTML-escapes <, >, & to \u003c etc. — we disable via SetEscapeHTML
+//  3. alphabetizes map keys — unavoidable without a custom encoder,
+//     but the only live LogEvent payloads are single-key ({"len": N}),
+//     so this doesn't bite in v2.0. Multi-key payloads added later
+//     need an ordered encoder (see Event.EventType == "webhook_received"
+//     when that route lands).
 //
-// TODO(v2.1): add optional python-compat mode for cross-server audit.
+// The result is that a Go-produced event log can be verified under
+// Python's HMAC rules and vice versa, for all payload shapes currently
+// in use.
 func encodePayload(payload any) (string, error) {
 	if payload == nil {
 		return "{}", nil
 	}
-	b, err := json.Marshal(payload)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(payload); err != nil {
 		return "", err
 	}
-	return string(b), nil
+	// json.Encoder appends a trailing newline; strip it.
+	raw := strings.TrimRight(buf.String(), "\n")
+	return pythonizeJSON(raw), nil
+}
+
+// pythonizeJSON rewrites minimal-separator JSON to match Python's
+// default `json.dumps` output: `,` → `, ` and `:` → `: `, but only
+// when those characters are OUTSIDE a string literal. Backslash
+// escapes inside strings are honored so a `\"` doesn't end the string
+// prematurely.
+//
+// This is a byte-level pass, not a re-parse, so it preserves every
+// other formatting detail Go's encoder produced (key order, numeric
+// representation, unicode escapes for control chars, etc.) exactly.
+func pythonizeJSON(s string) string {
+	var b strings.Builder
+	b.Grow(len(s) + len(s)/8)
+	inString := false
+	escape := false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if escape {
+			b.WriteByte(c)
+			escape = false
+			continue
+		}
+		if inString {
+			if c == '\\' {
+				b.WriteByte(c)
+				escape = true
+				continue
+			}
+			if c == '"' {
+				inString = false
+			}
+			b.WriteByte(c)
+			continue
+		}
+		switch c {
+		case '"':
+			inString = true
+			b.WriteByte(c)
+		case ',':
+			b.WriteString(", ")
+		case ':':
+			b.WriteString(": ")
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // LogEvent appends one HMAC-chained event for the given world. It

@@ -52,8 +52,9 @@ func env(k, fallback string) string {
 // ─── server state ────────────────────────────────────────────────────
 
 type server struct {
-	cfg config
-	db  *sqliteDB
+	cfg    config
+	db     *sqliteDB
+	static staticFiles
 }
 
 const maxBody = 5 * 1024 * 1024
@@ -92,21 +93,15 @@ func mapError(err error) (int, string) {
 	}
 }
 
-// ─── auth / path guards ──────────────────────────────────────────────
-
-// checkAuth enforces Bearer token if ELASTIK_TOKEN is set.
-// Localhost remains open for dev ergonomics (matches auth plugin's
-// intent without pulling in the full plugin).
-func (s *server) checkAuth(r *http.Request) bool {
-	if s.cfg.token == "" {
-		return true
-	}
-	h := r.Header.Get("Authorization")
-	if !strings.HasPrefix(h, "Bearer ") {
-		return false
-	}
-	return strings.TrimPrefix(h, "Bearer ") == s.cfg.token
-}
+// ─── path guards ─────────────────────────────────────────────────────
+//
+// NOTE on auth: server.py's *protocol* layer does NOT enforce
+// ELASTIK_TOKEN on requests. Auth is handled by the auth plugin which
+// sets server.py's `_auth` middleware. Since the plugin system stays
+// in Python for v2.0 (see file header), Go Lite mirrors server.py's
+// core and does not gate requests on ELASTIK_TOKEN either. The env
+// var is still read so that a future Go-side auth plugin can pick it
+// up, and so that we can warn at startup when running public.
 
 // pathSafe rejects requests that try to traverse the URL.
 func pathSafe(p, raw string) bool {
@@ -127,8 +122,14 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid path")
 		return
 	}
-	if !s.checkAuth(r) {
-		writeErr(w, 403, "unauthorized")
+
+	// Static file routes (match server.py).
+	if r.Method == http.MethodGet && path == "/openapi.json" {
+		s.serveOpenAPI(w)
+		return
+	}
+	if r.Method == http.MethodGet && path == "/sw.js" {
+		s.serveSW(w)
 		return
 	}
 
@@ -154,12 +155,9 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Minimal fallback: root probe.
+	// Root — serve index.html (matches server.py GET / fallback).
 	if r.Method == http.MethodGet && path == "/" {
-		writeJSON(w, 200, map[string]any{
-			"elastik": "go-lite",
-			"version": "2.0-dev",
-		})
+		s.serveIndex(w)
 		return
 	}
 
@@ -276,11 +274,18 @@ func (s *server) handleWorld(w http.ResponseWriter, r *http.Request, name, actio
 // ─── main ────────────────────────────────────────────────────────────
 
 func main() {
+	if path, ok := loadDotEnv(); ok {
+		log.Printf("  env: loaded %s", path)
+	}
 	cfg := loadConfig()
-	s := &server{cfg: cfg, db: newSQLiteDB(cfg.dataDir)}
+	s := &server{
+		cfg:    cfg,
+		db:     newSQLiteDB(cfg.dataDir),
+		static: loadStatic(),
+	}
 
 	addr := fmt.Sprintf("%s:%s", cfg.host, cfg.port)
-	log.Printf("  elastik-lite (go) -> http://%s  [protocol only]", addr)
+	log.Printf("  elastik-lite (go) -> http://%s  [protocol + static]", addr)
 	log.Printf("  data dir: %s", cfg.dataDir)
 	if cfg.token == "" {
 		log.Printf("  ! ELASTIK_TOKEN not set — open access (dev mode)")

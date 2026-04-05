@@ -3,6 +3,7 @@ package core
 import (
 	"encoding/json"
 	"errors"
+	"unicode/utf8"
 )
 
 // Sentinel errors returned by core. The native HTTP layer maps each to
@@ -60,7 +61,10 @@ func WriteWorld(db DB, key []byte, name, body string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := LogEvent(db, key, name, "stage_written", map[string]any{"len": len(body)}); err != nil {
+	// Python logs {"len": len(body)} where len() counts codepoints,
+	// not bytes. Mirror that with RuneCountInString so the event
+	// payload is byte-identical across languages for non-ASCII input.
+	if err := LogEvent(db, key, name, "stage_written", map[string]any{"len": utf8.RuneCountInString(body)}); err != nil {
 		return 0, err
 	}
 	return v, nil
@@ -76,7 +80,8 @@ func AppendWorld(db DB, key []byte, name, body string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if err := LogEvent(db, key, name, "stage_appended", map[string]any{"len": len(body)}); err != nil {
+	// See WriteWorld: Python's len() is codepoint count, not bytes.
+	if err := LogEvent(db, key, name, "stage_appended", map[string]any{"len": utf8.RuneCountInString(body)}); err != nil {
 		return 0, err
 	}
 	return v, nil
