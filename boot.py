@@ -83,7 +83,6 @@ if __name__ == "__main__":
 
     # Load plugins and sync content
     plugins.load_plugins()
-    plugins.load_plugin("info")  # core plugin — always load
     plugins.register_plugin_routes()
     _sync_dir("skills", "*.md", lambda f: f"skills-{f.stem}", "skills")
     _sync_dir("renderers", "renderer-*.html", lambda f: f.stem, "renderers")

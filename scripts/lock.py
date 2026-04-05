@@ -5,6 +5,7 @@ Usage:
   python scripts/lock.py              # generate plugins.lock
   python scripts/lock.py --verify     # verify against plugins.lock
   python scripts/lock.py --show       # show what would be locked
+  python scripts/lock.py --list       # list locked file paths (for git hooks)
 
 Locks: server.py, plugins.py, boot.py, and plugins/available/*.py (shipped code only).
 plugins/ is user-installed — not locked, not shipped.
@@ -76,6 +77,9 @@ def verify():
 if __name__ == "__main__":
     if "--verify" in sys.argv:
         sys.exit(0 if verify() else 1)
+    elif "--list" in sys.argv:
+        for f in _targets():
+            print(f.relative_to(ROOT).as_posix())
     elif "--show" in sys.argv:
         for f in _targets():
             print(f"  {_sha256(f)[:12]}..  {f.relative_to(ROOT).as_posix()}")
