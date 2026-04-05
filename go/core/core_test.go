@@ -331,11 +331,6 @@ func TestHMACChain(t *testing.T) {
 	db := newMock()
 	key := []byte("elastik-test-key")
 
-	// Deterministic timestamp so we can compare structures byte-by-byte.
-	orig := Now
-	Now = func() string { return "2025-01-01 00:00:00" }
-	defer func() { Now = orig }()
-
 	if _, err := WriteWorld(db, key, "w", "a"); err != nil {
 		t.Fatal(err)
 	}
@@ -396,10 +391,6 @@ func TestHMACChain(t *testing.T) {
 func TestPayloadLenIsCodepoints(t *testing.T) {
 	db := newMock()
 	key := []byte("k")
-
-	orig := Now
-	Now = func() string { return "2025-01-01 00:00:00" }
-	defer func() { Now = orig }()
 
 	// "中文" — 2 codepoints, 6 UTF-8 bytes.
 	if _, err := WriteWorld(db, key, "w", "中文"); err != nil {

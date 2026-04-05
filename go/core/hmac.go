@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 )
 
 // ErrChainBroken is returned by VerifyChain when an event's stored
@@ -25,12 +24,10 @@ func (e *ErrChainBroken) Error() string {
 	return fmt.Sprintf("chain broken in world %q at event %d: %s mismatch", e.World, e.Index, e.Field)
 }
 
-// Now is the time source used for event timestamps. Tests override it
-// to produce deterministic output. Matches Python's
-// datetime('now') format: "YYYY-MM-DD HH:MM:SS" in UTC.
-var Now = func() string {
-	return time.Now().UTC().Format("2006-01-02 15:04:05")
-}
+// Timestamps are written by the storage backend (native SQLite uses
+// SQL `datetime('now')`) so core does not carry a time source. This
+// matches server.py and keeps `core` free of wall-clock dependencies.
+// Event.Timestamp is populated on the read path only.
 
 // encodePayload serializes a value for the HMAC chain, byte-identical
 // to Python's `json.dumps(payload or {}, ensure_ascii=False)`.
@@ -134,8 +131,9 @@ func LogEvent(db DB, key []byte, world, eventType string, payload any) error {
 		return err
 	}
 	sum := computeHMAC(key, prev, p)
+	// Timestamp is filled in by the storage backend at insert time;
+	// core does not set it here (see note above).
 	return db.InsertEvent(world, Event{
-		Timestamp: Now(),
 		EventType: eventType,
 		Payload:   p,
 		HMAC:      sum,
