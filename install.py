@@ -186,6 +186,26 @@ def step_start_server(dry_run=False):
     return True
 
 
+def step_setup_hooks(dry_run=False):
+    """Set up git hooks if this is a git repo."""
+    hooks_dir = ELASTIK_DIR / "scripts" / "hooks"
+    git_dir = ELASTIK_DIR / ".git"
+    if not git_dir.exists() or not hooks_dir.exists():
+        return
+    print("\n  Setting up git hooks...")
+    if dry_run:
+        print("  (dry run) would run: git config core.hooksPath scripts/hooks")
+        return
+    try:
+        subprocess.check_call(
+            ["git", "config", "core.hooksPath", "scripts/hooks"],
+            cwd=str(ELASTIK_DIR),
+        )
+        print("  git hooks -> scripts/hooks/")
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"  git hooks skipped: {e}")
+
+
 def print_manual_config():
     """Print manual config instructions."""
     python = find_python()
@@ -235,6 +255,7 @@ def main():
         print("\nDependency install failed. Fix and retry.")
         return
 
+    step_setup_hooks(args.dry_run)
     step_configure_claude(args.dry_run)
     step_start_server(args.dry_run)
 
