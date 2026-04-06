@@ -101,10 +101,23 @@ Loading a plugin grants new capabilities to the system.
 Granting capabilities is a constitutional act.
 Constitutional acts require the approve token.
 
+## World name format
+
+World names match `[a-zA-Z0-9][a-zA-Z0-9_-]*`. This is the canonical
+regex. All implementations share it. It appears in:
+
+- Server-side route validation (reject invalid names with 400)
+- Renderer dispatch (`<!--use:{name}-->` pattern in the browser client)
+- Navigation guard (postMessage bridge only allows paths matching this pattern)
+- CLI commands (`lucy create {name}`)
+
+No dots. No slashes. No spaces. No unicode. Just ASCII alphanumeric,
+dash, underscore. First character must be alphanumeric.
+
 ## Request limits
 
 - Request body capped at 5MB. Exceeding returns 413.
-- World names must match `^[a-zA-Z0-9][a-zA-Z0-9_-]*$`. Invalid names return 400.
+- World names validated per above. Invalid names return 400.
 
 ## JSON body compatibility
 
@@ -156,9 +169,10 @@ Tampering with any event breaks the chain.
 - Approve token: printed in terminal, required for plugin approval and hot plug
 - HMAC chain: immutable audit history
 - Body limit: 5MB max
-- Navigation: pending_js with window.location is intercepted and executed by parent page
-- Cross-world writes: physically blocked — sync/result/clear only affect current world
-- World names: alphanumeric, dash, underscore only
+- Navigation guard: postMessage navigate only allows paths matching world name format (no external URLs, no protocol-relative URLs)
+- Cross-world write guard: postMessage write/append only allowed to the current world — iframe cannot write to other worlds
+- Fetch guard: postMessage fetch only allowed to current world paths + /stages
+- World names: canonical format (see "World name format" section above)
 - Three mailboxes are independent: writing pending does not clear result
 
 Six layers of physical isolation:
