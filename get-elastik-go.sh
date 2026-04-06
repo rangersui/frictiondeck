@@ -107,7 +107,7 @@ echo "==> installed ./elastik-go (${tag})"
 
 # ── fetch static frontend (best-effort) ─────────────────────────────
 #
-# The Go binary serves index.html / sw.js / openapi.json from the
+# The Go binary serves index.html / sw.js / openapi.json / manifest.json from the
 # current directory when they exist. Without them, GET / returns a
 # JSON stub and the browser UI does not render. Pull them from the
 # same tag so the versions stay in lockstep with the binary.
@@ -118,7 +118,7 @@ echo "==> installed ./elastik-go (${tag})"
 raw="https://raw.githubusercontent.com/${REPO}/${tag}"
 echo "==> fetching frontend assets"
 fetched=0
-for f in index.html sw.js openapi.json; do
+for f in index.html sw.js openapi.json manifest.json; do
     if curl -fsSL "${raw}/${f}" -o "./${f}" 2>/dev/null; then
         fetched=$((fetched + 1))
     else

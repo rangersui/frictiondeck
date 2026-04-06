@@ -1,4 +1,4 @@
-<!DOCTYPE html><html><body style="margin:0"><script>
+<!DOCTYPE html><html><head><link rel="manifest" href="/manifest.json"></head><body style="margin:0"><script>
 if('serviceWorker' in navigator)navigator.serviceWorker.register('/sw.js');
 const p=location.pathname.slice(1),o=location.origin;
 if(!p){fetch('/stages').then(r=>r.json()).then(d=>{document.body.innerHTML=d.map(s=>'<a href="/'+s.name+'">'+s.name+' (v'+s.version+')</a>').join('<br>')||'<em>no stages yet. say something to your AI.</em>'})}

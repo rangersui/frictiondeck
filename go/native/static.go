@@ -9,20 +9,22 @@ import (
 
 // staticFiles holds the three files server.py serves from disk at
 // startup: index.html at /, openapi.json at /openapi.json, sw.js at
-// /sw.js. Loaded once in loadStatic(), same as server.py's
-// INDEX/OPENAPI/SW module-level reads.
+// /sw.js, manifest.json at /manifest.json. Loaded once in
+// loadStatic(), same as server.py's INDEX/OPENAPI/SW module-level
+// reads.
 //
 // Missing files are fine — we log a warning and skip the route. This
 // keeps the binary usable even when dropped into a dir without the
 // frontend assets (e.g. a headless protocol node).
 type staticFiles struct {
-	index   []byte
-	openapi []byte
-	sw      []byte
+	index    []byte
+	openapi  []byte
+	sw       []byte
+	manifest []byte
 }
 
 // loadStatic searches ELASTIK_STATIC, then CWD, then the exe dir, for
-// index.html / openapi.json / sw.js. Each file is loaded independently
+// index.html / openapi.json / sw.js / manifest.json. Each file is loaded independently
 // from whichever dir finds it first — they don't need to all come from
 // the same place.
 func loadStatic() staticFiles {
@@ -48,9 +50,10 @@ func loadStatic() staticFiles {
 		return nil
 	}
 	return staticFiles{
-		index:   find("index.html"),
-		openapi: find("openapi.json"),
-		sw:      find("sw.js"),
+		index:    find("index.html"),
+		openapi:  find("openapi.json"),
+		sw:       find("sw.js"),
+		manifest: find("manifest.json"),
 	}
 }
 
@@ -96,4 +99,14 @@ func (s *server) serveSW(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/javascript")
 	w.WriteHeader(200)
 	_, _ = w.Write(s.static.sw)
+}
+
+func (s *server) serveManifest(w http.ResponseWriter) {
+	if s.static.manifest == nil {
+		writeErr(w, 404, "manifest.json not found")
+		return
+	}
+	w.Header().Set("Content-Type", "application/manifest+json")
+	w.WriteHeader(200)
+	_, _ = w.Write(s.static.manifest)
 }
