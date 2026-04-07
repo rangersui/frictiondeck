@@ -156,14 +156,14 @@ async def handle_status(method, body, params):
 
 
 async def handle_ask(method, body, params):
-    if _ai_cfg["provider"] == "none":
-        return {"error": "no AI provider — install ollama or set ANTHROPIC_API_KEY",
-                "_status": 503}
     if method != "POST":
         return {"error": "POST only", "_status": 405}
     prompt = body if isinstance(body, str) else body.decode("utf-8", "replace")
     if not prompt.strip():
         return {"error": "empty prompt", "_status": 400}
+    if _ai_cfg["provider"] == "none":
+        return {"error": "no AI provider — install ollama or set ANTHROPIC_API_KEY",
+                "_status": 503}
     world_name = params.get("world", "")
     if world_name and _VALID_NAME.match(world_name):
         try:
@@ -216,12 +216,12 @@ if __name__ == "__main__":
             out["hint"] = _ai_cfg["hint"]
         print(json.dumps({"status": 200, "body": json.dumps(out)}))
     elif path == "/ai/ask":
-        if _ai_cfg["provider"] == "none":
-            print(json.dumps({"status": 503, "body": json.dumps({"error": "no AI provider"})}))
-        elif method != "POST":
+        if method != "POST":
             print(json.dumps({"status": 405, "body": json.dumps({"error": "POST only"})}))
         elif not body.strip():
             print(json.dumps({"status": 400, "body": json.dumps({"error": "empty prompt"})}))
+        elif _ai_cfg["provider"] == "none":
+            print(json.dumps({"status": 503, "body": json.dumps({"error": "no AI provider"})}))
         else:
             try:
                 response = _ask_ai(_ai_cfg, body)
