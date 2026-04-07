@@ -64,7 +64,7 @@ def http_get(port, path):
         return 0, str(e)
 
 
-def http_post(port, path, body="", token=""):
+def http_post(port, path, body="", token="", approve="", headers=None):
     """POST request, return (status, body_str)."""
     try:
         req = urllib.request.Request(
@@ -73,6 +73,11 @@ def http_post(port, path, body="", token=""):
         )
         if token:
             req.add_header("X-Auth-Token", token)
+        if approve:
+            req.add_header("X-Approve-Token", approve)
+        if headers:
+            for k, v in headers.items():
+                req.add_header(k, v)
         r = urllib.request.urlopen(req, timeout=120)
         return r.status, r.read().decode()
     except urllib.error.HTTPError as e:
@@ -244,10 +249,12 @@ def test_go():
             return
 
     go_token = "test-go-token"
+    go_approve = "test-go-approve"
     env = os.environ.copy()
     env["ELASTIK_PORT"] = str(go_port)
     env["ELASTIK_HOST"] = "127.0.0.1"
     env["ELASTIK_TOKEN"] = go_token  # override .env
+    env["ELASTIK_APPROVE_TOKEN"] = go_approve
     proc = subprocess.Popen(
         [exe], env=env, cwd=ROOT,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -259,6 +266,7 @@ def test_go():
             return
         test("Go server starts", True)
 
+        _run_auth_tests(go_port, "go", go_token, go_approve)
         _run_http_tests(go_port, "go", token=go_token)
     finally:
         proc.terminate()
@@ -283,10 +291,13 @@ def test_python():
         _installed_ai = True
 
     py_port = 13007
+    py_token = "test-py-token"
+    py_approve = "test-py-approve"
     env = os.environ.copy()
     env["ELASTIK_PORT"] = str(py_port)
     env["ELASTIK_HOST"] = "127.0.0.1"
-    env["ELASTIK_TOKEN"] = "test-token"
+    env["ELASTIK_TOKEN"] = py_token
+    env["ELASTIK_APPROVE_TOKEN"] = py_approve
     proc = subprocess.Popen(
         [sys.executable, "boot.py"], env=env, cwd=ROOT,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -298,7 +309,8 @@ def test_python():
             return
         test("Python server starts", True)
 
-        _run_http_tests(py_port, "python", token="test-token")
+        _run_auth_tests(py_port, "python", py_token, py_approve)
+        _run_http_tests(py_port, "python", token=py_token)
     finally:
         proc.terminate()
         try:
@@ -308,6 +320,64 @@ def test_python():
         # Clean up test-installed ai plugin
         if _installed_ai and os.path.exists(ai_dst):
             os.remove(ai_dst)
+
+
+def _run_auth_tests(port, label, token, approve):
+    """Auth enforcement tests — shared by Go and Python."""
+
+    # ── Tier 2: X-Auth-Token ──
+
+    # GET always open (no token needed)
+    st, _ = http_get(port, "/stages")
+    test(f"{label} auth: GET /stages open", st == 200, f"status={st}")
+
+    # POST without token -> 403
+    st, _ = http_post(port, "/echo", "x")
+    test(f"{label} auth: POST /echo no token -> 403", st == 403, f"status={st}")
+
+    # POST with wrong token -> 403
+    st, _ = http_post(port, "/echo", "x", token="wrong-token")
+    test(f"{label} auth: POST /echo wrong token -> 403", st == 403, f"status={st}")
+
+    # POST with correct token -> 200
+    st, _ = http_post(port, "/echo", "x", token=token)
+    test(f"{label} auth: POST /echo correct token -> 200", st == 200, f"status={st}")
+
+    # ── Tier 1: X-Approve-Token for config-* worlds ──
+
+    # POST config-* with auth token only -> 403
+    st, _ = http_post(port, "/config-test/write", "data", token=token)
+    test(f"{label} auth: POST config-*/write auth-only -> 403", st == 403, f"status={st}")
+
+    # POST config-* with wrong approve -> 403
+    st, _ = http_post(port, "/config-test/write", "data", approve="wrong")
+    test(f"{label} auth: POST config-*/write wrong approve -> 403", st == 403, f"status={st}")
+
+    # POST config-* with correct approve -> pass auth (200 or creates world)
+    st, _ = http_post(port, "/config-test/write", "test-data", approve=approve)
+    test(f"{label} auth: POST config-*/write approve -> pass", st in (200, 201), f"status={st}")
+
+    # Verify config-* world was actually written
+    st, body = http_get(port, "/config-test/read")
+    test(f"{label} auth: GET config-*/read -> data persisted",
+         st == 200 and "test-data" in body, f"status={st} body={body[:60]}")
+
+    # ── Plugin reload (Go-only feature) ──
+    if label == "go":
+        st, _ = http_post(port, "/plugins/reload")
+        test(f"{label} auth: POST /plugins/reload no token -> 403", st == 403, f"status={st}")
+
+        st, _ = http_post(port, "/plugins/reload", token=token)
+        test(f"{label} auth: POST /plugins/reload auth -> 200", st == 200, f"status={st}")
+
+    # ── Normal world with auth token should work ──
+
+    st, _ = http_post(port, "/authtest/write", "hello", token=token)
+    test(f"{label} auth: POST normal world write -> pass", st in (200, 201), f"status={st}")
+
+    st, body = http_get(port, "/authtest/read")
+    test(f"{label} auth: GET normal world read -> data", st == 200 and "hello" in body,
+         f"status={st} body={body[:60]}")
 
 
 def _run_http_tests(port, label, token=""):
@@ -383,15 +453,18 @@ def test_parity():
         return
 
     parity_token = "test-parity-token"
+    parity_approve = "test-parity-approve"
     env_go = os.environ.copy()
     env_go["ELASTIK_PORT"] = str(go_port)
     env_go["ELASTIK_HOST"] = "127.0.0.1"
     env_go["ELASTIK_TOKEN"] = parity_token
+    env_go["ELASTIK_APPROVE_TOKEN"] = parity_approve
 
     env_py = os.environ.copy()
     env_py["ELASTIK_PORT"] = str(py_port)
     env_py["ELASTIK_HOST"] = "127.0.0.1"
     env_py["ELASTIK_TOKEN"] = parity_token
+    env_py["ELASTIK_APPROVE_TOKEN"] = parity_approve
 
     # Install ai plugin for Python
     import shutil
@@ -454,6 +527,38 @@ def test_parity():
         py_st, _ = http_post(py_port, "/ai/ask", "", token=parity_token)
         test("parity: /ai/ask empty -> same status", go_st == py_st,
              f"go={go_st} py={py_st}")
+
+        # ── Auth parity ──
+
+        # POST no token -> both 403
+        go_st, _ = http_post(go_port, "/echo", "x")
+        py_st, _ = http_post(py_port, "/echo", "x")
+        test("parity: POST no token -> both 403",
+             go_st == 403 and py_st == 403, f"go={go_st} py={py_st}")
+
+        # POST wrong token -> both 403
+        go_st, _ = http_post(go_port, "/echo", "x", token="wrong")
+        py_st, _ = http_post(py_port, "/echo", "x", token="wrong")
+        test("parity: POST wrong token -> both 403",
+             go_st == 403 and py_st == 403, f"go={go_st} py={py_st}")
+
+        # config-* with auth token only -> both 403
+        go_st, _ = http_post(go_port, "/config-x/write", "d", token=parity_token)
+        py_st, _ = http_post(py_port, "/config-x/write", "d", token=parity_token)
+        test("parity: config-* auth-only -> both 403",
+             go_st == 403 and py_st == 403, f"go={go_st} py={py_st}")
+
+        # config-* with approve -> both pass
+        go_st, _ = http_post(go_port, "/config-x/write", "d", approve=parity_approve)
+        py_st, _ = http_post(py_port, "/config-x/write", "d", approve=parity_approve)
+        test("parity: config-* approve -> both pass",
+             go_st in (200, 201) and py_st in (200, 201), f"go={go_st} py={py_st}")
+
+        # reload is Go-only — test auth on it separately
+        go_st, _ = http_post(go_port, "/plugins/reload")
+        test("parity: go reload no token -> 403", go_st == 403, f"go={go_st}")
+        go_st, _ = http_post(go_port, "/plugins/reload", token=parity_token)
+        test("parity: go reload auth -> 200", go_st == 200, f"go={go_st}")
 
     finally:
         go_proc.terminate()

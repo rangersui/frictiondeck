@@ -130,7 +130,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	//   GET is always open.
 	if r.Method != http.MethodGet {
 		parts := splitPath(path)
-		isAdmin := strings.HasPrefix(path, "/admin/") || strings.HasPrefix(path, "/plugins/")
+		isAdmin := strings.HasPrefix(path, "/admin/")
 		isConfig := len(parts) >= 1 && strings.HasPrefix(parts[0], "config-")
 		if isAdmin || isConfig {
 			// Tier 1: approve token required — locked if not set.
