@@ -33,7 +33,6 @@ signal-* shouldn't be closed — it should be shape-constrained.
 | Interface | TTL | Max Size | Count Limit | Auth |
 |-----------|-----|----------|-------------|------|
 | signal-* | 60s | 4 KB | 20 worlds | none |
-| webhook | 1h | 1 KB | 100 events | none |
 | regular world | none | 5 MB | unlimited | auth token |
 | config-* | none | 5 MB | unlimited | approve token |
 
@@ -88,8 +87,6 @@ but about controlling its quantity and range of activity.
 - [ ] signal-* TTL 60s auto-cleanup (cron plugin)
 - [ ] signal-* write size cap 4KB (server.py routing layer)
 - [ ] signal-* count limit 20 (server.py routing layer)
-- [ ] webhook event TTL 1h cleanup
-- [ ] webhook per-event 1KB cap
 
 ## Implementation Plan
 
@@ -104,4 +101,3 @@ On signal-* write:
 
 Runs every 15s, scans `data/signal-*`:
 - `updated_at` older than 60s → delete world directory
-- Also prunes webhook events older than 1h

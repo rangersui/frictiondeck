@@ -44,8 +44,7 @@ func (e *ErrChainBroken) Error() string {
 //  3. alphabetizes map keys — unavoidable without a custom encoder,
 //     but the only live LogEvent payloads are single-key ({"len": N}),
 //     so this doesn't bite in v2.0. Multi-key payloads added later
-//     need an ordered encoder (see Event.EventType == "webhook_received"
-//     when that route lands).
+//     need an ordered encoder.
 //
 // The result is that a Go-produced event log can be verified under
 // Python's HMAC rules and vice versa, for all payload shapes currently

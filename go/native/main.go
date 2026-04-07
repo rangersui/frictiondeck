@@ -158,20 +158,6 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	parts := splitPath(path)
 
-	// TODO(webhook): server.py has `POST /webhook/{source}` which logs
-	// a `webhook_received` event with payload {"source": ..., "body": ...}
-	// to the "default" world. Not implemented in Go Lite yet because:
-	//  1. The payload is multi-key, and encodePayload currently sorts
-	//     map keys alphabetically (Go stdlib), whereas Python preserves
-	//     insertion order. Adding webhook without an order-preserving
-	//     encoder would create events that Go writes but Python cannot
-	//     verify.
-	//  2. Go Lite is the stricter spec, not a 1:1 translation. We add
-	//     this route once the ordering question is settled — most likely
-	//     by switching to a canonical key order that Python adopts in
-	//     its next revision.
-	// Philosophy: Python aligns to Go, not the other way round.
-
 	// /{name}/{action} routes.
 	if len(parts) == 2 {
 		s.handleWorld(w, r, parts[0], parts[1])

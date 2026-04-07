@@ -63,7 +63,6 @@ POST /{name}/clear     → clears pending_js + js_result
 GET  /stages           → lists all worlds [{name, version, updated_at}]
 GET  /{name}           → returns index.html (browser entry point)
 GET  /                 → returns index.html (stage list)
-POST /webhook/{source} → logs event
 POST /plugins/propose  → logs plugin proposal event
 POST /plugins/approve  → writes plugin file + registers route (requires token)
 ```

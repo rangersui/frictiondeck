@@ -48,7 +48,7 @@ def main():
         ("stage_written", {"len": len("hello")}),         # 5
         ("stage_written", {"len": len("中文测试")}),        # 4 (codepoints)
         ("stage_appended", {"len": len("café🙂")}),        # 5
-        ("webhook_received", {"source": "slack", "body": "hi"}),  # multi-key
+        ("stage_cleared", {"len": 0}),  # multi-key test removed (webhook deleted)
     ]
     for etype, payload in cases:
         log_event(conn, key, etype, payload)

@@ -144,12 +144,6 @@ async def app(scope, receive, send):
                     stages.append({"name": d.name, "version": r["version"], "updated_at": r["updated_at"]})
         return await send_r(send, 200, json.dumps(stages))
 
-    if method == "POST" and len(parts) == 2 and parts[0] == "webhook":
-        try: b = (await recv(receive)).decode("utf-8", "replace")
-        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
-        log_event("default", "webhook_received", {"source": parts[1], "body": b})
-        return await send_r(send, 200, '{"ok":true}')
-
     if len(parts) == 2 and parts[1] in ("read","write","append","pending","result","clear","sync"):
         name, action = parts
         if not _VALID_NAME.match(name): return await send_r(send, 400, '{"error":"invalid world name"}')

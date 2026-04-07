@@ -236,7 +236,6 @@ POST /{name}/result    → write to reply mailbox
 POST /{name}/clear     → clear pending + result
 GET  /stages           → list all worlds
 GET  /{name}           → serve the browser client
-POST /webhook/{source} → log external event
 POST /plugins/propose  → propose a new route
 POST /plugins/approve  → approve (needs token from terminal)
 ```
@@ -696,7 +695,7 @@ requests.post("http://localhost:3004/myworld/result",
 echo "backup done" | curl -X POST -d @- -H "X-Auth-Token: t" localhost:3004/cron/result
 
 # Obsidian — on file save, POST note content
-# Slack — webhook forward to /webhook/slack
+# Slack — POST to /slack/append
 # iOS — Siri + Shortcuts, one tap to POST
 # Android — Tasker, any trigger to POST
 # No app needed. Your OS is the client. See scripts/MOBILE.md

@@ -135,7 +135,6 @@ Parent agent:
      "4 PRs ready for review:
       - #40 PWA manifest (3 files, +40 lines)
       - #4  Frontend undo (1 file, +15 lines)
-      - #42 Webhook route (4 files, +30 lines)
       - #5  MCP config migration (1 file, +46 lines)
       Issues #34 and #39 need design decisions — skipped."
   8. Human reviews, merges or requests changes
