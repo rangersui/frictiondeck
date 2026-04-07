@@ -243,9 +243,11 @@ def test_go():
             skip("Go HTTP tests", "build failed")
             return
 
+    go_token = "test-go-token"
     env = os.environ.copy()
     env["ELASTIK_PORT"] = str(go_port)
     env["ELASTIK_HOST"] = "127.0.0.1"
+    env["ELASTIK_TOKEN"] = go_token  # override .env
     proc = subprocess.Popen(
         [exe], env=env, cwd=ROOT,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -257,7 +259,7 @@ def test_go():
             return
         test("Go server starts", True)
 
-        _run_http_tests(go_port, "go", token="")
+        _run_http_tests(go_port, "go", token=go_token)
     finally:
         proc.terminate()
         try:
@@ -380,14 +382,16 @@ def test_parity():
         skip("Parity tests", f"no {EXE_NAME}")
         return
 
+    parity_token = "test-parity-token"
     env_go = os.environ.copy()
     env_go["ELASTIK_PORT"] = str(go_port)
     env_go["ELASTIK_HOST"] = "127.0.0.1"
+    env_go["ELASTIK_TOKEN"] = parity_token
 
     env_py = os.environ.copy()
     env_py["ELASTIK_PORT"] = str(py_port)
     env_py["ELASTIK_HOST"] = "127.0.0.1"
-    env_py["ELASTIK_TOKEN"] = "test-token"
+    env_py["ELASTIK_TOKEN"] = parity_token
 
     # Install ai plugin for Python
     import shutil
@@ -437,8 +441,8 @@ def test_parity():
                 test("parity: /ai/status JSON parse", False, str(e))
 
         # Compare /echo
-        go_st, go_body = http_post(go_port, "/echo", "parity test")
-        py_st, py_body = http_post(py_port, "/echo", "parity test", token="test-token")
+        go_st, go_body = http_post(go_port, "/echo", "parity test", token=parity_token)
+        py_st, py_body = http_post(py_port, "/echo", "parity test", token=parity_token)
         test("parity: /echo same status", go_st == py_st,
              f"go={go_st} py={py_st}")
         test("parity: /echo same body",
@@ -446,8 +450,8 @@ def test_parity():
              f"go={go_body[:40]} py={py_body[:40]}")
 
         # Compare error handling
-        go_st, _ = http_post(go_port, "/ai/ask", "")
-        py_st, _ = http_post(py_port, "/ai/ask", "", token="test-token")
+        go_st, _ = http_post(go_port, "/ai/ask", "", token=parity_token)
+        py_st, _ = http_post(py_port, "/ai/ask", "", token=parity_token)
         test("parity: /ai/ask empty -> same status", go_st == py_st,
              f"go={go_st} py={py_st}")
 

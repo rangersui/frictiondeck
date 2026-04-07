@@ -9,6 +9,7 @@
 package main
 
 import (
+	"crypto/hmac"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,14 +23,20 @@ import (
 	"github.com/elastik/go/core"
 )
 
+// hmacEqual does constant-time comparison to prevent timing attacks.
+func hmacEqual(a, b string) bool {
+	return hmac.Equal([]byte(a), []byte(b))
+}
+
 // ─── config ──────────────────────────────────────────────────────────
 
 type config struct {
-	host    string
-	port    string
-	dataDir string
-	key     []byte
-	token   string
+	host         string
+	port         string
+	dataDir      string
+	key          []byte
+	token        string
+	approveToken string
 }
 
 func loadConfig() config {
@@ -37,8 +44,9 @@ func loadConfig() config {
 		host:    env("ELASTIK_HOST", "127.0.0.1"),
 		port:    env("ELASTIK_PORT", "3005"),
 		dataDir: env("ELASTIK_DATA", "data"),
-		key:     []byte(env("ELASTIK_KEY", "elastik-dev-key")),
-		token:   os.Getenv("ELASTIK_TOKEN"),
+		key:          []byte(env("ELASTIK_KEY", "elastik-dev-key")),
+		token:        os.Getenv("ELASTIK_TOKEN"),
+		approveToken: os.Getenv("ELASTIK_APPROVE_TOKEN"),
 	}
 	return c
 }
@@ -95,14 +103,6 @@ func mapError(err error) (int, string) {
 }
 
 // ─── path guards ─────────────────────────────────────────────────────
-//
-// NOTE on auth: server.py's *protocol* layer does NOT enforce
-// ELASTIK_TOKEN on requests. Auth is handled by the auth plugin which
-// sets server.py's `_auth` middleware. Since the plugin system stays
-// in Python for v2.0 (see file header), Go Lite mirrors server.py's
-// core and does not gate requests on ELASTIK_TOKEN either. The env
-// var is still read so that a future Go-side auth plugin can pick it
-// up, and so that we can warn at startup when running public.
 
 // pathSafe rejects requests that try to traverse the URL.
 func pathSafe(p, raw string) bool {
@@ -122,6 +122,29 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !pathSafe(path, r.URL.EscapedPath()) {
 		writeErr(w, 400, "invalid path")
 		return
+	}
+
+	// Auth — two tiers, mirrors plugins/auth.py:
+	//   Tier 1: admin + config-* worlds → require X-Approve-Token
+	//   Tier 2: all other POST/PUT/DELETE → require X-Auth-Token
+	//   GET is always open.
+	if r.Method != http.MethodGet {
+		parts := splitPath(path)
+		isAdmin := strings.HasPrefix(path, "/admin/") || strings.HasPrefix(path, "/plugins/")
+		isConfig := len(parts) >= 1 && strings.HasPrefix(parts[0], "config-")
+		if isAdmin || isConfig {
+			// Tier 1: approve token required — locked if not set.
+			if s.cfg.approveToken == "" || !hmacEqual(r.Header.Get("X-Approve-Token"), s.cfg.approveToken) {
+				writeErr(w, 403, "unauthorized")
+				return
+			}
+		} else if s.cfg.token != "" {
+			// Tier 2: auth token for normal writes.
+			if !hmacEqual(r.Header.Get("X-Auth-Token"), s.cfg.token) {
+				writeErr(w, 403, "unauthorized")
+				return
+			}
+		}
 	}
 
 	// Static file routes (match server.py).
