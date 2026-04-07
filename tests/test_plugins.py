@@ -17,6 +17,8 @@ import json, os, subprocess, sys, time, urllib.request, urllib.error, signal
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
 
+EXE_NAME = "elastik-lite.exe" if sys.platform == "win32" else "elastik-lite"
+
 PASS = 0
 FAIL = 0
 SKIP = 0
@@ -228,10 +230,10 @@ def test_go():
     print("\n=== Layer 2: Go HTTP Integration ===")
 
     go_port = 13006
-    exe = os.path.join(ROOT, "elastik-lite.exe")
+    exe = os.path.join(ROOT, EXE_NAME)
     if not os.path.exists(exe):
         # Try building
-        print("  building elastik-lite.exe...")
+        print(f"  building {EXE_NAME}...")
         rc = subprocess.run(
             ["go", "build", "-o", exe, "."],
             cwd=os.path.join(ROOT, "go", "native"),
@@ -373,9 +375,9 @@ def test_parity():
     go_port = 13008
     py_port = 13009
 
-    exe = os.path.join(ROOT, "elastik-lite.exe")
+    exe = os.path.join(ROOT, EXE_NAME)
     if not os.path.exists(exe):
-        skip("Parity tests", "no elastik-lite.exe")
+        skip("Parity tests", f"no {EXE_NAME}")
         return
 
     env_go = os.environ.copy()

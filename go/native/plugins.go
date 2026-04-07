@@ -1,7 +1,10 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -9,7 +12,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
+
+const pluginTimeout = 30 * time.Second
+const maxPluginOut = 5 << 20 // 5 MB
 
 // Plugin protocol (5 rules):
 // 1. Plugin is an executable in plugins/
@@ -38,16 +45,19 @@ var (
 )
 
 // pluginCmd builds an exec.Cmd for a plugin. .py files run via python.
-func pluginCmd(path string, args ...string) *exec.Cmd {
+func pluginCmd(ctx context.Context, path string, args ...string) *exec.Cmd {
 	if strings.HasSuffix(path, ".py") {
-		return exec.Command("python", append([]string{"-u", path}, args...)...)
+		return exec.CommandContext(ctx, "python", append([]string{"-u", path}, args...)...)
 	}
-	return exec.Command(path, args...)
+	return exec.CommandContext(ctx, path, args...)
 }
 
 // pluginExec runs a plugin with args and returns stdout. Stderr silenced.
+// Used for --routes discovery (short-lived, small output).
 func pluginExec(path string, args ...string) ([]byte, error) {
-	cmd := pluginCmd(path, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := pluginCmd(ctx, path, args...)
 	cmd.Stderr = nil // suppress noise from non-CGI plugins
 	return cmd.Output()
 }
@@ -119,16 +129,60 @@ func servePlugin(w http.ResponseWriter, r *http.Request, pluginPath, route strin
 		Query:  r.URL.RawQuery,
 	})
 
-	cmd := pluginCmd(pluginPath)
+	ctx, cancel := context.WithTimeout(r.Context(), pluginTimeout)
+	defer cancel()
+
+	cmd := pluginCmd(ctx, pluginPath)
 	cmd.Stdin = strings.NewReader(string(reqJSON) + "\n")
 	cmd.Stderr = os.Stderr
-	out, err := cmd.Output()
+
+	// Capture stdout with size limit to prevent OOM from malicious plugins.
+	pr, pw := io.Pipe()
+	cmd.Stdout = pw
+	err := cmd.Start()
 	if err != nil {
-		log.Printf("  plugin %s: %v", filepath.Base(pluginPath), err)
+		log.Printf("  plugin %s start: %v", filepath.Base(pluginPath), err)
 		writeErr(w, 502, "plugin error")
 		return
 	}
-	out = []byte(strings.TrimSpace(string(out))) // strip \r\n from Windows .cmd
+
+	// Read stdout in background, capped at maxPluginOut+1 to detect overflow.
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		d, e := io.ReadAll(io.LimitReader(pr, maxPluginOut+1))
+		if len(d) > maxPluginOut {
+			pr.Close() // break pipe → unblock cmd.Wait() immediately
+		}
+		ch <- readResult{d, e}
+	}()
+
+	waitErr := cmd.Wait()
+	pw.Close()
+	res := <-ch
+
+	// Check overflow first — a plugin killed because the pipe broke after
+	// hitting the 5 MB limit looks like a timeout or exit-error, but the
+	// real cause is oversized output.
+	if len(res.data) > maxPluginOut {
+		log.Printf("  plugin %s: output too large (>%d bytes)", filepath.Base(pluginPath), maxPluginOut)
+		writeErr(w, 502, "plugin output too large")
+		return
+	}
+	if waitErr != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			log.Printf("  plugin %s: timeout after %v", filepath.Base(pluginPath), pluginTimeout)
+			writeErr(w, 504, "plugin timeout")
+		} else {
+			log.Printf("  plugin %s: %v", filepath.Base(pluginPath), waitErr)
+			writeErr(w, 502, "plugin error")
+		}
+		return
+	}
+	out := bytes.TrimSpace(res.data)
 
 	var resp pluginResp
 	if json.Unmarshal(out, &resp) != nil {
