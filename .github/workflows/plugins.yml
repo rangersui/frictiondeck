@@ -45,5 +45,5 @@ jobs:
         working-directory: go/native
         run: go build -o ../../elastik-lite${{ runner.os == 'Windows' && '.exe' || '' }} .
 
-      - name: Run plugin tests (CGI only — no Ollama in CI)
-        run: python tests/test_plugins.py cgi
+      - name: Run plugin tests (CGI + Go HTTP — no Ollama in CI)
+        run: python tests/test_plugins.py go

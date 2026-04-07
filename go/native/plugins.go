@@ -64,12 +64,8 @@ func pluginExec(path string, args ...string) ([]byte, error) {
 
 // scanPlugins runs executables in plugins/ and plugins/available/ with --routes.
 func scanPlugins() {
-	routeMu.Lock()
-	// Clear and rebuild.
-	for k := range routeTable {
-		delete(routeTable, k)
-	}
-	defer routeMu.Unlock()
+	// Build new table without holding the lock (plugin execs can be slow).
+	newTable := map[string]string{}
 	for _, dir := range []string{"plugins", filepath.Join("plugins", "available")} {
 		entries, err := os.ReadDir(dir)
 		if err != nil {
@@ -98,15 +94,19 @@ func scanPlugins() {
 			if json.Unmarshal([]byte(strings.TrimSpace(string(out))), &routes) != nil {
 				continue
 			}
-			// Don't register if route already claimed by plugins/ (override).
+			// plugins/ takes priority over plugins/available/.
 			for _, r := range routes {
-				if _, exists := routeTable[r]; !exists {
-					routeTable[r] = p
+				if _, exists := newTable[r]; !exists {
+					newTable[r] = p
 				}
 			}
 			log.Printf("  plugin: %s → %v", e.Name(), routes)
 		}
 	}
+	// Swap atomically — lock only held for the pointer swap.
+	routeMu.Lock()
+	routeTable = newTable
+	routeMu.Unlock()
 }
 
 // servePlugin dispatches an HTTP request to the plugin executable.
