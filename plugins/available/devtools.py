@@ -236,6 +236,23 @@ async def handle_config_dump(method, body, params):
     return {**config, "_status": 200}
 
 
+async def handle_time(method, body, params):
+    """time — Unix epoch timestamp. Clock skew detection."""
+    return {"_html": str(int(time.time())), "_status": 200}
+
+
+async def handle_rev(method, body, params):
+    """rev — reverse input bytes. UTF-8 torture test.
+
+    If 👨‍👩‍👧‍👦 round-trips intact through JSON→stdin→stdout→HTTP,
+    the encoding pipeline is clean. If reversed output is garbled,
+    that's expected — the point is the pipe doesn't break.
+    """
+    text = body if isinstance(body, str) else body.decode("utf-8", "replace")
+    # Reverse at codepoint level (intentionally breaks ZWJ sequences)
+    return {"_html": text[::-1], "_status": 200}
+
+
 async def handle_true(method, body, params):
     """/true — always 200. The assenter."""
     return {"_html": "", "_status": 200}
@@ -293,6 +310,8 @@ ROUTES = {
     "/yes": handle_yes,
     "/wc-c": handle_wc_c,
     "/full": handle_full,
+    "/time": handle_time,
+    "/rev": handle_rev,
 }
 
 
@@ -470,6 +489,14 @@ def _cgi_dispatch(d):
 
     if path == "/full":
         return {"status": 507, "body": json.dumps({"error": "no space left on device"})}
+
+    if path == "/time":
+        return {"status": 200, "body": str(int(time.time())),
+                "content_type": "text/plain; charset=utf-8"}
+
+    if path == "/rev":
+        return {"status": 200, "body": body[::-1],
+                "content_type": "text/plain; charset=utf-8"}
 
     return {"status": 404, "body": json.dumps({"error": "not found"})}
 

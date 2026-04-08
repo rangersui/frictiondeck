@@ -375,6 +375,19 @@ def _run_adversarial_tests(port, token):
         test("adversarial: selfreader contains __file__",
              "__file__" in body, f"body len={len(body)}")
 
+    # 5. Cthulhu: binary garbage on stdout → Go handles gracefully
+    st, body = http_get(port, "/cthulhu")
+    # Go returns 200 (raw text fallback) or 502 (process error from binary noise).
+    # Client may also choke on binary response body (status=0).
+    # Any of these is fine — the key test is "server alive" below.
+    test("adversarial: cthulhu -> no crash (200/502/client-error)",
+         st in (200, 502, 0), f"status={st}")
+
+    # Server alive after Cthulhu
+    st, _ = http_get(port, "/stages")
+    test("adversarial: server alive after cthulhu", st == 200,
+         f"status={st}")
+
     # ── devtools route tests (via Go HTTP) ──
     # Run BEFORE slow adversarial tests (slowdrip/forkbomb) which
     # can destabilize the server with orphan processes on Windows.
@@ -468,6 +481,27 @@ def _run_adversarial_tests(port, token):
     if st == 200:
         test("devtools: /cowsay has cow", "(oo)" in body, f"body={body[:60]}")
 
+    # /time: Unix epoch timestamp
+    st, body = http_get(port, "/time")
+    test("devtools: GET /time -> 200", st == 200, f"status={st}")
+    if st == 200:
+        ts = int(body.strip())
+        now = int(time.time())
+        test("devtools: /time within 5s of local clock",
+             abs(ts - now) < 5, f"server={ts} local={now} diff={abs(ts-now)}")
+
+    # /rev: reverse bytes — UTF-8 torture test
+    st, body = http_post(port, "/rev", "hello", token=token)
+    test("devtools: POST /rev 'hello' -> 'olleh'",
+         st == 200 and body.strip() == "olleh",
+         f"status={st} body={body[:40]}")
+
+    # /rev with emoji — pipeline encoding test
+    st, body = http_post(port, "/rev", "abc\u2764def", token=token)
+    test("devtools: POST /rev emoji round-trip",
+         st == 200 and len(body.strip()) > 0,
+         f"status={st} body={body[:40]}")
+
     # ── Slow adversarial tests (30s+ each) ──
     # These go LAST because forceful process kills can destabilize Go on Windows.
     print(f"\n  --- slow adversarial tests (30s+ each) ---")
@@ -492,6 +526,17 @@ def _run_adversarial_tests(port, token):
     # Server still alive after fork bomb
     st, _ = http_get(port, "/stages")
     test("adversarial: server alive after forkbomb", st == 200,
+         f"status={st}")
+
+    # Terminator: traps SIGTERM, refuses to die → Go must use SIGKILL
+    print("    (terminator: waiting for 30s timeout...)")
+    st, body = http_get(port, "/terminator", timeout=45)
+    test("adversarial: terminator -> killed (502/504)", st in (502, 504),
+         f"status={st} body={body[:80]}")
+
+    # Server alive after terminator
+    st, _ = http_get(port, "/stages")
+    test("adversarial: server alive after terminator", st == 200,
          f"status={st}")
 
 
