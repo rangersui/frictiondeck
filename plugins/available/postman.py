@@ -11,7 +11,10 @@ ROUTES = {}
 
 
 async def handle_postman(method, body, params):
-    b = json.loads(body) if body else {}
+    try:
+        b = json.loads(body) if body else {}
+    except (json.JSONDecodeError, TypeError):
+        return {"error": "invalid JSON body", "_status": 400}
     url = b.get("url", "")
     if not url or not url.startswith(("http://", "https://")):
         return {"error": "url required (http/https)", "_status": 400}
