@@ -6,7 +6,7 @@ fetch('/grep?q=error').then(r=>r.json())  → grep
 
 Not loaded by default. Load with: POST /admin/load  body=devtools
 """
-DESCRIPTION = "Unix pipe primitives — grep, tail, head, wc, echo, null, health, db/size"
+DESCRIPTION = "Unix pipe primitives — grep, tail, head, wc, echo, null, health, db/size, whoami, verify, delay, bench, config/dump"
 
 import sys, json, os, time, sqlite3
 from pathlib import Path
@@ -123,9 +123,20 @@ async def handle_db_size(method, body, params):
 
 
 async def handle_whoami(method, body, params):
-    """whoami — physical self-awareness. IP, hostname, interfaces."""
-    import socket
-    info = {"hostname": socket.gethostname()}
+    """whoami — isolation mirror. PID, hostname, IP, env, user.
+
+    Returns the plugin process's own identity — not the daemon's.
+    If PID differs from Go's PID, isolation is proven.
+    If env lacks daemon secrets, privilege separation is proven.
+    """
+    import socket, getpass
+    info = {
+        "pid": os.getpid(),
+        "hostname": socket.gethostname(),
+        "user": getpass.getuser(),
+        "platform": sys.platform,
+        "python": sys.version.split()[0],
+    }
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -133,6 +144,13 @@ async def handle_whoami(method, body, params):
         s.close()
     except Exception:
         info["ip"] = "127.0.0.1"
+    # Env snapshot — prove what the plugin can/cannot see.
+    # Redact token values, show only key presence.
+    env_keys = sorted(os.environ.keys())
+    sensitive = {"ELASTIK_TOKEN", "ELASTIK_APPROVE_TOKEN", "SECRET", "PASSWORD", "API_KEY"}
+    info["env"] = {k: ("***" if any(s in k.upper() for s in sensitive) else os.environ[k][:80])
+                   for k in env_keys[:50]}  # cap at 50 keys
+    info["env_count"] = len(env_keys)
     return {**info, "_status": 200}
 
 
@@ -143,6 +161,81 @@ async def handle_uuid(method, body, params):
     if n == 1:
         return {"_html": str(uuid.uuid4()), "_status": 200}
     return {"_html": "\n".join(str(uuid.uuid4()) for _ in range(n)), "_status": 200}
+
+
+async def handle_verify(method, body, params):
+    """verify — structural integrity check. Data dir, worlds, db schemas."""
+    issues = []
+    if not _DATA.exists():
+        issues.append("data/ directory missing")
+    for name in _world_names():
+        db = _DATA / name / "universe.db"
+        try:
+            c = sqlite3.connect(str(db))
+            tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+            if "stage_meta" not in tables:
+                issues.append(f"{name}: missing stage_meta table")
+            c.execute("PRAGMA integrity_check")
+            c.close()
+        except Exception as e:
+            issues.append(f"{name}: {e}")
+    return {"ok": len(issues) == 0, "issues": issues,
+            "worlds": len(_world_names()), "_status": 200}
+
+
+async def handle_delay(method, body, params):
+    """delay — artificial latency. ?ms=500. Cap at 10s."""
+    import asyncio
+    ms = min(int(params.get("ms", "100")), 10000)
+    await asyncio.sleep(ms / 1000)
+    return {"delayed": ms, "_status": 200}
+
+
+async def handle_bench(method, body, params):
+    """bench — micro-benchmark. Measures sqlite read + JSON round-trip."""
+    iterations = min(int(params.get("n", "100")), 1000)
+    names = _world_names()
+    t0 = time.time()
+    for _ in range(iterations):
+        for name in names[:1]:  # bench first world only
+            _read_stage(name)
+    elapsed = time.time() - t0
+    return {"iterations": iterations, "elapsed_ms": round(elapsed * 1000, 1),
+            "per_iter_ms": round(elapsed * 1000 / max(iterations, 1), 3),
+            "worlds": len(names), "_status": 200}
+
+
+async def handle_config_dump(method, body, params):
+    """config/dump — sanitized config snapshot. Tokens redacted."""
+    config = {
+        "data_dir": str(_DATA),
+        "root_dir": str(_ROOT),
+        "pid": os.getpid(),
+        "platform": sys.platform,
+        "python_version": sys.version.split()[0],
+        "token_set": bool(os.getenv("ELASTIK_TOKEN")),
+        "approve_token_set": bool(os.getenv("ELASTIK_APPROVE_TOKEN")),
+        "port": os.getenv("ELASTIK_PORT", "3005"),
+        "host": os.getenv("ELASTIK_HOST", "0.0.0.0"),
+        "worlds": _world_names(),
+    }
+    return {**config, "_status": 200}
+
+
+async def handle_true(method, body, params):
+    """/true — always 200. The assenter."""
+    return {"_html": "", "_status": 200}
+
+
+async def handle_false(method, body, params):
+    """/false — always 403. The wall."""
+    return {"_html": "", "_status": 403}
+
+
+async def handle_yes(method, body, params):
+    """yes — returns 'yes' n times. ?n=1. Cap 10000."""
+    n = min(int(params.get("n", "1")), 10000)
+    return {"_html": "\n".join(["yes"] * n), "_status": 200}
 
 
 _COW = r"""
@@ -177,6 +270,13 @@ ROUTES = {
     "/cowsay": handle_cowsay,
     "/whoami": handle_whoami,
     "/uuid": handle_uuid,
+    "/verify": handle_verify,
+    "/delay": handle_delay,
+    "/bench": handle_bench,
+    "/config/dump": handle_config_dump,
+    "/true": handle_true,
+    "/false": handle_false,
+    "/yes": handle_yes,
 }
 
 
@@ -253,8 +353,14 @@ def _cgi_dispatch(d):
                 "total": fmt(total), "count": len(sizes)})}
 
     if path == "/whoami":
-        import socket
-        info = {"hostname": socket.gethostname()}
+        import socket, getpass
+        info = {
+            "pid": os.getpid(),
+            "hostname": socket.gethostname(),
+            "user": getpass.getuser(),
+            "platform": sys.platform,
+            "python": sys.version.split()[0],
+        }
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.connect(("8.8.8.8", 80))
@@ -262,6 +368,11 @@ def _cgi_dispatch(d):
             s.close()
         except Exception:
             info["ip"] = "127.0.0.1"
+        sensitive = {"ELASTIK_TOKEN", "ELASTIK_APPROVE_TOKEN", "SECRET", "PASSWORD", "API_KEY"}
+        env_keys = sorted(os.environ.keys())
+        info["env"] = {k: ("***" if any(s in k.upper() for s in sensitive) else os.environ[k][:80])
+                       for k in env_keys[:50]}
+        info["env_count"] = len(env_keys)
         return {"status": 200, "body": json.dumps(info)}
 
     if path == "/uuid":
@@ -277,6 +388,65 @@ def _cgi_dispatch(d):
         n = max(len(text), 2)
         cow = _COW.format(msg=text.ljust(n), border="-" * (n + 2))
         return {"status": 200, "body": cow, "content_type": "text/plain; charset=utf-8"}
+
+    if path == "/verify":
+        issues = []
+        if not _DATA.exists():
+            issues.append("data/ directory missing")
+        for name in _world_names():
+            db = _DATA / name / "universe.db"
+            try:
+                c = sqlite3.connect(str(db))
+                tables = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
+                if "stage_meta" not in tables:
+                    issues.append(f"{name}: missing stage_meta table")
+                c.execute("PRAGMA integrity_check")
+                c.close()
+            except Exception as e:
+                issues.append(f"{name}: {e}")
+        return {"status": 200, "body": json.dumps({"ok": len(issues) == 0,
+                "issues": issues, "worlds": len(_world_names())})}
+
+    if path == "/delay":
+        ms = min(int(params.get("ms", "100")), 10000)
+        time.sleep(ms / 1000)
+        return {"status": 200, "body": json.dumps({"delayed": ms})}
+
+    if path == "/bench":
+        iterations = min(int(params.get("n", "100")), 1000)
+        names = _world_names()
+        t0 = time.time()
+        for _ in range(iterations):
+            for name in names[:1]:
+                _read_stage(name)
+        elapsed = time.time() - t0
+        return {"status": 200, "body": json.dumps({"iterations": iterations,
+                "elapsed_ms": round(elapsed * 1000, 1),
+                "per_iter_ms": round(elapsed * 1000 / max(iterations, 1), 3),
+                "worlds": len(names)})}
+
+    if path == "/config/dump":
+        config = {
+            "data_dir": str(_DATA), "root_dir": str(_ROOT), "pid": os.getpid(),
+            "platform": sys.platform, "python_version": sys.version.split()[0],
+            "token_set": bool(os.getenv("ELASTIK_TOKEN")),
+            "approve_token_set": bool(os.getenv("ELASTIK_APPROVE_TOKEN")),
+            "port": os.getenv("ELASTIK_PORT", "3005"),
+            "host": os.getenv("ELASTIK_HOST", "0.0.0.0"),
+            "worlds": _world_names(),
+        }
+        return {"status": 200, "body": json.dumps(config)}
+
+    if path == "/true":
+        return {"status": 200, "body": ""}
+
+    if path == "/false":
+        return {"status": 403, "body": ""}
+
+    if path == "/yes":
+        n = min(int(params.get("n", "1")), 10000)
+        return {"status": 200, "body": "\n".join(["yes"] * n),
+                "content_type": "text/plain; charset=utf-8"}
 
     return {"status": 404, "body": json.dumps({"error": "not found"})}
 

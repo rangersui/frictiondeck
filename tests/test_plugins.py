@@ -164,14 +164,14 @@ def test_cgi():
         except Exception as e:
             test(f"{name}: --routes runs", False, str(e))
 
-    # Edge cases on echo
-    echo_path = os.path.join("plugins", "echo.py")
-    if os.path.exists(echo_path):
-        print(f"\n  --- echo edge cases ---")
+    # Edge cases on echo (now part of devtools.py)
+    devtools_path = os.path.join("plugins", "available", "devtools.py")
+    if os.path.exists(devtools_path):
+        print(f"\n  --- echo edge cases (via devtools) ---")
 
         # Empty body
         req = json.dumps({"path": "/echo", "method": "POST", "body": "", "query": ""})
-        out, _, rc = run_plugin(echo_path, stdin_data=req + "\n")
+        out, _, rc = run_plugin(devtools_path, stdin_data=req + "\n")
         if rc == 0:
             resp = json.loads(out.strip())
             test("echo: empty body -> status 200", resp["status"] == 200)
@@ -180,10 +180,49 @@ def test_cgi():
         # Large body
         big = "x" * 10000
         req = json.dumps({"path": "/echo", "method": "POST", "body": big, "query": ""})
-        out, _, rc = run_plugin(echo_path, stdin_data=req + "\n")
+        out, _, rc = run_plugin(devtools_path, stdin_data=req + "\n")
         if rc == 0:
             resp = json.loads(out.strip())
             test("echo: large body -> preserved", len(resp["body"]) == 10000)
+
+    # ── Adversarial CGI tests ──
+    print(f"\n  --- adversarial CGI tests ---")
+
+    # Stateless proof: counter always returns "1"
+    stateless_path = os.path.join("tests", "adversarial", "stateless.py")
+    if os.path.exists(stateless_path):
+        req = json.dumps({"path": "/stateless", "method": "GET", "body": "", "query": ""})
+        for i in range(3):
+            out, _, rc = run_plugin(stateless_path, stdin_data=req + "\n")
+            if rc == 0:
+                resp = json.loads(out.strip())
+                test(f"stateless: call {i+1} always returns '1'",
+                     resp["body"] == "1", f"got: {resp['body']}")
+
+    # Self-reader: can read its own source
+    selfreader_path = os.path.join("tests", "adversarial", "selfreader.py")
+    if os.path.exists(selfreader_path):
+        req = json.dumps({"path": "/selfreader", "method": "GET", "body": "", "query": ""})
+        out, _, rc = run_plugin(selfreader_path, stdin_data=req + "\n")
+        if rc == 0:
+            resp = json.loads(out.strip())
+            test("selfreader: returns own source",
+                 "selfreader" in resp["body"] and "__file__" in resp["body"],
+                 f"body len={len(resp['body'])}")
+
+    # Truncated: process dies mid-output -> non-zero exit
+    truncated_path = os.path.join("tests", "adversarial", "truncated.py")
+    if os.path.exists(truncated_path):
+        req = json.dumps({"path": "/truncated", "method": "GET", "body": "", "query": ""})
+        out, _, rc = run_plugin(truncated_path, stdin_data=req + "\n")
+        test("truncated: non-zero exit code", rc != 0, f"rc={rc}")
+        if out.strip():
+            # Whatever partial output exists should NOT be valid JSON
+            try:
+                json.loads(out.strip())
+                test("truncated: output is NOT valid JSON", False, "parsed successfully!")
+            except json.JSONDecodeError:
+                test("truncated: output is NOT valid JSON", True)
 
     # Edge cases on ai
     ai_path = os.path.join("plugins", "available", "ai.py")
@@ -248,6 +287,18 @@ def test_go():
             skip("Go HTTP tests", "build failed")
             return
 
+    # Install adversarial plugins for Go to discover
+    import shutil
+    adv_dir = os.path.join(ROOT, "tests", "adversarial")
+    _adv_installed = []
+    if os.path.isdir(adv_dir):
+        for f in os.listdir(adv_dir):
+            if f.endswith(".py"):
+                src = os.path.join(adv_dir, f)
+                dst = os.path.join(ROOT, "plugins", f)
+                shutil.copy2(src, dst)
+                _adv_installed.append(dst)
+
     go_token = "test-go-token"
     go_approve = "test-go-approve"
     env = os.environ.copy()
@@ -268,12 +319,51 @@ def test_go():
 
         _run_auth_tests(go_port, "go", go_token, go_approve)
         _run_http_tests(go_port, "go", token=go_token)
+        _run_adversarial_tests(go_port, go_token)
     finally:
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+        # Clean up adversarial plugins
+        for p in _adv_installed:
+            if os.path.exists(p):
+                os.remove(p)
+
+
+def _run_adversarial_tests(port, token):
+    """Adversarial tests — prove Go daemon survives malicious plugins."""
+    print(f"\n  --- adversarial Go HTTP tests ---")
+
+    # 1. Truncated JSON: plugin dies mid-output → Go returns 502
+    st, body = http_get(port, "/truncated")
+    test("adversarial: truncated JSON -> 502", st == 502,
+         f"status={st} body={body[:80]}")
+
+    # 2. Infinite output: Go kills at 5MB → 502
+    st, body = http_get(port, "/infinite")
+    test("adversarial: infinite output -> 502", st == 502,
+         f"status={st} body={body[:80]}")
+
+    # Server should still be alive after adversarial attacks
+    st, _ = http_get(port, "/stages")
+    test("adversarial: server alive after attacks", st == 200,
+         f"status={st}")
+
+    # 3. Stateless: every call returns "1" (fresh process each time)
+    for i in range(3):
+        st, body = http_get(port, "/stateless")
+        test(f"adversarial: stateless call {i+1} -> '1'",
+             st == 200 and body.strip() == "1",
+             f"status={st} body={body[:40]}")
+
+    # 4. Self-reader: plugin reads its own source
+    st, body = http_get(port, "/selfreader")
+    test("adversarial: selfreader -> 200", st == 200, f"status={st}")
+    if st == 200:
+        test("adversarial: selfreader contains __file__",
+             "__file__" in body, f"body len={len(body)}")
 
 
 # ── Layer 3: Python HTTP Integration ────────────────────────────────
