@@ -57,9 +57,9 @@ def http_get(port, path, timeout=10):
     """GET request, return (status, body_str)."""
     try:
         r = urllib.request.urlopen(f"http://127.0.0.1:{port}{path}", timeout=timeout)
-        return r.status, r.read().decode()
+        return r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode()
+        return e.code, e.read().decode("utf-8", "replace")
     except Exception as e:
         return 0, str(e)
 
@@ -377,11 +377,10 @@ def _run_adversarial_tests(port, token):
 
     # 5. Cthulhu: binary garbage on stdout → Go handles gracefully
     st, body = http_get(port, "/cthulhu")
-    # Go returns 200 (raw text fallback) or 502 (process error from binary noise).
-    # Client may also choke on binary response body (status=0).
-    # Any of these is fine — the key test is "server alive" below.
-    test("adversarial: cthulhu -> no crash (200/502/client-error)",
-         st in (200, 502, 0), f"status={st}")
+    # Go's json.Unmarshal fails on binary → raw text fallback (200)
+    # or process exit error (502). Either is correct.
+    test("adversarial: cthulhu -> no crash (200 or 502)",
+         st in (200, 502), f"status={st}")
 
     # Server alive after Cthulhu
     st, _ = http_get(port, "/stages")
