@@ -26,3 +26,21 @@ async def handle_postman(method, body, params):
 
 
 ROUTES["/proxy/postman"] = handle_postman
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--routes":
+        print(json.dumps(list(ROUTES.keys())))
+        sys.exit(0)
+    import asyncio
+    d = json.loads(sys.stdin.readline())
+    handler = ROUTES.get(d["path"])
+    if not handler:
+        print(json.dumps({"status": 404, "body": json.dumps({"error": "not found"})}))
+    else:
+        qs = d.get("query", "")
+        params = dict(x.split("=", 1) for x in qs.split("&") if "=" in x) if qs else {}
+        result = asyncio.run(handler(d.get("method", "GET"), d.get("body", ""), params))
+        status = result.pop("_status", 200)
+        body = result.pop("_html", None) or json.dumps(result)
+        print(json.dumps({"status": status, "body": body}))
