@@ -1,5 +1,5 @@
 """elastik — the protocol. ~258 lines. Hand-copyable. The survivor's format."""
-import asyncio, hashlib, hmac as _hmac, json, os, re, secrets, sqlite3, sys, time
+import asyncio, base64, hashlib, hmac as _hmac, json, os, re, secrets, sqlite3, subprocess, sys, time
 from pathlib import Path
 
 DATA = Path("data")
@@ -15,6 +15,7 @@ for _ef in (".env", "_env", ".env.local"):
         break
 KEY = os.getenv("ELASTIK_KEY", "elastik-dev-key").encode()
 AUTH_TOKEN = os.getenv("ELASTIK_TOKEN", "")
+APPROVE_TOKEN = os.getenv("ELASTIK_APPROVE_TOKEN", "")
 HOST = os.getenv("ELASTIK_HOST", "127.0.0.1")
 PORT = int(os.getenv("ELASTIK_PORT", "3004"))
 MAX_BODY = 5 * 1024 * 1024
@@ -24,6 +25,10 @@ SW = Path(__file__).with_name("sw.js").read_text(encoding="utf-8")
 MANIFEST = Path(__file__).with_name("manifest.json").read_text(encoding="utf-8")
 _icon_path = Path(__file__).with_name("icon.png")
 ICON = _icon_path.read_bytes() if _icon_path.exists() else None
+_shell_path = Path(__file__).with_name("shell.html")
+SHELL = _shell_path.read_text(encoding="utf-8") if _shell_path.exists() else None
+_mirror_path = Path(__file__).with_name("mirror.html")
+MIRROR = _mirror_path.read_text(encoding="utf-8") if _mirror_path.exists() else None
 def _csp():
     cdn = "https:"
     try:
@@ -98,6 +103,64 @@ async def send_r(send, status, data, ct="application/json", csp=False, extra_hea
     await send({"type": "http.response.start", "status": status, "headers": h})
     await send({"type": "http.response.body", "body": body})
 
+# ── Mirror reverse proxy ─────────────────────────────────────────────
+def _mirror_proxy(target, domain=""):
+    """curl target, return (body_bytes, content_type). Injects <base> for HTML."""
+    try:
+        r = subprocess.run(["curl", "-s", "-L", "-m", "30", "-D", "-", target],
+                           capture_output=True, timeout=35)
+        raw = r.stdout
+        # curl -D - with -L may produce multiple header blocks; use the last one.
+        sep = raw.rfind(b"\r\n\r\n")
+        if sep == -1: sep = raw.rfind(b"\n\n")
+        if sep == -1: return raw, "text/html"
+        headers_part = raw[:sep].decode("utf-8", "replace").lower()
+        body = raw[sep+4:] if raw[sep:sep+4] == b"\r\n\r\n" else raw[sep+2:]
+        ct = "text/html"
+        for line in headers_part.split("\n"):
+            if line.strip().startswith("content-type:"):
+                ct = line.split(":", 1)[1].strip()
+                break
+        if "text/html" in ct and domain:
+            body = re.sub(rb'(?i)<meta[^>]*(?:content-security-policy|x-frame-options)[^>]*>', b'', body)
+            body = f'<base href="/m/{domain}/">'.encode() + body
+        return body, ct
+    except Exception as e:
+        return json.dumps({"error": str(e)}).encode(), "application/json"
+
+def _mirror_target(path, qs):
+    """Parse mirror URL. Returns (target, domain) or (None, None)."""
+    from urllib.parse import parse_qs, urlparse
+    if path in ("/mirror", "/mirror/"):
+        params = parse_qs(qs)
+        raw = params.get("url", [""])[0]
+        if not raw or not raw.startswith(("http://", "https://")): return None, None
+        return raw, urlparse(raw).netloc
+    if path.startswith("/m/"):
+        rest = path[3:]
+        slash = rest.find("/")
+        if slash == -1: return "https://" + rest, rest
+        dom = rest[:slash]
+        p = rest[slash:]
+        target = "https://" + dom + p
+        if qs: target += "?" + qs
+        return target, dom
+    return None, None
+
+def _check_basic_auth(scope):
+    """Check Basic Auth against APPROVE_TOKEN. Returns True if valid."""
+    if not APPROVE_TOKEN: return False
+    for k, v in scope.get("headers", []):
+        if k == b"authorization":
+            auth = v.decode()
+            if auth.startswith("Basic "):
+                try:
+                    _, pwd = base64.b64decode(auth[6:]).decode().split(":", 1)
+                    return _hmac.compare_digest(pwd, APPROVE_TOKEN)
+                except Exception: pass
+            break
+    return False
+
 # ── Plugin slots — empty by default. plugins.py fills them. ──────────
 _plugins = {}     # route path → async handler
 _auth = None      # auth middleware (set by auth plugin)
@@ -108,8 +171,65 @@ async def app(scope, receive, send):
     path = scope["path"].rstrip("/") or "/"; method = scope["method"]
     print(f"  {method} {path}")
     raw = scope.get("raw_path", b"").decode("utf-8", "replace")
+    # Mirror: /mirror?url=X (entry) or /m/domain/path (subsequent).
+    _mt, _md = _mirror_target(path, scope.get("query_string", b"").decode())
+    if _mt:
+        if not _check_basic_auth(scope):
+            return await send_r(send, 401, '{"error":"authentication required"}',
+                                extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
+        body, ct = _mirror_proxy(_mt, _md)
+        return await send_r(send, 200, body, ct=ct)
+    # Mirror Referer fallback — absolute paths from mirrored pages.
+    _ref = ""
+    for k, v in scope.get("headers", []):
+        if k == b"referer": _ref = v.decode(); break
+    _dom = ""
+    if "/m/" in _ref:
+        _ri = _ref.index("/m/")
+        _rest = _ref[_ri+3:]
+        _dom = _rest.split("/")[0].split("?")[0]
+    elif "/mirror?url=" in _ref:
+        from urllib.parse import unquote, urlparse
+        _ri = _ref.index("/mirror?url=")
+        _raw = unquote(_ref[_ri+12:])
+        try: _dom = urlparse(_raw).netloc
+        except Exception: pass
+    if _dom and _check_basic_auth(scope):
+        _qs = scope.get("query_string", b"").decode()
+        if method == "GET":
+            # 302 redirect to /m/domain/path — pull URL back into namespace.
+            _redir = "/m/" + _dom + path
+            if _qs: _redir += "?" + _qs
+            return await send_r(send, 302, '{"redirect":true}',
+                                extra_headers=[[b"location", _redir.encode()]])
+        else:
+            # POST: proxy directly — redirect would lose body.
+            _target = "https://" + _dom + path
+            if _qs: _target += "?" + _qs
+            body, ct = _mirror_proxy(_target, _dom)
+            return await send_r(send, 200, body, ct=ct)
     if '..' in path or '//' in path or '..' in raw or '//' in raw:
         return await send_r(send, 400, '{"error":"invalid path"}')
+    # /shell, /mirror — Basic Auth protected root pages.
+    _root_page = (SHELL if path == "/shell" else MIRROR if path == "/mirror" else None)
+    if method == "GET" and path in ("/shell", "/mirror") and _root_page:
+        if not APPROVE_TOKEN:
+            return await send_r(send, 403, '{"error":"approve token not configured"}')
+        auth_header = ""
+        for k, v in scope.get("headers", []):
+            if k == b"authorization": auth_header = v.decode(); break
+        ok = False
+        if auth_header.startswith("Basic "):
+            try:
+                decoded = base64.b64decode(auth_header[6:]).decode()
+                _, pwd = decoded.split(":", 1)
+                ok = _hmac.compare_digest(pwd, APPROVE_TOKEN)
+            except Exception: pass
+        if not ok:
+            return await send_r(send, 401, '{"error":"authentication required"}',
+                                extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
+        return await send_r(send, 200, _root_page, ct="text/html")
+
     if _auth and not await _auth(scope, path, method):
         return await send_r(send, 403, '{"error":"unauthorized"}')
     parts = [p for p in path.split("/") if p]

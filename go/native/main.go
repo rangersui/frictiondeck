@@ -16,9 +16,12 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/elastik/go/core"
 )
@@ -102,6 +105,91 @@ func mapError(err error) (int, string) {
 	}
 }
 
+// getApproveToken extracts the approve token from X-Approve-Token header
+// or Basic Auth password (for /shell browser sessions).
+func getApproveToken(r *http.Request) string {
+	if t := r.Header.Get("X-Approve-Token"); t != "" {
+		return t
+	}
+	_, password, ok := r.BasicAuth()
+	if ok {
+		return password
+	}
+	return ""
+}
+
+// ─── mirror reverse proxy ────────────────────────────────────────────
+
+var mirrorClient = &http.Client{Timeout: 30 * time.Second}
+var metaCSPRe = regexp.MustCompile(`(?i)<meta[^>]*(?:content-security-policy|x-frame-options)[^>]*>`)
+
+// mirrorProxy fetches target URL and writes response. For HTML, injects <base> and
+// strips <meta> CSP tags. Origin headers are never forwarded — only Content-Type.
+func mirrorProxy(w http.ResponseWriter, target, domain string) {
+	req, err := http.NewRequest("GET", target, nil)
+	if err != nil {
+		writeErr(w, 502, "proxy error: "+err.Error())
+		return
+	}
+	req.Header.Del("User-Agent")
+	resp, err := mirrorClient.Do(req)
+	if err != nil {
+		writeErr(w, 502, "proxy error: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "text/html; charset=utf-8"
+	}
+	if strings.Contains(ct, "text/html") && domain != "" {
+		// Strip <meta> CSP/X-Frame-Options — you're root, you decide security policy.
+		body = metaCSPRe.ReplaceAll(body, nil)
+		// Inject <base> so relative URLs stay in /m/domain/ namespace.
+		base := []byte(`<base href="/m/` + domain + `/">`)
+		body = append(base, body...)
+	}
+	w.Header().Set("Content-Type", ct)
+	w.WriteHeader(200)
+	_, _ = w.Write(body)
+}
+
+// mirrorTarget parses a mirror URL and returns (full URL, domain).
+// /mirror?url=https://github.com → ("https://github.com", "github.com")
+// /m/github.com/features         → ("https://github.com/features", "github.com")
+func mirrorTarget(path, rawQuery string) (target, domain string, ok bool) {
+	// Entry: /mirror?url=X
+	if path == "/mirror" || path == "/mirror/" {
+		u, _ := url.ParseQuery(rawQuery)
+		raw := u.Get("url")
+		if raw == "" || (!strings.HasPrefix(raw, "http://") && !strings.HasPrefix(raw, "https://")) {
+			return "", "", false
+		}
+		parsed, err := url.Parse(raw)
+		if err != nil {
+			return "", "", false
+		}
+		return raw, parsed.Host, true
+	}
+	// Subsequent: /m/domain/path
+	if strings.HasPrefix(path, "/m/") {
+		rest := path[3:] // strip "/m/"
+		slash := strings.Index(rest, "/")
+		if slash == -1 {
+			return "https://" + rest, rest, true
+		}
+		dom := rest[:slash]
+		p := rest[slash:]
+		target = "https://" + dom + p
+		if rawQuery != "" {
+			target += "?" + rawQuery
+		}
+		return target, dom, true
+	}
+	return "", "", false
+}
+
 // ─── path guards ─────────────────────────────────────────────────────
 
 // pathSafe rejects requests that try to traverse the URL.
@@ -124,6 +212,57 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Mirror: /mirror?url=X (entry) or /m/domain/path (subsequent).
+	if target, domain, ok := mirrorTarget(path, r.URL.RawQuery); ok {
+		if s.cfg.approveToken == "" || !hmacEqual(getApproveToken(r), s.cfg.approveToken) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="elastik"`)
+			writeErr(w, 401, "authentication required")
+			return
+		}
+		mirrorProxy(w, target, domain)
+		return
+	}
+	// Mirror Referer fallback — absolute paths (/search) from mirrored pages.
+	// <base> only fixes relative URLs; absolute paths need Referer to find the domain.
+	if ref := r.Header.Get("Referer"); ref != "" {
+		domain := ""
+		if idx := strings.Index(ref, "/m/"); idx >= 0 {
+			rest := ref[idx+3:]
+			if slash := strings.Index(rest, "/"); slash > 0 {
+				rest = rest[:slash]
+			}
+			if qm := strings.Index(rest, "?"); qm > 0 {
+				rest = rest[:qm]
+			}
+			domain = rest
+		} else if idx := strings.Index(ref, "/mirror?url="); idx >= 0 {
+			raw := ref[idx+12:]
+			if decoded, err := url.QueryUnescape(raw); err == nil {
+				if parsed, err := url.Parse(decoded); err == nil {
+					domain = parsed.Host
+				}
+			}
+		}
+		if domain != "" && s.cfg.approveToken != "" && hmacEqual(getApproveToken(r), s.cfg.approveToken) {
+			if r.Method == http.MethodGet {
+				// GET: 302 redirect to /m/domain/path — pull URL back into namespace.
+				redir := "/m/" + domain + path
+				if qs := r.URL.RawQuery; qs != "" {
+					redir += "?" + qs
+				}
+				http.Redirect(w, r, redir, http.StatusFound)
+			} else {
+				// POST: proxy directly — redirect would lose body.
+				target := "https://" + domain + path
+				if qs := r.URL.RawQuery; qs != "" {
+					target += "?" + qs
+				}
+				mirrorProxy(w, target, domain)
+			}
+			return
+		}
+	}
+
 	// Auth — two tiers, mirrors plugins/auth.py:
 	//   Tier 1: admin + config-* + /proxy/postman → require X-Approve-Token
 	//   Tier 2: all other POST/PUT/DELETE → require X-Auth-Token
@@ -132,16 +271,19 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		parts := splitPath(path)
 		isAdmin := strings.HasPrefix(path, "/admin/")
 		isConfig := len(parts) >= 1 && strings.HasPrefix(parts[0], "config-")
-		isPostman := path == "/proxy/postman"
+		isPostman := strings.HasPrefix(path, "/proxy")
 		if isAdmin || isConfig || isPostman {
 			// Tier 1: approve token required — locked if not set.
-			if s.cfg.approveToken == "" || !hmacEqual(r.Header.Get("X-Approve-Token"), s.cfg.approveToken) {
+			if s.cfg.approveToken == "" || !hmacEqual(getApproveToken(r), s.cfg.approveToken) {
 				writeErr(w, 403, "unauthorized")
 				return
 			}
 		} else if s.cfg.token != "" {
 			// Tier 2: auth token for normal writes.
-			if !hmacEqual(r.Header.Get("X-Auth-Token"), s.cfg.token) {
+			// Approve token (via header or Basic Auth) also passes — higher privilege.
+			authOk := hmacEqual(r.Header.Get("X-Auth-Token"), s.cfg.token)
+			approveOk := s.cfg.approveToken != "" && hmacEqual(getApproveToken(r), s.cfg.approveToken)
+			if !authOk && !approveOk {
 				writeErr(w, 403, "unauthorized")
 				return
 			}
@@ -163,6 +305,26 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodGet && path == "/icon.png" {
 		s.serveIcon(w)
+		return
+	}
+
+	// /shell, /mirror — Basic Auth protected root pages.
+	if r.Method == http.MethodGet && (path == "/shell" || path == "/mirror") {
+		if s.cfg.approveToken == "" {
+			writeErr(w, 403, "approve token not configured")
+			return
+		}
+		_, pass, ok := r.BasicAuth()
+		if !ok || !hmacEqual(pass, s.cfg.approveToken) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="elastik"`)
+			writeErr(w, 401, "authentication required")
+			return
+		}
+		if path == "/shell" {
+			s.serveShell(w)
+		} else {
+			s.serveMirror(w)
+		}
 		return
 	}
 

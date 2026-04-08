@@ -1,0 +1,236 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>elastik shell</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;overflow:hidden}
+body{background:#1a1a2e;color:#e0e0e0;font-family:'Cascadia Code','Fira Code','SF Mono',Consolas,monospace;font-size:16px;-webkit-text-size-adjust:100%;display:flex;flex-direction:column}
+#output{flex:1;overflow-y:auto;padding:12px;white-space:pre-wrap;word-break:break-all;line-height:1.4}
+#bottom{background:#1a1a2e;border-top:1px solid #2a2a4e;padding:8px 12px;flex-shrink:0}
+#tab-bar{display:flex;gap:6px;padding:0 0 6px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+#tab-bar:empty{display:none;padding:0}
+#input-line{display:flex;align-items:center}
+#prompt{color:#7fdbca;margin-right:8px;white-space:nowrap}
+#cmd{flex:1;background:transparent;border:none;outline:none;color:#e0e0e0;font:inherit;caret-color:#7fdbca;font-size:16px}
+.out{color:#ccc}.err{color:#ff6b6b}.info{color:#7fdbca}
+.tab-btn{background:#2a2a4e;color:#7fdbca;border:1px solid #3a3a5e;border-radius:4px;padding:6px 12px;font:inherit;font-size:14px;white-space:nowrap;cursor:pointer;-webkit-tap-highlight-color:transparent}
+.tab-btn:active{background:#3a3a6e}
+</style></head><body>
+<div id="output"></div>
+<div id="bottom"><div id="tab-bar"></div><div id="input-line"><span id="prompt">elastik:~$</span><input id="cmd" autofocus spellcheck="false" autocapitalize="none" autocomplete="off" autocorrect="off"></div></div>
+<script>
+const out=document.getElementById('output'),cmd=document.getElementById('cmd'),promptEl=document.getElementById('prompt');
+let _cwd='',_history=[],_hi=-1,_worlds=[];
+
+// fetch world list for tab completion
+fetch('/stages').then(r=>r.json()).then(d=>{_worlds=d.map(s=>s.name)}).catch(()=>{});
+
+// convenience object: el.r('work') → fetch read, el.w('work','hi') → write
+const el={
+  r:(w)=>fetch('/'+(w||_cwd)+'/read').then(r=>r.json()),
+  w:(w,b)=>fetch('/'+(w||_cwd)+'/write',{method:'POST',body:b}).then(r=>r.json()),
+  a:(w,b)=>fetch('/'+(w||_cwd)+'/append',{method:'POST',body:b}).then(r=>r.json()),
+  stages:()=>fetch('/stages').then(r=>r.json()),
+  grep:(q,w)=>fetch('/grep?q='+encodeURIComponent(q)+(w?'&world='+w:'')).then(r=>r.text()),
+  post:(url,body,headers)=>fetch('/proxy/postman',{method:'POST',body:JSON.stringify({url,method:'POST',body,headers:headers||{}})}).then(r=>r.text()),
+  get:(url)=>fetch('/proxy?url='+encodeURIComponent(url)).then(r=>r.text()),
+  curl:(url)=>fetch('/proxy?url='+encodeURIComponent(url)).then(r=>r.text()),
+};
+
+function updatePrompt(){
+  promptEl.textContent='elastik:'+(_cwd||'~')+'$';
+}
+
+function appendOut(text,cls){
+  if(text===undefined||text===null)text='';
+  if(typeof text==='object')try{text=JSON.stringify(text,null,2)}catch(e){text=String(text)}
+  else text=String(text);
+  const span=document.createElement('span');
+  span.className=cls||'out';
+  span.textContent=text+'\n';
+  out.appendChild(span);
+  out.scrollTop=out.scrollHeight;
+}
+
+function appendPromptLine(input){
+  const span=document.createElement('span');
+  span.className='info';
+  span.textContent='elastik:'+(_cwd||'~')+'$ '+input+'\n';
+  out.appendChild(span);
+}
+
+// ── command parser ──────────────────────────────────────────────────
+function parseCommand(input){
+  const parts=input.match(/(?:[^\s"]+|"[^"]*")+/g)||[];
+  if(!parts.length)return undefined;
+  const c=parts[0].toLowerCase();
+
+  if(c==='help')return{v:'\n  Files\n    ls                  list worlds\n    cat [world]         read content\n    cd <world>          set context\n    echo text > world   write\n    echo text >> world  append\n\n  Search\n    grep <q> [world]    search lines\n    head [-n N] [world] first N lines\n    tail [-n N] [world] last N lines\n    wc [world]          count lines/words/bytes\n\n  Network\n    curl <url>          proxy request\n    whoami              node info\n\n  Shell\n    history             past commands\n    clear               clear screen\n    help                this\n\n  Anything else runs as JavaScript.'};
+  if(c==='clear')return{v:(out.textContent='',null)};
+  if(c==='history')return{v:_history.map((h,i)=>(i+1)+' '+h).join('\n')||'(empty)'};
+  if(c==='ls')return{p:fetch('/stages').then(r=>r.json()).then(d=>d.map(s=>s.name+'  (v'+s.version+')').join('\n')||'(no worlds)')};
+  if(c==='whoami')return{p:fetch('/whoami').then(r=>r.text())};
+
+  if(c==='cd'){
+    const target=parts[1]||'';
+    if(!target||target==='~'||target==='..'){_cwd='';updatePrompt();return{v:'~'};}
+    _cwd=target;updatePrompt();return{v:_cwd};
+  }
+
+  if(c==='cat'){
+    const w=parts[1]||_cwd;
+    if(!w)return{v:'usage: cat <world>'};
+    return{p:fetch('/'+w+'/read').then(r=>r.json()).then(d=>d.stage_html||'(empty)')};
+  }
+
+  if(c==='grep'){
+    if(!parts[1])return{v:'usage: grep <query> [world]'};
+    const q=parts[1].replace(/^"|"$/g,'');
+    const w=parts[2]||_cwd||'';
+    return{p:fetch('/grep?q='+encodeURIComponent(q)+(w?'&world='+w:'')).then(r=>r.text()).then(t=>t||'(no matches)')};
+  }
+
+  if(c==='head'){
+    let n=10,i=1;
+    if(parts[i]==='-n'&&parts[i+1]){n=parseInt(parts[i+1]);i+=2;}
+    const w=parts[i]||_cwd;
+    if(!w)return{v:'usage: head [-n N] <world>'};
+    return{p:fetch('/head?world='+w+'&n='+n).then(r=>r.text()).then(t=>t||'(empty)')};
+  }
+
+  if(c==='tail'){
+    let n=10,i=1;
+    if(parts[i]==='-n'&&parts[i+1]){n=parseInt(parts[i+1]);i+=2;}
+    const w=parts[i]||_cwd;
+    if(!w)return{v:'usage: tail [-n N] <world>'};
+    return{p:fetch('/tail?world='+w+'&n='+n).then(r=>r.text()).then(t=>t||'(empty)')};
+  }
+
+  if(c==='wc'){
+    const w=parts[1]||_cwd;
+    if(!w)return{v:'usage: wc <world>'};
+    return{p:fetch('/wc?world='+w).then(r=>r.text())};
+  }
+
+  if(c==='echo'){
+    const raw=input.slice(5).trim();
+    const am=raw.match(/^(.+?)\s*>>\s*(\S+)$/);
+    const wm=raw.match(/^(.+?)\s*>\s*(\S+)$/);
+    if(am)return{p:fetch('/'+am[2]+'/append',{method:'POST',body:am[1]}).then(r=>r.json())};
+    if(wm)return{p:fetch('/'+wm[2]+'/write',{method:'POST',body:wm[1]}).then(r=>r.json())};
+    return{v:raw};
+  }
+
+  if(c==='curl'){
+    const url=parts[1]||'';
+    if(!url)return{v:'usage: curl <url>'};
+    return{p:fetch('/proxy?url='+encodeURIComponent(url)).then(r=>r.text())};
+  }
+
+  return undefined; // not a known command → eval as JS
+}
+
+// ── tab completion (shared between keyboard Tab and mobile bar) ─────
+const CMDS=['ls','cd','cat','grep','head','tail','wc','echo','curl','whoami','history','clear','help'];
+const tabBar=document.getElementById('tab-bar');
+
+function doComplete(){
+  const val=cmd.value;
+  const parts=val.split(/\s+/);
+  const last=parts[parts.length-1];
+  const pool=parts.length<=1?CMDS:_worlds;
+  if(!last){showTabs(pool);return}
+  const matches=pool.filter(x=>x.startsWith(last));
+  if(matches.length===1){
+    parts[parts.length-1]=matches[0];
+    cmd.value=parts.join(' ')+' ';
+    hideTabs();
+  }else if(matches.length>1){
+    showTabs(matches);
+  }else{hideTabs()}
+}
+
+function showTabs(items){
+  tabBar.innerHTML='';
+  items.slice(0,20).forEach(t=>{
+    const b=document.createElement('button');
+    b.className='tab-btn';b.textContent=t;
+    b.onclick=e=>{
+      e.preventDefault();
+      const parts=cmd.value.split(/\s+/);
+      if(parts.length<=1)cmd.value=t+' ';
+      else{parts[parts.length-1]=t;cmd.value=parts.join(' ')+' ';}
+      hideTabs();cmd.focus();
+    };
+    tabBar.appendChild(b);
+  });
+}
+function hideTabs(){tabBar.innerHTML=''}
+
+// show command buttons on focus (mobile)
+cmd.addEventListener('focus',()=>{if(!cmd.value)showTabs(CMDS)});
+cmd.addEventListener('input',()=>{
+  if(!cmd.value){showTabs(CMDS);return}
+  const parts=cmd.value.split(/\s+/);
+  const last=parts[parts.length-1];
+  const pool=parts.length<=1?CMDS:_worlds;
+  const matches=pool.filter(x=>x.startsWith(last));
+  if(matches.length>0&&matches.length<=20)showTabs(matches);
+  else hideTabs();
+});
+
+// ── input handling ──────────────────────────────────────────────────
+cmd.addEventListener('keydown',function(e){
+  if(e.key==='Tab'){e.preventDefault();doComplete();return}
+
+  // History
+  if(e.key==='ArrowUp'){
+    e.preventDefault();
+    if(_hi<_history.length-1){_hi++;cmd.value=_history[_history.length-1-_hi];}
+    return;
+  }
+  if(e.key==='ArrowDown'){
+    e.preventDefault();
+    if(_hi>0){_hi--;cmd.value=_history[_history.length-1-_hi];}
+    else{_hi=-1;cmd.value='';}
+    return;
+  }
+
+  if(e.key!=='Enter')return;
+  execInput();
+});
+
+function execInput(){
+  const input=cmd.value.trim();
+  cmd.value='';
+  _hi=-1;
+  hideTabs();
+  if(!input)return;
+  _history.push(input);
+
+  appendPromptLine(input);
+
+  const parsed=parseCommand(input);
+  if(parsed!==undefined){
+    if(parsed===null)return;
+    if(parsed.v!==undefined){
+      if(parsed.v!==null)appendOut(parsed.v);
+    }else if(parsed.p){
+      parsed.p.then(r=>appendOut(r)).catch(e=>appendOut('ERROR: '+e.message,'err'));
+    }
+    return;
+  }
+
+  // eval as JS
+  try{
+    const r=eval(input);
+    if(r&&typeof r.then==='function'){
+      r.then(v=>appendOut(v)).catch(e=>appendOut('ERROR: '+e.message,'err'));
+    }else{
+      if(r!==undefined)appendOut(r);
+    }
+  }catch(e){appendOut('ERROR: '+e.message,'err');}
+}
+
+// keep focus on input
+document.addEventListener('click',e=>{if(!e.target.closest('.tab-btn'))cmd.focus()});
+appendOut('elastik shell — type help for commands, or any JS.\n','info');
+</script></body></html>

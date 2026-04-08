@@ -22,6 +22,8 @@ type staticFiles struct {
 	sw       []byte
 	manifest []byte
 	icon     []byte
+	shell    []byte
+	mirror   []byte
 }
 
 // loadStatic searches ELASTIK_STATIC, then CWD, then the exe dir, for
@@ -56,6 +58,8 @@ func loadStatic() staticFiles {
 		sw:       find("sw.js"),
 		manifest: find("manifest.json"),
 		icon:     find("icon.png"),
+		shell:    find("shell.html"),
+		mirror:   find("mirror.html"),
 	}
 }
 
@@ -111,6 +115,26 @@ func (s *server) serveIcon(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "image/png")
 	w.WriteHeader(200)
 	_, _ = w.Write(s.static.icon)
+}
+
+func (s *server) serveMirror(w http.ResponseWriter) {
+	if s.static.mirror == nil {
+		writeErr(w, 404, "mirror.html not found")
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(200)
+	_, _ = w.Write(s.static.mirror)
+}
+
+func (s *server) serveShell(w http.ResponseWriter) {
+	if s.static.shell == nil {
+		writeErr(w, 404, "shell.html not found")
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(200)
+	_, _ = w.Write(s.static.shell)
 }
 
 func (s *server) serveManifest(w http.ResponseWriter) {

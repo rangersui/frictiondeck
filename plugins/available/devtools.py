@@ -8,7 +8,7 @@ Not loaded by default. Load with: POST /admin/load  body=devtools
 """
 DESCRIPTION = "Unix pipe primitives — grep (-l), tail, head, wc (-c), rev, echo, null, full, true, false, yes, cowsay, health, db/size, whoami, uuid, verify, delay, bench, config/dump, time"
 
-import sys, json, os, time, sqlite3
+import sys, json, os, subprocess, time, sqlite3
 from pathlib import Path
 
 # Go exports $ELASTIK_DATA / $ELASTIK_ROOT before forking plugins.
@@ -313,7 +313,17 @@ async def handle_cowsay(method, body, params):
     return {"_html": cow, "_status": 200}
 
 
+async def handle_proxy(method, body, params):
+    from urllib.parse import unquote
+    url = unquote(params.get("url", ""))
+    if not url or not url.startswith(("http://", "https://")):
+        return {"error": "?url= required (http/https)", "_status": 400}
+    r = subprocess.run(["curl", "-s", "-L", "-m", "30", url], capture_output=True, timeout=35)
+    return {"_html": r.stdout.decode("utf-8", "replace"), "_status": 200}
+
+
 ROUTES = {
+    "/proxy": handle_proxy,
     "/grep": handle_grep,
     "/tail": handle_tail,
     "/head": handle_head,

@@ -1,0 +1,26 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"><title>elastik mirror</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+html,body{height:100%;overflow:hidden}
+body{background:#1a1a2e;display:flex;flex-direction:column;font-family:system-ui,sans-serif}
+#bar{display:flex;padding:8px;gap:8px;background:#1a1a2e;border-bottom:1px solid #2a2a4e;flex-shrink:0}
+#url{flex:1;background:#2a2a4e;border:1px solid #3a3a5e;border-radius:4px;color:#e0e0e0;font-size:16px;padding:8px 12px;outline:none}
+#url:focus{border-color:#7fdbca}
+#go{background:#2a2a4e;color:#7fdbca;border:1px solid #3a3a5e;border-radius:4px;padding:8px 16px;font-size:16px;cursor:pointer}
+#go:active{background:#3a3a6e}
+#view{flex:1;border:none;background:#fff}
+</style></head><body>
+<div id="bar"><input id="url" placeholder="https://..." autocapitalize="none" autocorrect="off" spellcheck="false"><button id="go">Go</button></div>
+<iframe id="view"></iframe>
+<script>
+const url=document.getElementById('url'),view=document.getElementById('view');
+function go(){
+  let u=url.value.trim();
+  if(!u)return;
+  if(!u.startsWith('http'))u='https://'+u;
+  url.value=u;
+  view.src='/mirror?url='+encodeURIComponent(u);
+}
+url.addEventListener('keydown',e=>{if(e.key==='Enter')go()});
+document.getElementById('go').addEventListener('click',go);
+</script></body></html>
