@@ -122,6 +122,29 @@ async def handle_db_size(method, body, params):
             "total": fmt(total), "count": len(sizes), "_status": 200}
 
 
+async def handle_whoami(method, body, params):
+    """whoami — physical self-awareness. IP, hostname, interfaces."""
+    import socket
+    info = {"hostname": socket.gethostname()}
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        info["ip"] = s.getsockname()[0]
+        s.close()
+    except Exception:
+        info["ip"] = "127.0.0.1"
+    return {**info, "_status": 200}
+
+
+async def handle_uuid(method, body, params):
+    """uuid — cryptographic randomness. One per call."""
+    import uuid
+    n = min(int(params.get("n", "1")), 100)
+    if n == 1:
+        return {"_html": str(uuid.uuid4()), "_status": 200}
+    return {"_html": "\n".join(str(uuid.uuid4()) for _ in range(n)), "_status": 200}
+
+
 _COW = r"""
  {border}
 < {msg} >
@@ -152,6 +175,8 @@ ROUTES = {
     "/health": handle_health,
     "/db/size": handle_db_size,
     "/cowsay": handle_cowsay,
+    "/whoami": handle_whoami,
+    "/uuid": handle_uuid,
 }
 
 
@@ -226,6 +251,26 @@ def _cgi_dispatch(d):
             return f"{b}B"
         return {"status": 200, "body": json.dumps({"worlds": {k: fmt(v) for k, v in sizes.items()},
                 "total": fmt(total), "count": len(sizes)})}
+
+    if path == "/whoami":
+        import socket
+        info = {"hostname": socket.gethostname()}
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            info["ip"] = s.getsockname()[0]
+            s.close()
+        except Exception:
+            info["ip"] = "127.0.0.1"
+        return {"status": 200, "body": json.dumps(info)}
+
+    if path == "/uuid":
+        import uuid
+        n = min(int(params.get("n", "1")), 100)
+        if n == 1:
+            return {"status": 200, "body": str(uuid.uuid4()), "content_type": "text/plain; charset=utf-8"}
+        return {"status": 200, "body": "\n".join(str(uuid.uuid4()) for _ in range(n)),
+                "content_type": "text/plain; charset=utf-8"}
 
     if path == "/cowsay":
         text = params.get("say", "") or body or "moo"
