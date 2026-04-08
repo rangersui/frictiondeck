@@ -6,7 +6,7 @@ fetch('/grep?q=error').then(r=>r.json())  → grep
 
 Not loaded by default. Load with: POST /admin/load  body=devtools
 """
-DESCRIPTION = "Unix pipe primitives — grep, tail, head, wc, null, mirror, health, db/size"
+DESCRIPTION = "Unix pipe primitives — grep, tail, head, wc, echo, null, health, db/size"
 
 import sys, json, os, time, sqlite3
 from pathlib import Path
@@ -94,11 +94,10 @@ async def handle_null(method, body, params):
     return {"_status": 204, "_html": ""}
 
 
-async def handle_mirror(method, body, params):
-    """Echo back the raw request — method, params, body."""
+async def handle_echo(method, body, params):
+    """echo — return body unchanged."""
     text = body if isinstance(body, str) else body.decode("utf-8", "replace")
-    return {"method": method, "params": {k: v for k, v in params.items() if k != "_scope"},
-            "body": text, "_status": 200}
+    return {"_html": text, "_status": 200}
 
 
 async def handle_health(method, body, params):
@@ -129,7 +128,7 @@ ROUTES = {
     "/head": handle_head,
     "/wc": handle_wc,
     "/null": handle_null,
-    "/mirror": handle_mirror,
+    "/echo": handle_echo,
     "/health": handle_health,
     "/db/size": handle_db_size,
 }
@@ -186,8 +185,8 @@ def _cgi_dispatch(d):
     if path == "/null":
         return {"status": 204, "body": ""}
 
-    if path == "/mirror":
-        return {"status": 200, "body": json.dumps({"method": method, "params": params, "body": body})}
+    if path == "/echo":
+        return {"status": 200, "body": body}
 
     if path == "/health":
         return {"status": 200, "body": json.dumps({"ok": True, "uptime": round(time.time() - _START, 1)})}
