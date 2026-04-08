@@ -353,7 +353,7 @@ def _run_adversarial_tests(port, token):
 
     # 2. Infinite output: Go kills at 5MB → 502
     st, body = http_get(port, "/infinite")
-    test("adversarial: infinite output -> 502", st == 502,
+    test("adversarial: infinite output -> 413", st == 413,
          f"status={st} body={body[:80]}")
 
     # Server should still be alive after adversarial attacks

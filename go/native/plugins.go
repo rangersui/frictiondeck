@@ -169,7 +169,7 @@ func servePlugin(w http.ResponseWriter, r *http.Request, pluginPath, route strin
 	// real cause is oversized output.
 	if len(res.data) > maxPluginOut {
 		log.Printf("  plugin %s: output too large (>%d bytes)", filepath.Base(pluginPath), maxPluginOut)
-		writeErr(w, 502, "plugin output too large")
+		writeErr(w, 413, "plugin output too large")
 		return
 	}
 	if waitErr != nil {
