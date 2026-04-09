@@ -328,6 +328,39 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// /view/{world} — root view: direct HTML render, Basic Auth protected.
+	if r.Method == http.MethodGet && strings.HasPrefix(path, "/view/") {
+		if s.cfg.approveToken == "" {
+			writeErr(w, 403, "approve token not configured")
+			return
+		}
+		_, pass, ok := r.BasicAuth()
+		if !ok || !hmacEqual(pass, s.cfg.approveToken) {
+			w.Header().Set("WWW-Authenticate", `Basic realm="elastik"`)
+			writeErr(w, 401, "authentication required")
+			return
+		}
+		name := path[6:] // /view/work → work
+		if !core.ValidName(name) {
+			writeErr(w, 400, "invalid world name")
+			return
+		}
+		stage, err := core.ReadWorld(s.db, name)
+		if err != nil {
+			st, msg := mapError(err)
+			writeErr(w, st, msg)
+			return
+		}
+		html := stage.StageHTML
+		if html == "" {
+			html = "<em>(empty)</em>"
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(html))
+		return
+	}
+
 	// /stages — list every world.
 	if r.Method == http.MethodGet && path == "/stages" {
 		list, err := core.ListStages(s.db)

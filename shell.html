@@ -13,12 +13,15 @@ body{background:#1a1a2e;color:#e0e0e0;font-family:'Cascadia Code','Fira Code','S
 .out{color:#ccc}.err{color:#ff6b6b}.info{color:#7fdbca}
 .tab-btn{background:#2a2a4e;color:#7fdbca;border:1px solid #3a3a5e;border-radius:4px;padding:6px 12px;font:inherit;font-size:14px;white-space:nowrap;cursor:pointer;-webkit-tap-highlight-color:transparent}
 .tab-btn:active{background:#3a3a6e}
+.render-frame{display:block;border:1px solid #3a3a5e;border-radius:4px;margin:4px 0;background:#fff;width:100%;height:70vh;white-space:normal;word-break:normal}
+.render-root{display:block;border:1px solid #ff6b6b;border-radius:4px;margin:4px 0;background:#fff;padding:0;overflow:auto;color:#000;white-space:normal;word-break:normal}
+.warn{color:#ffd93d}
 </style></head><body>
 <div id="output"></div>
 <div id="bottom"><div id="tab-bar"></div><div id="input-line"><span id="prompt">elastik:~$</span><input id="cmd" autofocus spellcheck="false" autocapitalize="none" autocomplete="off" autocorrect="off"></div></div>
 <script>
 const out=document.getElementById('output'),cmd=document.getElementById('cmd'),promptEl=document.getElementById('prompt');
-let _cwd='',_history=[],_hi=-1,_worlds=[];
+let _cwd='',_history=[],_hi=-1,_worlds=[],_pending=null;
 
 // fetch world list for tab completion
 fetch('/stages').then(r=>r.json()).then(d=>{_worlds=d.map(s=>s.name)}).catch(()=>{});
@@ -57,13 +60,46 @@ function appendPromptLine(input){
   out.appendChild(span);
 }
 
+// ── render helpers ──────────────────────────────────────────────────
+function renderRoot(html){
+  // innerHTML in root context — scripts need manual eval
+  const div=document.createElement('div');
+  div.className='render-root';
+  div.innerHTML=html;
+  // innerHTML doesn't execute <script> — extract and eval them
+  div.querySelectorAll('script').forEach(s=>{
+    const ns=document.createElement('script');
+    if(s.src)ns.src=s.src; else ns.textContent=s.textContent;
+    s.replaceWith(ns);
+  });
+  out.appendChild(div);
+  out.scrollTop=out.scrollHeight;
+}
+
+function renderSafe(html){
+  // iframe sandbox — same as index.html: allow-scripts allow-popups, no allow-same-origin
+  const iframe=document.createElement('iframe');
+  iframe.sandbox='allow-scripts allow-popups';
+  iframe.className='render-frame';
+  iframe.srcdoc=html;
+  out.appendChild(iframe);
+  out.scrollTop=out.scrollHeight;
+}
+
+function previewSource(html){
+  const lines=html.split('\n');
+  const preview=lines.slice(0,8).join('\n');
+  const suffix=lines.length>8?'\n  ... ('+lines.length+' lines total)':'';
+  return preview+suffix;
+}
+
 // ── command parser ──────────────────────────────────────────────────
 function parseCommand(input){
   const parts=input.match(/(?:[^\s"]+|"[^"]*")+/g)||[];
   if(!parts.length)return undefined;
   const c=parts[0].toLowerCase();
 
-  if(c==='help')return{v:'\n  Files\n    ls                  list worlds\n    cat [world]         read content\n    cd <world>          set context\n    echo text > world   write\n    echo text >> world  append\n\n  Search\n    grep <q> [world]    search lines\n    head [-n N] [world] first N lines\n    tail [-n N] [world] last N lines\n    wc [world]          count lines/words/bytes\n\n  Network\n    curl <url>          proxy request\n    whoami              node info\n\n  Shell\n    history             past commands\n    clear               clear screen\n    help                this\n\n  Anything else runs as JavaScript.'};
+  if(c==='help')return{v:'\n  Files\n    ls                  list worlds\n    cat [world]         render (root, confirm y/n)\n    cat -s [world]      view source (safe)\n    cat --safe [world]  render in sandbox (iframe)\n    open [world]        open in new tab (user)\n    open! [world]       open in new tab (root)\n    cd <world>          set context\n    echo text > world   write\n    echo text >> world  append\n\n  Search\n    grep <q> [world]    search lines\n    head [-n N] [world] first N lines\n    tail [-n N] [world] last N lines\n    wc [world]          count lines/words/bytes\n\n  Network\n    curl <url>          proxy request\n    whoami              node info\n\n  Shell\n    history             past commands\n    clear               clear screen\n    help                this\n\n  Anything else runs as JavaScript.'};
   if(c==='clear')return{v:(out.textContent='',null)};
   if(c==='history')return{v:_history.map((h,i)=>(i+1)+' '+h).join('\n')||'(empty)'};
   if(c==='ls')return{p:fetch('/stages').then(r=>r.json()).then(d=>d.map(s=>s.name+'  (v'+s.version+')').join('\n')||'(no worlds)')};
@@ -76,9 +112,32 @@ function parseCommand(input){
   }
 
   if(c==='cat'){
-    const w=parts[1]||_cwd;
-    if(!w)return{v:'usage: cat <world>'};
-    return{p:fetch('/'+w+'/read').then(r=>r.json()).then(d=>d.stage_html||'(empty)')};
+    // cat -s world  → source view (textContent, safe)
+    // cat --safe world → iframe sandbox (untrusted, like index.html)
+    // cat world     → innerHTML root context (trusted, confirm y/n)
+    let mode='root',i=1;
+    if(parts[i]==='-s'){mode='source';i++;}
+    else if(parts[i]==='--safe'){mode='safe';i++;}
+    const w=parts[i]||_cwd;
+    if(!w)return{v:'usage: cat [-s|--safe] <world>'};
+    if(mode==='source'){
+      return{p:fetch('/'+w+'/read').then(r=>r.json()).then(d=>d.stage_html||'(empty)')};
+    }
+    if(mode==='safe'){
+      return{p:fetch('/'+w+'/read').then(r=>r.json()).then(d=>{
+        if(!d.stage_html)return '(empty)';
+        renderSafe(d.stage_html);
+        return null;
+      })};
+    }
+    // root mode — fetch, preview, ask confirmation
+    return{p:fetch('/'+w+'/read').then(r=>r.json()).then(d=>{
+      if(!d.stage_html)return '(empty)';
+      appendOut(previewSource(d.stage_html));
+      appendOut('Render in root context? [y/n]','warn');
+      _pending={type:'render',html:d.stage_html};
+      return null;
+    })};
   }
 
   if(c==='grep'){
@@ -119,6 +178,17 @@ function parseCommand(input){
     return{v:raw};
   }
 
+  if(c==='open'||c==='open!'){
+    const w=parts[1]||_cwd;
+    if(!w)return{v:'usage: open[!] <world>'};
+    if(c==='open!'){
+      window.open('/view/'+w,'_blank');
+      return{v:'opened /view/'+w+' (root)'};
+    }
+    window.open('/'+w,'_blank');
+    return{v:'opened /'+w};
+  }
+
   if(c==='curl'){
     const url=parts[1]||'';
     if(!url)return{v:'usage: curl <url>'};
@@ -129,7 +199,7 @@ function parseCommand(input){
 }
 
 // ── tab completion (shared between keyboard Tab and mobile bar) ─────
-const CMDS=['ls','cd','cat','grep','head','tail','wc','echo','curl','whoami','history','clear','help'];
+const CMDS=['ls','cd','cat','open','open!','grep','head','tail','wc','echo','curl','whoami','history','clear','help'];
 const tabBar=document.getElementById('tab-bar');
 
 function doComplete(){
@@ -204,6 +274,20 @@ function execInput(){
   _hi=-1;
   hideTabs();
   if(!input)return;
+
+  // pending confirmation handler (cat root render)
+  if(_pending){
+    const p=_pending;
+    _pending=null;
+    appendPromptLine(input);
+    if(input.toLowerCase()==='y'||input.toLowerCase()==='yes'){
+      renderRoot(p.html);
+    }else{
+      appendOut('cancelled.','info');
+    }
+    return;
+  }
+
   _history.push(input);
 
   appendPromptLine(input);
@@ -214,7 +298,7 @@ function execInput(){
     if(parsed.v!==undefined){
       if(parsed.v!==null)appendOut(parsed.v);
     }else if(parsed.p){
-      parsed.p.then(r=>appendOut(r)).catch(e=>appendOut('ERROR: '+e.message,'err'));
+      parsed.p.then(r=>{if(r!==null&&r!==undefined)appendOut(r)}).catch(e=>appendOut('ERROR: '+e.message,'err'));
     }
     return;
   }

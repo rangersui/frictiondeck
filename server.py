@@ -230,6 +230,23 @@ async def app(scope, receive, send):
                                 extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
         return await send_r(send, 200, _root_page, ct="text/html")
 
+    # /view/{world} — root view: direct HTML render, Basic Auth protected.
+    if method == "GET" and path.startswith("/view/"):
+        if not APPROVE_TOKEN:
+            return await send_r(send, 403, '{"error":"approve token not configured"}')
+        if not _check_basic_auth(scope):
+            return await send_r(send, 401, '{"error":"authentication required"}',
+                                extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
+        name = path[6:]  # /view/work → work
+        if not _VALID_NAME.match(name):
+            return await send_r(send, 400, '{"error":"invalid world name"}')
+        if not (DATA / name / "universe.db").exists():
+            return await send_r(send, 404, '{"error":"world not found"}')
+        c = conn(name)
+        r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+        html = r["stage_html"] if r and r["stage_html"] else "<em>(empty)</em>"
+        return await send_r(send, 200, html, ct="text/html")
+
     if _auth and not await _auth(scope, path, method):
         return await send_r(send, 403, '{"error":"unauthorized"}')
     parts = [p for p in path.split("/") if p]
