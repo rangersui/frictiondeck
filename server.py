@@ -103,6 +103,125 @@ async def send_r(send, status, data, ct="application/json", csp=False, extra_hea
     await send({"type": "http.response.start", "status": status, "headers": h})
     await send({"type": "http.response.body", "body": body})
 
+# ── WebDAV ───────────────────────────────────────────────────────────
+def _dav_world_name(path):
+    """Extract world name from /dav/xyz.html → 'xyz'. Strips any extension
+    since world names never contain dots. Returns '' for /dav root."""
+    rest = path[4:].lstrip("/")  # strip /dav
+    if not rest: return ""
+    dot = rest.rfind(".")
+    return rest[:dot] if dot > 0 else rest
+
+_DAV_TYPE_RE = re.compile(r'<!--type:(\w+)-->')
+
+def _dav_file_ext(stage_html):
+    """Return file extension based on <!--type:xxx--> declaration.
+    Worlds using <!--use:renderer--> are always .html."""
+    if stage_html.startswith("<!--use:"): return ".html"
+    m = _DAV_TYPE_RE.search(stage_html)
+    return "." + m.group(1) if m else ".html"
+
+def _dav_prop_entry(href, restype, ct, size, modified):
+    rt = "<D:resourcetype><D:collection/></D:resourcetype>" if restype == "collection" else "<D:resourcetype/>"
+    ct_line = f"<D:getcontenttype>{ct}</D:getcontenttype>" if ct else ""
+    return (f"<D:response><D:href>{href}</D:href><D:propstat><D:prop>"
+            f"{rt}<D:getcontentlength>{size}</D:getcontentlength>"
+            f"<D:getlastmodified>{modified}</D:getlastmodified>"
+            f"{ct_line}</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>")
+
+async def _handle_dav(scope, receive, send, path, method):
+    # Auth: same as normal routes. Read open, write needs auth token.
+    if method in ("PUT", "DELETE") and AUTH_TOKEN:
+        headers = dict(scope.get("headers", []))
+        tok = headers.get(b"x-auth-token", b"").decode()
+        auth_ok = _hmac.compare_digest(tok, AUTH_TOKEN) if tok else False
+        approve_ok = APPROVE_TOKEN and _check_basic_auth(scope)
+        if not auth_ok and not approve_ok:
+            return await send_r(send, 401, '{"error":"unauthorized"}',
+                                extra_headers=[[b"www-authenticate", b'Basic realm="elastik"']])
+    from email.utils import formatdate
+    now = formatdate(usegmt=True)
+
+    if method == "OPTIONS":
+        h = [[b"dav", b"1"], [b"allow", b"OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND"]]
+        return await send_r(send, 200, "", extra_headers=h)
+
+    if method == "PROPFIND":
+        depth = "1"
+        for k, v in scope.get("headers", []):
+            if k == b"depth": depth = v.decode(); break
+        name = _dav_world_name(path)
+        if name:
+            if not _VALID_NAME.match(name) or not (DATA / name / "universe.db").exists():
+                return await send_r(send, 404, '{"error":"not found"}')
+            c = conn(name)
+            r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+            html = r["stage_html"] if r and r["stage_html"] else ""
+            ext = _dav_file_ext(html)
+            xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
+                   + _dav_prop_entry(f"/dav/{name}{ext}", "", "text/plain", len(html), now)
+                   + '</D:multistatus>')
+            return await send_r(send, 207, xml, ct="application/xml; charset=utf-8")
+        # Root collection
+        xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
+               + _dav_prop_entry("/dav/", "collection", "", 0, now))
+        if depth == "1" and DATA.exists():
+            for d in sorted(DATA.iterdir()):
+                if d.is_dir() and (d / "universe.db").exists():
+                    c = conn(d.name)
+                    r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+                    html = r["stage_html"] if r and r["stage_html"] else ""
+                    xml += _dav_prop_entry(f"/dav/{d.name}{_dav_file_ext(html)}", "", "text/plain", len(html), now)
+        xml += '</D:multistatus>'
+        return await send_r(send, 207, xml, ct="application/xml; charset=utf-8")
+
+    if method in ("GET", "HEAD"):
+        name = _dav_world_name(path)
+        if not name:
+            # Browser hitting /dav/ — list worlds as simple HTML
+            html = "<h1>elastik WebDAV</h1><ul>"
+            if DATA.exists():
+                for d in sorted(DATA.iterdir()):
+                    if d.is_dir() and (d / "universe.db").exists():
+                        c = conn(d.name)
+                        r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+                        content = r["stage_html"] if r and r["stage_html"] else ""
+                        html += f'<li><a href="/dav/{d.name}{_dav_file_ext(content)}">{d.name}</a></li>'
+            html += "</ul>"
+            return await send_r(send, 200, html, ct="text/html")
+        if not _VALID_NAME.match(name) or not (DATA / name / "universe.db").exists():
+            return await send_r(send, 404, '{"error":"not found"}')
+        c = conn(name)
+        r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+        html = r["stage_html"] if r and r["stage_html"] else ""
+        return await send_r(send, 200, html, ct="text/plain")
+
+    if method == "PUT":
+        name = _dav_world_name(path)
+        if not name: return await send_r(send, 405, '{"error":"PUT on collection not supported"}')
+        if not _VALID_NAME.match(name): return await send_r(send, 400, '{"error":"invalid world name"}')
+        try: b = (await recv(receive)).decode("utf-8", "replace")
+        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
+        c = conn(name)
+        c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (b,)); c.commit()
+        log_event(name, "stage_written", {"len": len(b)})
+        return await send_r(send, 201, "")
+
+    if method == "DELETE":
+        name = _dav_world_name(path)
+        if not name: return await send_r(send, 405, '{"error":"DELETE on collection not supported"}')
+        if not _VALID_NAME.match(name) or not (DATA / name / "universe.db").exists():
+            return await send_r(send, 404, '{"error":"not found"}')
+        c = conn(name)
+        c.execute("UPDATE stage_meta SET stage_html='',pending_js='',js_result='',updated_at=datetime('now') WHERE id=1"); c.commit()
+        return await send_r(send, 204, "")
+
+    if method == "MKCOL":
+        return await send_r(send, 405, '{"error":"worlds are flat — no subdirectories"}')
+    if method in ("LOCK", "UNLOCK"):
+        return await send_r(send, 501, "")
+    return await send_r(send, 405, '{"error":"method not allowed"}')
+
 # ── Mirror reverse proxy ─────────────────────────────────────────────
 def _mirror_proxy(target, domain=""):
     """curl target, return (body_bytes, content_type). Injects <base> for HTML."""
@@ -171,6 +290,9 @@ async def app(scope, receive, send):
     path = scope["path"].rstrip("/") or "/"; method = scope["method"]
     print(f"  {method} {path}")
     raw = scope.get("raw_path", b"").decode("utf-8", "replace")
+    # WebDAV: /dav/ namespace — worlds as files.
+    if path == "/dav" or path.startswith("/dav/"):
+        return await _handle_dav(scope, receive, send, path, method)
     # Mirror: /mirror?url=X (entry) or /m/domain/path (subsequent).
     _mt, _md = _mirror_target(path, scope.get("query_string", b"").decode())
     if _mt:
@@ -266,6 +388,17 @@ async def app(scope, receive, send):
         if html_body is not None: return await send_r(send, status, html_body, ct="text/html", extra_headers=extra_h or None)
         return await send_r(send, status, json.dumps(result), extra_headers=extra_h or None)
 
+    if method == "GET" and path == "/opensearch.xml":
+        host = "localhost"
+        for k, v in scope.get("headers", []):
+            if k == b"host": host = v.decode(); break
+        scheme = "https" if scope.get("scheme") == "https" else "http"
+        xml = (f'<?xml version="1.0" encoding="UTF-8"?>'
+               f'<OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">'
+               f'<ShortName>elastik</ShortName><Description>elastik shell</Description>'
+               f'<Url type="text/html" template="{scheme}://{host}/shell?q={{searchTerms}}"/>'
+               f'</OpenSearchDescription>')
+        return await send_r(send, 200, xml, ct="application/opensearchdescription+xml")
     if method == "GET" and path == "/openapi.json": return await send_r(send, 200, OPENAPI)
     if method == "GET" and path == "/sw.js": return await send_r(send, 200, SW, "application/javascript")
     if method == "GET" and path == "/manifest.json": return await send_r(send, 200, MANIFEST, "application/manifest+json")

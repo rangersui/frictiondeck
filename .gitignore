@@ -38,4 +38,5 @@ bus.key
 
 # Binaries — build locally, distribute via GitHub Releases.
 *.exe
+*.exe~
 go/_*_data/

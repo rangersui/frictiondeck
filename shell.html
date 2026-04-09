@@ -317,4 +317,6 @@ function execInput(){
 // keep focus on input
 document.addEventListener('click',e=>{if(!e.target.closest('.tab-btn'))cmd.focus()});
 appendOut('elastik shell — type help for commands, or any JS.\n','info');
+const _q=new URLSearchParams(location.search).get('q');
+if(_q){appendPromptLine(_q);const _p=parseCommand(_q);if(_p!==undefined){if(_p&&_p.p)_p.p.then(r=>{if(r!=null)appendOut(r)}).catch(e=>appendOut('ERROR: '+e.message,'err'));else if(_p&&_p.v!==undefined&&_p.v!==null)appendOut(_p.v)}}
 </script></body></html>

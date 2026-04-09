@@ -118,6 +118,217 @@ func getApproveToken(r *http.Request) string {
 	return ""
 }
 
+// ─── WebDAV ─────────────────────────────────────────────────────────
+
+// davWorldName extracts world name from /dav/xyz.html → "xyz".
+// Strips any single extension (.html, .css, .js, etc.) since world
+// names never contain dots.
+// Returns "" if path is just /dav or /dav/.
+func davWorldName(path string) string {
+	if path == "/dav" || path == "/dav/" {
+		return ""
+	}
+	rest := strings.TrimPrefix(path, "/dav/")
+	if i := strings.LastIndex(rest, "."); i > 0 {
+		return rest[:i]
+	}
+	return rest
+}
+
+// davTypeRe matches <!--type:xxx--> anywhere in content.
+var davTypeRe = regexp.MustCompile(`<!--type:(\w+)-->`)
+
+// davFileExt returns the file extension for a world based on its content.
+// <!--type:css--> → ".css", <!--type:js--> → ".js", default → ".html".
+// Worlds using <!--use:renderer--> are always ".html" (renderer produces HTML).
+func davFileExt(stageHTML string) string {
+	if strings.HasPrefix(stageHTML, "<!--use:") {
+		return ".html"
+	}
+	if m := davTypeRe.FindStringSubmatch(stageHTML); m != nil {
+		return "." + m[1]
+	}
+	return ".html"
+}
+
+// davPropEntry generates a single <D:response> XML block.
+func davPropEntry(href, restype, ct string, size int, modified string) string {
+	rt := "<D:resourcetype/>"
+	if restype == "collection" {
+		rt = "<D:resourcetype><D:collection/></D:resourcetype>"
+	}
+	ctLine := ""
+	if ct != "" {
+		ctLine = "<D:getcontenttype>" + ct + "</D:getcontenttype>"
+	}
+	return "<D:response><D:href>" + href + "</D:href><D:propstat><D:prop>" +
+		rt + "<D:getcontentlength>" + fmt.Sprintf("%d", size) + "</D:getcontentlength>" +
+		"<D:getlastmodified>" + modified + "</D:getlastmodified>" +
+		ctLine + "</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>"
+}
+
+func (s *server) handleDAV(w http.ResponseWriter, r *http.Request, path string) {
+	// Auth: same as normal routes.
+	// Read (OPTIONS, PROPFIND, GET, HEAD) → open (like GET /stages, GET /{w}/read)
+	// Write (PUT, DELETE) → auth token (like POST /{w}/write)
+	isWrite := r.Method == "PUT" || r.Method == "DELETE"
+	if isWrite && s.cfg.token != "" {
+		authOk := hmacEqual(r.Header.Get("X-Auth-Token"), s.cfg.token)
+		approveOk := s.cfg.approveToken != "" && hmacEqual(getApproveToken(r), s.cfg.approveToken)
+		if !authOk && !approveOk {
+			w.Header().Set("WWW-Authenticate", `Basic realm="elastik"`)
+			writeErr(w, 401, "unauthorized")
+			return
+		}
+	}
+
+	switch r.Method {
+	case "OPTIONS":
+		w.Header().Set("DAV", "1")
+		w.Header().Set("Allow", "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND")
+		w.WriteHeader(200)
+
+	case "PROPFIND":
+		depth := r.Header.Get("Depth")
+		if depth == "" {
+			depth = "1"
+		}
+		name := davWorldName(path)
+		now := time.Now().UTC().Format(http.TimeFormat)
+
+		if name != "" {
+			// Single resource: /dav/work.css
+			if !core.ValidName(name) {
+				writeErr(w, 400, "invalid world name")
+				return
+			}
+			stage, err := core.ReadWorld(s.db, name)
+			if err != nil {
+				writeErr(w, 404, "not found")
+				return
+			}
+			ext := davFileExt(stage.StageHTML)
+			xml := `<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">` +
+				davPropEntry("/dav/"+name+ext, "", "text/plain", len(stage.StageHTML), now) +
+				`</D:multistatus>`
+			w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+			w.WriteHeader(207)
+			_, _ = w.Write([]byte(xml))
+			return
+		}
+
+		// Root collection
+		xml := `<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">` +
+			davPropEntry("/dav/", "collection", "", 0, now)
+		if depth == "1" {
+			list, err := core.ListStages(s.db)
+			if err == nil {
+				for _, st := range list {
+					stage, err := core.ReadWorld(s.db, st.Name)
+					if err != nil {
+						continue
+					}
+					xml += davPropEntry("/dav/"+st.Name+davFileExt(stage.StageHTML), "", "text/plain", len(stage.StageHTML), now)
+				}
+			}
+		}
+		xml += `</D:multistatus>`
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.WriteHeader(207)
+		_, _ = w.Write([]byte(xml))
+
+	case "GET", "HEAD":
+		name := davWorldName(path)
+		if name == "" {
+			// Browser hitting /dav/ — list worlds as simple HTML
+			list, err := core.ListStages(s.db)
+			if err != nil {
+				writeErr(w, 500, err.Error())
+				return
+			}
+			html := "<h1>elastik WebDAV</h1><ul>"
+			for _, st := range list {
+				stage, err := core.ReadWorld(s.db, st.Name)
+				ext := ".html"
+				if err == nil {
+					ext = davFileExt(stage.StageHTML)
+				}
+				html += `<li><a href="/dav/` + st.Name + ext + `">` + st.Name + `</a></li>`
+			}
+			html += "</ul>"
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(html))
+			return
+		}
+		if !core.ValidName(name) {
+			writeErr(w, 400, "invalid world name")
+			return
+		}
+		stage, err := core.ReadWorld(s.db, name)
+		if err != nil {
+			writeErr(w, 404, "not found")
+			return
+		}
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if r.Method == "HEAD" {
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(stage.StageHTML)))
+			w.WriteHeader(200)
+		} else {
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte(stage.StageHTML))
+		}
+
+	case "PUT":
+		name := davWorldName(path)
+		if name == "" {
+			writeErr(w, 405, "PUT on collection not supported")
+			return
+		}
+		if !core.ValidName(name) {
+			writeErr(w, 400, "invalid world name")
+			return
+		}
+		body, err := readBody(r)
+		if err != nil {
+			writeErr(w, 413, "body too large")
+			return
+		}
+		_, err = core.WriteWorld(s.db, s.cfg.key, name, body)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		w.WriteHeader(201)
+
+	case "DELETE":
+		name := davWorldName(path)
+		if name == "" {
+			writeErr(w, 405, "DELETE on collection not supported")
+			return
+		}
+		if !core.ValidName(name) {
+			writeErr(w, 400, "invalid world name")
+			return
+		}
+		if err := core.ClearWorld(s.db, name); err != nil {
+			st, msg := mapError(err)
+			writeErr(w, st, msg)
+			return
+		}
+		w.WriteHeader(204)
+
+	case "MKCOL":
+		writeErr(w, 405, "worlds are flat — no subdirectories")
+
+	case "LOCK", "UNLOCK":
+		w.WriteHeader(501)
+
+	default:
+		writeErr(w, 405, "method not allowed")
+	}
+}
+
 // ─── mirror reverse proxy ────────────────────────────────────────────
 
 var mirrorClient = &http.Client{Timeout: 30 * time.Second}
@@ -212,6 +423,12 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// WebDAV: /dav/ namespace — worlds as files.
+	if path == "/dav" || strings.HasPrefix(path, "/dav/") {
+		s.handleDAV(w, r, path)
+		return
+	}
+
 	// Mirror: /mirror?url=X (entry) or /m/domain/path (subsequent).
 	if target, domain, ok := mirrorTarget(path, r.URL.RawQuery); ok {
 		if s.cfg.approveToken == "" || !hmacEqual(getApproveToken(r), s.cfg.approveToken) {
@@ -291,6 +508,22 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Static file routes (match server.py).
+	if r.Method == http.MethodGet && path == "/opensearch.xml" {
+		host := r.Host
+		scheme := "http"
+		if r.TLS != nil {
+			scheme = "https"
+		}
+		xml := `<?xml version="1.0" encoding="UTF-8"?>` +
+			`<OpenSearchDescription xmlns="http://a9.com/-/spec/opensearch/1.1/">` +
+			`<ShortName>elastik</ShortName><Description>elastik shell</Description>` +
+			`<Url type="text/html" template="` + scheme + `://` + host + `/shell?q={searchTerms}"/>` +
+			`</OpenSearchDescription>`
+		w.Header().Set("Content-Type", "application/opensearchdescription+xml")
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte(xml))
+		return
+	}
 	if r.Method == http.MethodGet && path == "/openapi.json" {
 		s.serveOpenAPI(w)
 		return
