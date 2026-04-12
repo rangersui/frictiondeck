@@ -196,6 +196,38 @@ GET /opds → Atom XML catalog listing ebook worlds
 GET /books/erta-day/raw → application/epub+zip → reader downloads
 ```
 
+**Apple Shortcuts (.shortcut)**
+`application/x-apple-shortcut`
+
+Store a Shortcuts automation in a world. iPhone visits `/raw` →
+"Add Shortcut" dialog. The shortcut runs on the phone — Siri,
+HomeKit, app integrations, GPS triggers, NFC triggers.
+
+AI generates a shortcut → stores in elastik → user opens URL →
+phone gains new automation. elastik distributes behavior, not data.
+
+**Alfred Workflows (.alfredworkflow)**
+`application/x-alfred-workflow`
+
+Same pattern for macOS. Alfred is the power-user launcher. Store a
+workflow, serve from `/raw`, user opens → Alfred installs it.
+
+### Three layers of ext
+
+```
+Display:  html mp4 png pdf     → OS renders something
+Config:   mobileconfig pkpass ics vcf → OS changes settings
+Execute:  shortcut alfredworkflow → OS does something
+```
+
+/raw is not "download a file." /raw is "give the OS an instruction."
+
+ext is the instruction type. stage_html BLOB is the instruction
+payload. The operating system is the executor.
+
+elastik doesn't need a client. The OS is the client.
+Content-Type is the API.
+
 ### Pattern
 
 These aren't protocol surfaces — they're MIME type surfaces. The
