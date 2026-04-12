@@ -182,6 +182,22 @@ def _check_internal_token(scope):
     return _hmac.compare_digest(tok, token)
 
 
+def _check_basic_auth(scope):
+    """Check Basic Auth against approve token. For WebDAV clients
+    (Explorer, Finder, Files) that only speak Basic Auth."""
+    approve = os.getenv("ELASTIK_APPROVE_TOKEN", "")
+    if not approve: return False
+    headers = dict(scope.get("headers", []))
+    auth = headers.get(b"authorization", b"").decode()
+    if not auth.startswith("Basic "): return False
+    import base64
+    try:
+        _, pwd = base64.b64decode(auth[6:]).decode().split(":", 1)
+        return _hmac.compare_digest(pwd, approve)
+    except (ValueError, UnicodeDecodeError):
+        return False
+
+
 def _check_session(scope, ip):
     if not MCP_TOKEN: return False
     headers = dict(scope.get("headers", []))
@@ -271,13 +287,14 @@ async def auth_gate(scope, receive, send, path, method):
     if method in ("GET", "HEAD"):
         _advance_knock(ip, path)
 
-    # ── Check authorization (three paths) ──
+    # ── Check authorization (five paths) ──
     has_cookie = _check_session(scope, ip)
     has_url_secret = _url_secret_ok(query) and (
         _is_whitelisted(ip) or _ip_in_anthropic(ip))
     has_internal = _check_internal_token(scope)
+    has_basic = _check_basic_auth(scope)
 
-    if has_cookie or has_url_secret or has_internal:
+    if has_cookie or has_url_secret or has_internal or has_basic:
         # Extend whitelist if knock-path client
         if _is_whitelisted(ip):
             _extend_whitelist(ip)
