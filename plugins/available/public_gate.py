@@ -320,6 +320,10 @@ async def auth_gate(scope, receive, send, path, method):
 
         return None  # Authorized, proceed to server.py
 
+    # ── Local IPs bypass pastebin — public_gate protects the tunnel, not localhost ──
+    if ip.startswith("127.") or ip == "::1":
+        return None
+
     # ── Unauthorized → pastebin disguise ──
     is_head = method == "HEAD"
     if method in ("GET", "HEAD"):
@@ -340,7 +344,7 @@ async def auth_gate(scope, receive, send, path, method):
         await _send_plain(send, 200, key + "\n")
         return True
 
-    # OPTIONS — fake pastebin capabilities, don't leak DAV/MCP/etc.
+    # OPTIONS — fake pastebin capabilities (don't leak DAV/MCP/shell).
     if method == "OPTIONS":
         await _send_plain(send, 200, "", extra_headers=[
             [b"allow", b"GET, POST"],
