@@ -179,12 +179,16 @@ async def app(scope, receive, send):
     if scope["type"] != "http": return
     path = scope["path"].rstrip("/") or "/"; method = scope["method"]
     print(f"  {method} {path}")
+    # Auth gate — if a plugin sets _auth, it can intercept any request.
+    # Return truthy = "I sent a response" (e.g. pastebin). Falsy = proceed.
+    if _auth:
+        if await _auth(scope, receive, send, path, method):
+            return
     raw = scope.get("raw_path", b"").decode("utf-8", "replace")
     if '..' in path or '//' in path or '..' in raw or '//' in raw:
         return await send_r(send, 400, '{"error":"invalid path"}')
 
-    if _auth and not await _auth(scope, path, method):
-        return await send_r(send, 403, '{"error":"unauthorized"}')
+    # (auth gate moved to top of app — see above)
     parts = [p for p in path.split("/") if p]
 
     # Plugin dispatch — exact or prefix match, server gates auth centrally.
