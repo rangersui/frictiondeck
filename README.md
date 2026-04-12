@@ -767,28 +767,41 @@ ELASTIK_PEERS=10.0.0.5,10.0.0.6  # seed peers for non-multicast environments
 ## WebDAV
 
 Worlds as files. Edit with VS Code, Obsidian, or any text editor.
+WebDAV works on localhost. Remote access uses the browser (`/gate` →
+cookie → `/dav/` file listing → download/preview).
 
+**macOS / Linux** — mount directly:
 ```bash
-# Map as a network drive (Windows)
-net use Z: http://127.0.0.1:3005/dav/ /user:x <ELASTIK_APPROVE_TOKEN>
-# Now Z:\work.txt = the "work" world. Edit, save, done.
+# macOS Finder: Cmd+K → http://localhost:3005/dav
+# Linux: davfs2, or file manager → Connect to Server
 ```
 
-Reads are open. Writes need `X-Auth-Token` or Basic Auth (approve
-token). Windows Explorer's "Map Network Drive" UI has a known bug
-with non-standard ports — use `net use` from the command line instead.
-
-To auto-map on login:
+**Windows** — use `net use` from the command line:
 ```powershell
-net use Z: http://127.0.0.1:3005/dav/ /user:x <TOKEN> /persistent:yes
+net use Z: http://127.0.0.1:3005/dav /user:x <ELASTIK_APPROVE_TOKEN>
+# Z:\work.txt = the "work" world. Edit, save, done.
 ```
 
-Windows requires `BasicAuthLevel=2` in the registry for HTTP WebDAV:
+Auto-map on login:
+```powershell
+net use Z: http://127.0.0.1:3005/dav /user:x <TOKEN> /persistent:yes
+```
+
+Windows requires a one-time registry fix for HTTP Basic Auth:
 ```powershell
 # Run once as admin
 Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters' -Name 'BasicAuthLevel' -Value 2
 Restart-Service WebClient
 ```
+
+> **Windows note**: The built-in WebDAV client (WebClient service) only
+> works reliably on localhost. Explorer's "Map Network Drive" UI does not
+> support non-standard ports — use `net use` instead. For remote WebDAV,
+> use [RaiDrive](https://www.raidrive.com/) (free) or
+> [Cyberduck](https://cyberduck.io/) (open source), which implement
+> their own WebDAV client and avoid these limitations. Microsoft has
+> announced the deprecation of the WebClient service in future Windows
+> releases.
 
 ## Backup
 
