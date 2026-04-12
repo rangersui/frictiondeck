@@ -68,7 +68,7 @@ async def handle(method, body, params):
         if not name:
             html = ('<h1>elastik WebDAV</h1>'
                     '<p style="background:#fee;padding:.5em;border:1px solid #c00">'
-                    'AI-generated content — treat all links as hostile.</p><ul>')
+                    'AI-generated content -- treat all links as hostile.</p><ul>')
             if server.DATA.exists():
                 for d in sorted(server.DATA.iterdir()):
                     if d.is_dir() and (d / "universe.db").exists():
