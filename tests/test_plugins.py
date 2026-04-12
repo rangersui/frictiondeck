@@ -485,6 +485,7 @@ def test_python():
 
         _run_auth_tests(py_port, "python", py_token, py_approve)
         _run_plugin_auth_tests(py_port, "python", py_token, py_approve)
+        _run_blob_ext_tests(py_port, "python", py_token, py_approve)
         _run_http_tests(py_port, "python", token=py_token)
         _run_devtools_tests(py_port, "python", token=py_token)
     finally:
@@ -803,6 +804,107 @@ def _run_plugin_auth_tests(port, label, token, approve):
 
     st, _ = http_method(port, "/dav/auth-test-world", method="DELETE", basic_auth=approve)
     test(f"{label} plugin-auth: DELETE /dav approve -> 204", st == 204, f"status={st}")
+
+
+def _run_blob_ext_tests(port, label, token, approve):
+    """Tests for BLOB storage, ext column, 304, /raw, fake directories."""
+    import hashlib
+
+    # ── 304 version comparison ──
+    st, body = http_get(port, "/work/read")
+    test(f"{label} blob: GET /read -> 200", st == 200, f"status={st}")
+    v = json.loads(body).get("version", -1)
+
+    st, _ = http_method(port, f"/work/read?v={v}")
+    test(f"{label} blob: GET /read?v=current -> 304", st == 304, f"status={st}")
+
+    st, _ = http_method(port, "/work/read?v=0")
+    test(f"{label} blob: GET /read?v=0 -> 200", st == 200, f"status={st}")
+
+    # ── ext column ──
+    st, body = http_post(port, "/ext-blob-test/write?ext=css", "body{color:red}", token=token)
+    test(f"{label} blob: write ?ext=css -> 200", st == 200, f"status={st}")
+
+    st, body = http_get(port, "/ext-blob-test/read")
+    d = json.loads(body)
+    test(f"{label} blob: read ext=css", d.get("ext") == "css", f"ext={d.get('ext')}")
+    test(f"{label} blob: read content intact", "color:red" in d.get("stage_html", ""), f"body={d.get('stage_html','')[:30]}")
+
+    # ── /raw route ──
+    st, body = http_get(port, "/ext-blob-test/raw")
+    test(f"{label} blob: /raw -> 200", st == 200, f"status={st}")
+    test(f"{label} blob: /raw content", "color:red" in body, f"body={body[:30]}")
+
+    # ── Binary write via /write?ext=png ──
+    png_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "icon.png")
+    png_bytes = open(png_path, "rb").read()
+    st, _ = http_method(port, "/blob-bin-test/write?ext=png", method="POST", body=png_bytes, token=token)
+    test(f"{label} blob: binary write -> 200", st == 200, f"status={st}")
+
+    st, body = http_get(port, "/blob-bin-test/read")
+    d = json.loads(body)
+    test(f"{label} blob: binary read ext=png", d.get("ext") == "png", f"ext={d.get('ext')}")
+    test(f"{label} blob: binary read stage_html empty", d.get("stage_html") == "", f"stage={d.get('stage_html','?')[:20]}")
+
+    # ── Fake directories ──
+    st, _ = http_post(port, "/fakedir/child1/write?ext=txt", "hello child1", token=token)
+    test(f"{label} blob: write fakedir/child1 -> 200", st == 200, f"status={st}")
+
+    st, _ = http_post(port, "/fakedir/child2/write?ext=md", "# child2", token=token)
+    test(f"{label} blob: write fakedir/child2 -> 200", st == 200, f"status={st}")
+
+    st, body = http_get(port, "/stages")
+    names = [s["name"] for s in json.loads(body)]
+    test(f"{label} blob: /stages has fakedir/child1", "fakedir/child1" in names, f"names={[n for n in names if 'fakedir' in n]}")
+
+    st, body = http_get(port, "/fakedir/child1/read")
+    d = json.loads(body)
+    test(f"{label} blob: fakedir/child1 ext=txt", d.get("ext") == "txt", f"ext={d.get('ext')}")
+    test(f"{label} blob: fakedir/child1 content", "hello child1" in d.get("stage_html", ""), f"body={d.get('stage_html','')[:20]}")
+
+    # ── DAV ext mapping ──
+    st, _ = http_method(port, "/dav/ext-blob-test.css", basic_auth=approve)
+    test(f"{label} blob: DAV GET .css", st == 200, f"status={st}")
+
+    # ── DAV virtual directories ──
+    st, body = http_method(port, "/dav/fakedir/", method="PROPFIND", basic_auth=approve, headers={"Depth": "1"})
+    test(f"{label} blob: DAV PROPFIND fakedir/ -> 207", st == 207, f"status={st}")
+    test(f"{label} blob: DAV fakedir/ has children", "child1" in body and "child2" in body, f"body={body[:100]}")
+
+    # ── DAV binary PUT round-trip ──
+    st, _ = http_method(port, "/dav/dav-bin-test.png", method="PUT", body=png_bytes, basic_auth=approve)
+    test(f"{label} blob: DAV PUT binary -> 201", st == 201, f"status={st}")
+
+    st, body = http_get(port, "/dav-bin-test/read")
+    d = json.loads(body)
+    test(f"{label} blob: DAV binary ext=png", d.get("ext") == "png", f"ext={d.get('ext')}")
+    test(f"{label} blob: DAV binary stage empty (binary)", d.get("stage_html") == "", f"stage={d.get('stage_html','?')[:20]}")
+
+    # ── Unicode world names ──
+    unicode_names = [
+        ("\u8863\u67dc", "txt", "wardrobe"),           # 衣柜 (Chinese)
+        ("\u65e5\u672c\u8a9e\u30c6\u30b9\u30c8", "md", "# Japanese test"),  # 日本語テスト
+        ("\ud55c\uad6d\uc5b4", "css", "body{color:red}"),  # 한국어 (Korean)
+        ("\u041f\u0440\u0438\u0432\u0435\u0442", "txt", "hello russian"),  # Привет (Cyrillic)
+        ("\u0645\u0631\u062d\u0628\u0627", "txt", "hello arabic"),  # مرحبا (Arabic)
+        ("\u82b1\u6912/\u7c89", "txt", "Sichuan pepper"),  # 花椒/粉 (Chinese with /)
+    ]
+    for uname, uext, ucontent in unicode_names:
+        from urllib.parse import quote
+        encoded = quote(uname, safe="/")
+        st, _ = http_post(port, f"/{encoded}/write?ext={uext}", ucontent, token=token)
+        test(f"{label} unicode: write {uname} -> 200", st == 200, f"status={st}")
+
+        st, body = http_get(port, f"/{encoded}/read")
+        d = json.loads(body)
+        test(f"{label} unicode: read {uname} ext={uext}", d.get("ext") == uext, f"ext={d.get('ext')}")
+
+    # Check /stages has Unicode names
+    st, body = http_get(port, "/stages")
+    names = [s["name"] for s in json.loads(body)]
+    test(f"{label} unicode: /stages has Chinese", any("\u8863" in n for n in names), "")
+    test(f"{label} unicode: /stages has Korean", any("\ud55c" in n for n in names), "")
+    test(f"{label} unicode: /stages has fake dir", any("\u82b1\u6912/" in n for n in names), "")
 
 
 def _run_http_tests(port, label, token=""):

@@ -18,23 +18,30 @@ _ROOT = Path(os.environ.get("ELASTIK_ROOT", ".")).resolve()
 _START = time.time()
 
 
+def _disk_name(name):
+    return name.replace("/", "%2F")
+
 def _read_stage(world):
     """Read stage_html from a world's universe.db. Direct sqlite, no conn()."""
-    db = _DATA / world / "universe.db"
+    db = _DATA / _disk_name(world) / "universe.db"
     if not db.exists():
         return None
     c = sqlite3.connect(str(db))
     c.row_factory = sqlite3.Row
     r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
     c.close()
-    return r["stage_html"] if r else ""
+    val = r["stage_html"] if r else ""
+    if isinstance(val, bytes):
+        try: val = val.decode("utf-8")
+        except UnicodeDecodeError: val = ""
+    return val
 
 
 def _world_names():
     """List all world directory names that have a universe.db."""
     if not _DATA.exists():
         return []
-    return sorted(d.name for d in _DATA.iterdir()
+    return sorted(d.name.replace("%2F", "/") for d in _DATA.iterdir()
                   if d.is_dir() and (d / "universe.db").exists())
 
 

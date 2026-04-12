@@ -1,6 +1,8 @@
 const CDNS = ['esm.sh', 'cdn.jsdelivr.net', 'unpkg.com', 'cdnjs.cloudflare.com'];
 self.addEventListener('fetch', e => {
-  const h = new URL(e.request.url).hostname;
+  const u = new URL(e.request.url);
+  if (u.pathname.endsWith('/raw')) return; // binary — never cache
+  const h = u.hostname;
   if (!CDNS.some(c => h.includes(c))) return;
   e.respondWith(
     caches.open('elastik-cdn').then(c =>

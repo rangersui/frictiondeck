@@ -31,14 +31,42 @@ def _csp():
         if (DATA / "config-cdn").exists():
             c = conn("config-cdn")
             r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
-            if r and r["stage_html"] and r["stage_html"].strip():
-                domains = [d.strip() for d in r["stage_html"].splitlines() if d.strip()]
+            s = r["stage_html"] if r else None
+            if isinstance(s, bytes): s = s.decode("utf-8", "replace")
+            if s and s.strip():
+                domains = [d.strip() for d in s.splitlines() if d.strip()]
                 cdn = " ".join(f"https://{d}" for d in domains)
     except Exception as e: print(f"  warn: CDN config read failed: {e}")
     return (f"default-src 'self' data: blob:; script-src 'unsafe-inline' 'unsafe-eval' {cdn} data:; "
             f"style-src 'unsafe-inline' {cdn} data:; img-src * data: blob:; font-src * data:; "
             f"connect-src 'self'; worker-src 'self'")
-_VALID_NAME = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_-]*$')
+_INVALID_NAME_CHARS = re.compile(r'[\x00-\x1f\x7f\\:*?"<>|]')
+def _valid_name(name):
+    """Check world name: any Unicode allowed, reject control chars + Windows-illegal + traversal."""
+    if not name or _INVALID_NAME_CHARS.search(name): return False
+    if "//" in name or ".." in name: return False
+    if name.startswith("/") or name.endswith("/"): return False
+    return True
+def _disk_name(name):
+    """World name → safe filesystem dir name. / → %2F (flat on disk)."""
+    return name.replace("/", "%2F")
+def _logical_name(disk):
+    """Filesystem dir name → world name. %2F → /."""
+    return disk.replace("%2F", "/")
+_CT = {"html":"text/html","htm":"text/html","txt":"text/plain","plain":"text/plain",
+       "css":"text/css","js":"text/javascript","json":"application/json",
+       "png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg","gif":"image/gif",
+       "svg":"image/svg+xml","webp":"image/webp","ico":"image/x-icon",
+       "pdf":"application/pdf","zip":"application/zip",
+       "md":"text/markdown","py":"text/x-python","c":"text/x-c","cpp":"text/x-c++src",
+       "h":"text/x-c","go":"text/x-go","rs":"text/x-rust","ts":"text/typescript",
+       "tsx":"text/tsx","jsx":"text/jsx","sh":"text/x-sh","yaml":"text/yaml",
+       "yml":"text/yaml","toml":"text/toml","xml":"application/xml","sql":"text/x-sql",
+       "lua":"text/x-lua","rb":"text/x-ruby","java":"text/x-java",
+       "kt":"text/x-kotlin","swift":"text/x-swift","v":"text/x-verilog"}
+def _ext_to_ct(ext): return _CT.get(ext or "plain", "application/octet-stream")
+_BINARY_EXT = {"png","jpg","jpeg","gif","webp","ico","pdf","zip","mp3","mp4",
+               "wav","ogg","woff","woff2","ttf","otf","eot","bin"}
 _TYPE_MARKER = re.compile(r'^:::type:(\w+):::\n?')
 
 def _parse_type(body):
@@ -70,7 +98,7 @@ _db = {}
 
 def conn(name):
     if name not in _db:
-        d = DATA / name; d.mkdir(parents=True, exist_ok=True)
+        d = DATA / _disk_name(name); d.mkdir(parents=True, exist_ok=True)
         db_path = d / "universe.db"
         for ext in ("-shm", "-wal"):
             stale = d / f"universe.db{ext}"
@@ -85,23 +113,52 @@ def conn(name):
             pass
         c.executescript("""
             CREATE TABLE IF NOT EXISTS stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),
-                stage_html TEXT DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
+                stage_html BLOB DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
                 version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '',
-                type TEXT DEFAULT 'plain');
+                ext TEXT DEFAULT 'plain');
             INSERT OR IGNORE INTO stage_meta(id,updated_at) VALUES(1,datetime('now'));
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT DEFAULT '{}',
                 hmac TEXT NOT NULL, prev_hmac TEXT DEFAULT '');
         """)
-        # One-shot migration for worlds that predate the type column.
-        try:
-            c.execute("ALTER TABLE stage_meta ADD COLUMN type TEXT DEFAULT 'plain'")
-            r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
-            if r and r["stage_html"]:
-                c.execute("UPDATE stage_meta SET type=? WHERE id=1", (_infer_type(r["stage_html"]),))
+        # Migration: stage_html TEXT+type → stage_html BLOB+ext.
+        # Column NAME stays stage_html (40+ references). Type changes to BLOB.
+        cols = {row[1] for row in c.execute("PRAGMA table_info(stage_meta)").fetchall()}
+        def _safe(row, key, default=""):
+            try: return row[key] or default
+            except (IndexError, KeyError): return default
+        if "ext" not in cols:
+            # Old schema: stage_html TEXT, type TEXT, no ext → full rebuild
+            r = c.execute("SELECT * FROM stage_meta WHERE id=1").fetchone()
+            content = r["stage_html"] or ""
+            old_type = "plain"
+            try: old_type = r["type"] or "plain"
+            except (IndexError, KeyError): pass
+            parsed_type, clean = _parse_type(content) if content else ("plain", "")
+            ext = parsed_type if parsed_type != "plain" else old_type
+            if ext == "plain" and _infer_type(content) == "html":
+                ext = "html"
+            c.execute("DROP TABLE stage_meta")
+            c.executescript("""CREATE TABLE stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),
+                stage_html BLOB DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
+                version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '', ext TEXT DEFAULT 'plain');""")
+            c.execute("INSERT INTO stage_meta VALUES(?,?,?,?,?,?,?)",
+                (1, clean, _safe(r,"pending_js"), _safe(r,"js_result"),
+                 _safe(r,"version",0), _safe(r,"updated_at"), ext))
             c.commit()
-        except sqlite3.OperationalError:
-            pass  # column already exists
+            print(f"  migrated: {name} (ext={ext})")
+        elif "stage_html" not in cols and "stage" in cols:
+            # Broken schema from earlier attempt: column named 'stage' → fix to 'stage_html'
+            r = c.execute("SELECT * FROM stage_meta WHERE id=1").fetchone()
+            c.execute("DROP TABLE stage_meta")
+            c.executescript("""CREATE TABLE stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),
+                stage_html BLOB DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
+                version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '', ext TEXT DEFAULT 'plain');""")
+            c.execute("INSERT INTO stage_meta VALUES(?,?,?,?,?,?,?)",
+                (1, _safe(r,"stage"), _safe(r,"pending_js"), _safe(r,"js_result"),
+                 _safe(r,"version",0), _safe(r,"updated_at"), _safe(r,"ext","html")))
+            c.commit()
+            print(f"  fixed: {name} (stage→stage_html)")
         _db[name] = c
     return _db[name]
 
@@ -178,7 +235,8 @@ def _match_plugin(base_path):
 async def app(scope, receive, send):
     if scope["type"] != "http": return
     path = scope["path"].rstrip("/") or "/"; method = scope["method"]
-    print(f"  {method} {path}")
+    try: print(f"  {method} {path}")
+    except UnicodeEncodeError: print(f"  {method} {ascii(path)}")
     # Auth gate — if a plugin sets _auth, it can intercept any request.
     # Return truthy = "I sent a response" (e.g. pastebin). Falsy = proceed.
     if _auth:
@@ -207,11 +265,13 @@ async def app(scope, receive, send):
             elif level == "auth":
                 if not _check_auth_token(scope):
                     return await send_r(send, 403, '{"error":"unauthorized"}')
-        try: b = (await recv(receive)).decode("utf-8", "replace")
+        try: body_raw = await recv(receive)
         except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
+        b = body_raw.decode("utf-8", "replace")
         qs = scope.get("query_string", b"").decode()
         params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
         params["_scope"] = scope
+        params["_body_raw"] = body_raw  # raw bytes for binary plugins (dav PUT)
         result = await handler(method, b, params)
         status = result.pop("_status", 200)
         redirect = result.pop("_redirect", None)
@@ -252,37 +312,91 @@ async def app(scope, receive, send):
         if DATA.exists():
             for d in sorted(DATA.iterdir()):
                 if d.is_dir() and (d / "universe.db").exists():
-                    r = conn(d.name).execute("SELECT version,updated_at FROM stage_meta WHERE id=1").fetchone()
-                    stages.append({"name": d.name, "version": r["version"], "updated_at": r["updated_at"]})
+                    name = _logical_name(d.name)
+                    r = conn(name).execute("SELECT version,updated_at FROM stage_meta WHERE id=1").fetchone()
+                    stages.append({"name": name, "version": r["version"], "updated_at": r["updated_at"]})
         return await send_r(send, 200, json.dumps(stages))
 
-    if len(parts) == 2 and parts[1] in ("read","write","append","pending","result","clear","sync"):
-        name, action = parts
-        if not _VALID_NAME.match(name): return await send_r(send, 400, '{"error":"invalid world name"}')
+    _ACTIONS = {"read","raw","write","append","pending","result","clear","sync"}
+    if len(parts) >= 2 and parts[-1] in _ACTIONS:
+        action = parts[-1]
+        name = "/".join(parts[:-1])  # everything before the action
+        if not _valid_name(name): return await send_r(send, 400, '{"error":"invalid world name"}')
         if method == "GET" and action == "read":
-            if not (DATA / name / "universe.db").exists():
+            if not (DATA / _disk_name(name) / "universe.db").exists():
                 return await send_r(send, 404, '{"error":"world not found"}')
             c = conn(name)
-            r = c.execute("SELECT stage_html,pending_js,js_result,version,type FROM stage_meta WHERE id=1").fetchone()
-            return await send_r(send, 200, json.dumps(dict(r)))
+            r = c.execute("SELECT stage_html,pending_js,js_result,version,ext FROM stage_meta WHERE id=1").fetchone()
+            # 304: client sends ?v=N from last poll → skip body if unchanged
+            qs = scope.get("query_string", b"").decode()
+            for p in qs.split("&"):
+                if p.startswith("v="):
+                    try:
+                        if int(p[2:]) == r["version"]:
+                            return await send_r(send, 304, "")
+                    except ValueError: pass
+                    break
+            # Normalize: stage_html might be bytes (binary content) or str
+            raw = r["stage_html"] or ""
+            if isinstance(raw, bytes):
+                try: raw = raw.decode("utf-8")
+                except UnicodeDecodeError: raw = ""  # binary — use /raw
+            ext = r["ext"] or "html"
+            return await send_r(send, 200, json.dumps({
+                "stage_html": raw, "pending_js": r["pending_js"] or "",
+                "js_result": r["js_result"] or "", "version": r["version"],
+                "ext": ext, "type": ext}))
+        if method == "GET" and action == "raw":
+            if not (DATA / _disk_name(name) / "universe.db").exists():
+                return await send_r(send, 404, '{"error":"world not found"}')
+            c = conn(name)
+            r = c.execute("SELECT stage_html,ext FROM stage_meta WHERE id=1").fetchone()
+            body = r["stage_html"] or b""
+            if isinstance(body, str): body = body.encode("utf-8")
+            ext = r["ext"] or "plain"
+            ct = _ext_to_ct(ext)
+            await send({"type":"http.response.start","status":200,"headers":[
+                [b"content-type", ct.encode()],
+                [b"content-length", str(len(body)).encode()]]})
+            await send({"type":"http.response.body","body":body})
+            return
         c = conn(name)
-        try: b = (await recv(receive)).decode("utf-8", "replace")
+        # Check ?ext= early — binary exts skip text decode
+        req_ext = None
+        qs = scope.get("query_string", b"").decode()
+        for p in qs.split("&"):
+            if p.startswith("ext="):
+                req_ext = p[4:].lower().strip() or None
+                break
+        try:
+            body_bytes = await recv(receive)
         except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
-        b = _extract(b, action)
-        # Type gate: touching an html-typed world (or becoming one) requires approve token.
+        if req_ext and req_ext in _BINARY_EXT:
+            b = body_bytes  # raw bytes for binary content
+        else:
+            b = body_bytes.decode("utf-8", "replace")
+            b = _extract(b, action)
+        # Determine ext
         if action in ("write","append","sync"):
-            cur = c.execute("SELECT type FROM stage_meta WHERE id=1").fetchone()
-            cur_type = cur["type"] if cur else 'plain'
+            cur = c.execute("SELECT ext FROM stage_meta WHERE id=1").fetchone()
+            cur_ext = (cur["ext"] if cur else "plain") or "plain"
             if action == "write":
-                new_type, b = _parse_type(b)  # strip marker from stored content
+                new_ext = req_ext
+                if not new_ext and isinstance(b, str):
+                    # Backward compat: :::type::: prefix
+                    parsed, b = _parse_type(b)
+                    new_ext = parsed if parsed != "plain" else cur_ext
+                elif not new_ext:
+                    new_ext = cur_ext
             else:
-                new_type = cur_type  # append/sync preserve type
-            if (cur_type == 'html' or new_type == 'html') and not _check_approve_header(scope):
+                new_ext = cur_ext  # append/sync preserve ext
+            # Type gate: html worlds require approve token
+            if (cur_ext == 'html' or new_ext == 'html') and not _check_approve_header(scope):
                 return await send_r(send, 403, '{"error":"html type requires X-Approve-Token"}')
         if action == "write":
-            c.execute("UPDATE stage_meta SET stage_html=?,type=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b, new_type)); c.commit()
-            log_event(name, "stage_written", {"len": len(b), "type": new_type})
-            return await send_r(send, 200, json.dumps({"version": c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"], "type": new_type}))
+            c.execute("UPDATE stage_meta SET stage_html=?,ext=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b, new_ext)); c.commit()
+            log_event(name, "stage_written", {"len": len(b), "ext": new_ext})
+            return await send_r(send, 200, json.dumps({"version": c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"], "ext": new_ext, "type": new_ext}))
         if action == "append":
             c.execute("UPDATE stage_meta SET stage_html=stage_html||?,version=version+1,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
             log_event(name, "stage_appended", {"len": len(b)})

@@ -5,11 +5,10 @@ from email.utils import formatdate
 import hmac as _hmac, os
 import server
 
-# html → .html.txt so double-click opens in Notepad, not browser.
-# file:// bypasses iframe sandbox, CSP, same-origin — all protections gone.
-_EXT = {"html":".html.txt","plain":".txt","markdown":".md","md":".md","json":".json","css":".css","js":".js","py":".py","c":".c","cpp":".cpp","h":".h","rs":".rs","go":".go","sh":".sh","yaml":".yaml","yml":".yml","toml":".toml","xml":".xml","sql":".sql","ts":".ts","tsx":".tsx","jsx":".jsx","svg":".svg","lua":".lua","rb":".rb","java":".java","kt":".kt","swift":".swift","v":".v"}
-
-def _ext(typ): return _EXT.get(typ or 'plain', '.txt')
+def _ext(typ):
+    if typ == "html": return ".html.txt"  # file:// has no sandbox
+    if typ and typ != "plain": return "." + typ
+    return ".txt"
 
 def _check_write_auth(scope):
     """Write ops need X-Auth-Token or Basic Auth (approve token). Read is open."""
@@ -39,11 +38,11 @@ def _world_name(path):
 
 def _read(name):
     c = server.conn(name)
-    r = c.execute("SELECT stage_html,type FROM stage_meta WHERE id=1").fetchone()
-    html = r["stage_html"] if r and r["stage_html"] else ""
-    typ = (r["type"] if r else 'plain') or 'plain'
-    if typ != 'plain': html = f":::type:{typ}:::\n" + html
-    return html, typ
+    r = c.execute("SELECT stage_html,ext FROM stage_meta WHERE id=1").fetchone()
+    raw = r["stage_html"] if r and r["stage_html"] else b""
+    if isinstance(raw, str): raw = raw.encode("utf-8")
+    ext = (r["ext"] if r else "html") or "html"
+    return raw, ext
 
 def _prop(href, restype, ct, size, mod):
     rt = "<D:resourcetype><D:collection/></D:resourcetype>" if restype == "collection" else "<D:resourcetype/>"
@@ -67,42 +66,74 @@ async def handle(method, body, params):
         depth = "1"
         for k, v in scope.get("headers", []):
             if k == b"depth": depth = v.decode(); break
-        name = _world_name(path)
-        if name:
-            if not server._VALID_NAME.match(name) or not (server.DATA / name / "universe.db").exists():
-                return {"error":"not found", "_status":404}
-            html, typ = _read(name)
-            xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
-                   + _prop(f"/dav/{name}{_ext(typ)}", "", "text/plain", len(html), now)
-                   + '</D:multistatus>')
-            return {"_body":xml, "_ct":"application/xml; charset=utf-8", "_status":207}
-        xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
-               + _prop("/dav/", "collection", "", 0, now))
-        if depth == "1" and server.DATA.exists():
+        # Build list of all worlds (logical names)
+        all_worlds = []
+        if server.DATA.exists():
             for d in sorted(server.DATA.iterdir()):
                 if d.is_dir() and (d / "universe.db").exists():
-                    html, typ = _read(d.name)
-                    xml += _prop(f"/dav/{d.name}{_ext(typ)}", "", "text/plain", len(html), now)
+                    all_worlds.append(server._logical_name(d.name))
+        # Determine prefix from path: /dav/photos/ → "photos"
+        prefix = _world_name(path)
+        if prefix and prefix.endswith("/"): prefix = prefix[:-1]
+        # Single world (not a virtual dir prefix)
+        if prefix and any(w == prefix for w in all_worlds):
+            raw, ext = _read(prefix)
+            # ext=dir or has children → it's a collection (folder)
+            is_dir = ext == "dir" or any(w.startswith(prefix + "/") for w in all_worlds)
+            if not is_dir:
+                xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
+                       + _prop(f"/dav/{prefix}{_ext(ext)}", "", "text/plain", len(raw), now)
+                       + '</D:multistatus>')
+                return {"_body":xml, "_ct":"application/xml; charset=utf-8", "_status":207}
+        # Collection listing (root or virtual dir)
+        href = f"/dav/{prefix}/" if prefix else "/dav/"
+        xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
+               + _prop(href, "collection", "", 0, now))
+        if depth == "1":
+            # Filter worlds under this prefix, group by next level
+            children_prefix = prefix + "/" if prefix else ""
+            seen_dirs = set()
+            for w in all_worlds:
+                if children_prefix and not w.startswith(children_prefix):
+                    continue
+                if not children_prefix:
+                    rest = w
+                else:
+                    rest = w[len(children_prefix):]
+                if "/" in rest:
+                    # Virtual subdirectory — show as collection
+                    subdir = rest.split("/")[0]
+                    if subdir not in seen_dirs:
+                        seen_dirs.add(subdir)
+                        xml += _prop(f"/dav/{children_prefix}{subdir}/", "collection", "", 0, now)
+                else:
+                    # Direct child — file or ext=dir folder
+                    raw, ext = _read(w)
+                    if ext == "dir":
+                        xml += _prop(f"/dav/{w}/", "collection", "", 0, now)
+                    else:
+                        xml += _prop(f"/dav/{w}{_ext(ext)}", "", "text/plain", len(raw), now)
         xml += '</D:multistatus>'
         return {"_body":xml, "_ct":"application/xml; charset=utf-8", "_status":207}
 
     if method in ("GET", "HEAD"):
         name = _world_name(path)
         if not name:
-            html = ('<h1>elastik WebDAV</h1>'
+            listing = ('<h1>elastik WebDAV</h1>'
                     '<p style="background:#fee;padding:.5em;border:1px solid #c00">'
                     'AI-generated content -- treat all links as hostile.</p><ul>')
             if server.DATA.exists():
                 for d in sorted(server.DATA.iterdir()):
                     if d.is_dir() and (d / "universe.db").exists():
-                        _, typ = _read(d.name)
-                        html += f'<li><a href="/dav/{d.name}{_ext(typ)}">{d.name}</a> <em>({typ})</em></li>'
-            html += "</ul>"
-            return {"_html": html}
-        if not server._VALID_NAME.match(name) or not (server.DATA / name / "universe.db").exists():
+                        wname = server._logical_name(d.name)
+                        _, ext = _read(wname)
+                        listing += f'<li><a href="/dav/{wname}{_ext(ext)}">{wname}</a> <em>({ext})</em></li>'
+            listing += "</ul>"
+            return {"_html": listing}
+        if not server._valid_name(name) or not (server.DATA / server._disk_name(name) / "universe.db").exists():
             return {"error":"not found", "_status":404}
-        body, _ = _read(name)
-        return {"_body":body, "_ct":"text/plain"}
+        raw, _ = _read(name)
+        return {"_body":raw, "_ct":"text/plain"}
 
     if method in ("PUT", "DELETE") and not _check_write_auth(scope):
         return {"error":"authentication required", "_status":401,
@@ -111,25 +142,43 @@ async def handle(method, body, params):
     if method == "PUT":
         name = _world_name(path)
         if not name: return {"error":"PUT on collection not supported", "_status":405}
-        if not server._VALID_NAME.match(name): return {"error":"invalid world name", "_status":400}
-        b = body.decode("utf-8","replace") if isinstance(body, bytes) else (body or "")
+        if not server._valid_name(name): return {"error":"invalid world name", "_status":400}
+        # Use raw bytes from params (plugin dispatch preserves them)
+        raw = params.get("_body_raw", body.encode("utf-8") if isinstance(body, str) else body or b"")
+        # Ext from filename: /dav/photo.png → ext=png
+        dot = path.rfind(".")
+        ext = path[dot+1:].lower().strip() if dot > 0 else "plain"
+        if not ext: ext = "plain"  # /dav/foo. → empty ext → default
+        # Backward compat: if body has :::type::: prefix, strip and use that
+        try:
+            text = raw.decode("utf-8")
+            parsed, stripped = server._parse_type(text)
+            if parsed != "plain":
+                ext = parsed
+                raw = stripped.encode("utf-8")
+        except UnicodeDecodeError:
+            pass  # binary, ext from filename stands
         c = server.conn(name)
-        new_type, b = server._parse_type(b)
-        c.execute("UPDATE stage_meta SET stage_html=?,type=?,version=version+1,updated_at=datetime('now') WHERE id=1", (b, new_type)); c.commit()
-        server.log_event(name, "stage_written", {"len":len(b), "type":new_type})
+        c.execute("UPDATE stage_meta SET stage_html=?,ext=?,version=version+1,updated_at=datetime('now') WHERE id=1", (raw, ext)); c.commit()
+        server.log_event(name, "stage_written", {"len":len(raw), "ext":ext})
         return {"_status":201, "_body":"", "_ct":"text/plain"}
 
     if method == "DELETE":
         name = _world_name(path)
         if not name: return {"error":"DELETE on collection not supported", "_status":405}
-        if not server._VALID_NAME.match(name) or not (server.DATA / name / "universe.db").exists():
+        if not server._valid_name(name) or not (server.DATA / server._disk_name(name) / "universe.db").exists():
             return {"error":"not found", "_status":404}
         c = server.conn(name)
         c.execute("UPDATE stage_meta SET stage_html='',pending_js='',js_result='',updated_at=datetime('now') WHERE id=1"); c.commit()
         return {"_status":204, "_body":"", "_ct":"text/plain"}
 
     if method == "MKCOL":
-        return {"error":"worlds are flat — no subdirectories", "_status":405}
+        name = _world_name(path)
+        if not name: return {"_status":201, "_body":"", "_ct":"text/plain"}
+        if not server._valid_name(name): return {"_status":201, "_body":"", "_ct":"text/plain"}
+        c = server.conn(name)
+        c.execute("UPDATE stage_meta SET ext='dir',updated_at=datetime('now') WHERE id=1"); c.commit()
+        return {"_status":201, "_body":"", "_ct":"text/plain"}
     if method in ("LOCK", "UNLOCK"):
         return {"_body":"", "_ct":"text/plain", "_status":501}
     return {"error":"method not allowed", "_status":405}

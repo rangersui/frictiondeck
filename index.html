@@ -60,12 +60,12 @@ return pc}
 let _rtcWorld=null;
 async function readWorld(){
 if(_dc&&_dc.readyState==='open'){_dc.send(JSON.stringify({op:'read',world:p}));return _rtcWorld||await(await fetch('/'+p+'/read')).json()}
-return await(await fetch('/'+p+'/read')).json()}
+const _r=await fetch('/'+p+'/read?v='+v);if(_r.status===304)return null;return await _r.json()}
 // --- end WebRTC ---
-setInterval(async()=>{const r=await readWorld();
+setInterval(async()=>{const r=await readWorld();if(!r)return;
 if(r.version!==v){v=r.version;let html=r.stage_html||'',rendered=false;
 if(_cur){_undoStack.push(_cur);if(_undoStack.length>50)_undoStack.shift();_redoStack.length=0}_cur=html;
-const t=r.type||'plain';
+const t=r.ext||r.type||'plain';
 if(t==='html'){
 const um=/^<!--use:([a-zA-Z0-9_-]+)-->\n?([\s\S]*)/.exec(html);
 if(um){try{const rr=await(await fetch('/'+um[1]+'/read')).json();if(rr.stage_html&&(rr.type||'plain')==='html'){f.srcdoc=injectHelper(rr.stage_html.replace('</head>','<script>window.__ELASTIK_DATA__='+JSON.stringify(um[2])+'<\/script></head>'));rendered=true}}catch(e){console.error('Renderer:',e)}}

@@ -45,7 +45,7 @@ MODE = min(_USER_MODE, _ENV_CEILING) if _USER_MODE else _ENV_CEILING
 
 def load_plugin(name):
     """Load or reload a single plugin by name. Returns True on success."""
-    if not server._VALID_NAME.match(name):
+    if not server._valid_name(name):
         print(f"  rejected invalid plugin name: {name}"); return False
     if name in _DANGEROUS_PLUGINS and MODE < 2:
         print(f"  ! {name} blocked -- mode {MODE} (need mode 2 = container)"); return False
@@ -222,7 +222,7 @@ async def handle_approve(method, body, params):
     if not _hmac.compare_digest(tok, APPROVE_TOKEN):
         return {"error": "invalid token", "_status": 403}
     n, code = b.get("name", ""), b.get("code", "")
-    if n and not server._VALID_NAME.match(n):
+    if n and not server._valid_name(n):
         return {"error": "invalid plugin name", "_status": 400}
     if n and code:
         PLUGINS.mkdir(exist_ok=True)
