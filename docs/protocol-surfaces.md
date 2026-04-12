@@ -241,6 +241,60 @@ Every entry in `_CT` is a potential surface. Every MIME type that
 triggers native behavior in an OS, browser, or app is a free
 integration waiting to happen.
 
+### Browser-native surfaces (zero backend)
+
+Not MIME types. Browser APIs. Registered in manifest.json or HTML.
+No server code needed.
+
+**OpenSearch**
+`/opensearch.xml` — already implemented.
+
+Browser address bar becomes an elastik search box. Type `e` + Tab →
+search query → elastik shell. Registered via `<link rel="search">`.
+
+**Web Share Target (PWA)**
+`manifest.json` → `share_target` field.
+
+Phone's native share sheet → elastik appears as option. Share a URL
+from Safari → elastik receives it → stores in a world. Share text
+from any app → same.
+
+```json
+"share_target": {
+  "action": "/share/write",
+  "method": "POST",
+  "enctype": "multipart/form-data",
+  "params": { "text": "body", "url": "url", "files": [{"name": "file", "accept": ["*/*"]}] }
+}
+```
+
+User shares a photo from Camera → elastik PWA catches it → POST to
+`/share/write` → stored as BLOB in a world. Zero app code.
+
+**Protocol Handler (Custom URL Scheme)**
+`web+elastik://` — browser registers elastik as handler.
+
+```html
+<a href="web+elastik://sensors/read">View sensors</a>
+```
+
+Any website, any email, any document can link to elastik. Click →
+browser opens local elastik. Cross-site trigger for local operations.
+
+Registration:
+```javascript
+navigator.registerProtocolHandler('web+elastik', '/handle?url=%s')
+```
+
+Or in manifest.json:
+```json
+"protocol_handlers": [{"protocol": "web+elastik", "url": "/handle?url=%s"}]
+```
+
+These are not protocol surfaces or MIME surfaces. They're **browser
+registration surfaces**. The browser is the runtime. manifest.json
+is the config. No server code. No client code. Just declarations.
+
 ## Selection criteria
 
 A protocol surface is worth adding only if:
