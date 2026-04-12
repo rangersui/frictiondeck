@@ -90,9 +90,9 @@ def main():
     t('GET unknown key returns 404', pastebin_unknown_key)
 
     def pastebin_ring_evict():
-        # fill beyond 16 slots
+        # fill beyond PASTE_MAX (256) slots
         keys = []
-        for i in range(20):
+        for i in range(270):
             _, body = req('POST', '/', f'data-{i}')
             keys.append(body.strip())
         # first one should be evicted
@@ -161,22 +161,37 @@ def main():
             pass
     t('Bearer header is ignored', bearer_header_ignored)
 
-    # --- knock sequence ---
+    # --- knock sequence -- two-factor: knock establishes reachability,
+    #                       token is still required as second factor ---
     def knock_then_mcp():
         req('GET', KNOCK_A)
         req('GET', KNOCK_B)
         req('GET', KNOCK_C)
-        # now POST /mcp should work without any secret
-        code, body = req('POST', '/mcp',
+        # POST /mcp now needs the URL token too (both factors required)
+        code, body = req('POST', '/mcp?k=secret-url-key-abc',
             '{"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}')
         assert code == 200
         msg = json.loads(body)
         assert msg['id'] == 2
-    t('Knock sequence whitelists IP', knock_then_mcp)
+    t('Knock + token unlocks /mcp', knock_then_mcp)
 
-    # --- tools/list after knock ---
-    def mcp_tools_list():
+    def knock_without_token_is_pastebin():
+        # Whitelist entry still valid from the previous test, but no URL
+        # token this time -- must fall through to pastebin.
         code, body = req('POST', '/mcp',
+            '{"jsonrpc":"2.0","id":99,"method":"initialize","params":{}}')
+        assert code == 200
+        try:
+            json.loads(body)
+            assert False, 'knock alone (no token) should be pastebin'
+        except json.JSONDecodeError:
+            pass
+        assert len(body.strip()) == 6
+    t('Knock without token = pastebin (two-factor)', knock_without_token_is_pastebin)
+
+    # --- tools/list after knock (still needs the token) ---
+    def mcp_tools_list():
+        code, body = req('POST', '/mcp?k=secret-url-key-abc',
             '{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}')
         assert code == 200, f'code {code}'
         msg = json.loads(body)
@@ -279,11 +294,11 @@ def main():
             'TRUST_PROXY_FROM is empty')
     t('Refuses TRUST_PROXY_HEADER without TRUST_PROXY_FROM', refuses_trust_header_without_from)
 
-    def refuses_no_auth():
+    def refuses_no_token():
         run_and_expect_exit(
-            {},  # nothing set
-            'refusing to start http mode')
-    t('Refuses start with no auth configured', refuses_no_auth)
+            {},  # nothing set -- MCP_TOKEN missing is the first thing caught
+            'ELASTIK_MCP_TOKEN is required')
+    t('Refuses start without ELASTIK_MCP_TOKEN', refuses_no_token)
 
     # --- methods on non-/mcp path (whitelisted) still pastebin ---
     def whitelisted_non_mcp_is_pastebin():

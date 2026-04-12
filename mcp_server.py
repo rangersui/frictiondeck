@@ -256,31 +256,38 @@ def _run_mini():
 
 
 def _run_http():
-    """HTTP mode -- pastebin disguise + knock/bearer gated MCP.
+    """HTTP mode -- pastebin disguise + two-factor gated MCP.
 
     Runs an HTTP server instead of the stdio transport. To the outside
-    world this is a plain pastebin. IPs that complete the knock sequence (or
-    requests bearing the right bearer token) get POST /mcp routed to the
-    real MCP handler. Everything else is pastebin.
+    world this is a plain pastebin. POST /mcp is routed to the real MCP
+    handler only if the request passes BOTH a reachability gate AND the
+    URL token. Everything else is stored as an ephemeral paste.
 
-    Only the `http` tool is exposed -- the `mcp_call` aggregator is deliberately
-    omitted so remote callers cannot reach other local MCP servers.
+    Only the `http` tool is exposed -- the `mcp_call` aggregator is
+    deliberately omitted so remote callers cannot reach other local MCP
+    servers.
 
-    server.py stays untouched. This process talks to server.py via _do_http
-    (localhost-only if you configure it so).
+    server.py stays untouched. This process talks to server.py via
+    _do_http (localhost-only if you configure it so).
 
-    Two scenarios, two mechanisms, no overlap:
+    Two symmetric auth paths. Both require the URL token as second factor:
 
-      1. Direct connection (Tailscale, LAN, your own phone hitting tunnel)
+      Path A -- Direct (application-layer gate)
          -> knock sequence -> IP whitelist (TTL)
-         -> your IP = request IP, makes sense.
+         -> whitelisted IP + ?k=<token> -> allow
+         -> for phone, a-Shell, curl, Tailscale, LAN -- any client whose
+            real IP is visible to the server.
 
-      2. Proxied connection (Claude.ai -> Anthropic server -> your MCP)
-         -> request IP is Anthropic's egress (160.79.104.0/21)
-         -> knock is useless (your phone's IP is never seen)
-         -> Anthropic IP + bearer token -> allow
-         -> bearer is scoped: leaked token is useless unless attacker
-            is also on Anthropic's egress network.
+      Path B -- Proxied (network-layer gate)
+         -> request IP is Anthropic's egress (160.79.104.0/21, 2607:6bc0::/48)
+         -> Anthropic IP + ?k=<token> -> allow
+         -> for Claude.ai remote MCP and other hosted LLMs that cannot
+            send custom headers and must put the secret in the URL.
+
+    Token leak alone is useless -- the attacker must also either pass
+    the knock sequence (Path A) or come from Anthropic (Path B). IP
+    reachability alone is useless -- the attacker must also know the
+    token. Two factors, AND-ed, on both paths.
 
     Env:
       ELASTIK_MCP_PORT            listen port (default 3006)
@@ -351,9 +358,17 @@ def _run_http():
                   f"(must start with '/', length >= 12, not '/')", file=sys.stderr)
             sys.exit(1)
 
-    # Refuse to start with no auth mechanism at all.
-    if not KNOCK and not (MCP_TOKEN and ANTHROPIC_NETS):
-        print("  refusing to start http mode: need ELASTIK_KNOCK, or (ELASTIK_MCP_TOKEN + ELASTIK_ANTHROPIC_IPS)", file=sys.stderr)
+    # Token is always the second factor. Both auth paths require it.
+    if not MCP_TOKEN:
+        print("  refusing to start: ELASTIK_MCP_TOKEN is required "
+              "(second factor on both auth paths)", file=sys.stderr)
+        sys.exit(1)
+    # Need at least one reachability gate. ANTHROPIC_NETS has a non-empty
+    # default, so this only fires if the user explicitly disabled it and
+    # did not configure a knock sequence.
+    if not KNOCK and not ANTHROPIC_NETS:
+        print("  refusing to start: need at least one reachability gate -- "
+              "ELASTIK_KNOCK or ELASTIK_ANTHROPIC_IPS", file=sys.stderr)
         sys.exit(1)
 
     PASTE_MAX = 256
@@ -539,11 +554,14 @@ def _run_http():
             # Two authorized paths:
             #   (a) knocked IP (direct connection scenario)
             #   (b) Anthropic egress IP + valid URL secret (proxy scenario)
-            authorized = False
-            if is_whitelisted(ip):
-                authorized = True
-            elif ip_in_anthropic(ip) and url_secret_ok(query):
-                authorized = True
+            # Two-factor: a reachability gate (network or application layer)
+            # AND the URL token. Both required. The reachability gate is
+            # either a whitelisted IP (Path A: passed the knock sequence)
+            # or a source IP inside an Anthropic egress CIDR (Path B: the
+            # proxied scenario). The token is the same in both paths.
+            authorized = url_secret_ok(query) and (
+                is_whitelisted(ip) or ip_in_anthropic(ip)
+            )
 
             if authorized and path_only == "/mcp":
                 if is_whitelisted(ip):

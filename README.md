@@ -601,36 +601,48 @@ use it. POST `/mcp` is the only special route, and only if the request
 passes one of the two independent auth paths below. Anything else is
 stored as a paste, indistinguishable from normal pastebin traffic.
 
-**Two independent auth paths. Pick either, or enable both.**
+**Two auth paths, both two-factor. `ELASTIK_MCP_TOKEN` is the shared
+second factor on both paths. The first factor is a reachability gate:
+either application-layer (knock) or network-layer (Anthropic CIDR).**
 
-### Path A — Direct knock (no URL token)
+### Path A — Direct knock + token
 
 For clients whose real IP is visible to the server: phone browser,
 a-Shell, laptop curl, Tailscale/LAN, any device **not** going through
 a hosted LLM.
 
-The client hits a sequence of secret URLs **in order within
+The client first hits a sequence of secret URLs **in order within
 `KNOCK_WINDOW` seconds**. Each one looks like a normal pastebin 404
 miss; the server silently advances state. When the sequence completes,
 the client's real IP goes into an in-memory whitelist for `KNOCK_TTL`
-seconds. Subsequent `/mcp` POSTs from that IP route to MCP with **no
-URL token required**. Wrong-order paths reset state instantly. Active
-sessions slide the TTL forward on every authorized call.
+seconds. `/mcp` POSTs from that IP are then accepted **if and only if**
+they also carry `?k=<ELASTIK_MCP_TOKEN>`. Wrong-order paths reset
+state instantly. Active authorized sessions slide the TTL forward on
+every call.
 
 ```bash
-# Knock, then POST. Same IP throughout the sequence.
+# Knock, then POST with token. Same IP throughout the sequence.
 T=https://<your-tunnel>.trycloudflare.com
+K=<ELASTIK_MCP_TOKEN>
 curl $T/kn-firstSecretPath
 curl $T/kn-secondSecretPath
 curl -X POST -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' $T/mcp
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+  "$T/mcp?k=$K"
 ```
 
 Anthropic egress IPs are **rejected from knock**. A hosted LLM can
 never accidentally whitelist its shared exit IP — proxied clients must
 use Path B.
 
-### Path B — Proxied bearer (Anthropic egress + URL secret)
+Why require the token even after knock? Knock is a reachability proof
+(application-layer ACL), not an identity. If your client is behind
+IPv4 CGNAT, hundreds of other devices share your public IP and would
+inherit the whitelist entry; a rotating IPv6 privacy address can be
+reassigned to a new user mid-TTL. The token closes that gap: even if
+the whitelist entry is inherited, the attacker still needs the secret.
+
+### Path B — Proxied bearer (Anthropic egress + token)
 
 For hosted LLMs that can't send custom headers (e.g. Claude.ai's remote
 MCP feature). The request arrives from Anthropic's egress network and
@@ -647,6 +659,16 @@ Authorization requires **both**:
 
 A leaked URL is useless from any IP outside that range. Kerckhoffs's
 principle — open design, only the key is secret.
+
+### Symmetry
+
+Both paths are `reachability_gate × token`. Either factor alone is
+useless.
+
+|              | Path A               | Path B                  |
+|--------------|----------------------|-------------------------|
+| 1st factor   | Knock sequence (app) | Anthropic CIDR (network)|
+| 2nd factor   | `?k=<token>`         | `?k=<token>`            |
 
 ---
 
