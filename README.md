@@ -319,6 +319,15 @@ Other dashboards:       only Mode 0 → AI can't act
 elastik: all three. You pick.
 ```
 
+Modes apply transparently with the `public_gate` plugin. The same
+`ELASTIK_TOKEN` env var that selects a mode for localhost selects it
+for public access. Omit `ELASTIK_TOKEN` when starting the server and
+remote MCP becomes read-only — GETs work, POSTs get 403. The MCP tool
+handler's header whitelist (`content-type`, `accept`, `user-agent`)
+prevents AI from injecting `X-Auth-Token` or `X-Approve-Token`
+directly, so Mode 2 is unreachable from AI regardless of what env
+vars exist on the machine.
+
 ---
 
 ## Security
@@ -391,20 +400,36 @@ Container → ceiling 2 (autonomous). Bare metal → ceiling 1 (executor).
 
 ### Permission hierarchy
 
-Four levels. Each is a physical gate, not a rule.
+Five tiers. Each is a physical gate, not a rule. Each tier includes
+the capabilities of all tiers above it.
 
 ```
-Constitution:  _ENV_CEILING           — highest — environment detection, nobody bypasses
-Seal:          ELASTIK_APPROVE_TOKEN  — human only — admin, plugin install
-Badge:         ELASTIK_TOKEN          — AI has this — daily read/write
-Public:        GET requests           — no token — anyone
+Outsider:      no key                 — sees a pastebin, nothing else
+MCP client:    ELASTIK_MCP_TOKEN      — read/write worlds via MCP tool
+               (?k= + Anthropic IP      header whitelist blocks approve token
+                or knock sequence)       AI can't escalate — physically filtered
+Browser:       session cookie          — read/write worlds via HTTP
+               (from /gate?k=)           same ceiling as MCP, different transport
+Admin:         ELASTIK_APPROVE_TOKEN   — /shell, /exec, plugin install/unload
+               (Basic Auth)              elastik root — full system control
+OS root:       sudo password           — beyond elastik's scope
 ```
+
+**Escalation is impossible at each boundary:**
+- MCP → Admin: the `http` tool's header whitelist (`content-type`,
+  `accept`, `user-agent`) physically filters `X-Approve-Token`. AI
+  cannot inject it regardless of what it tries.
+- Browser → Admin: `/shell`, `/exec`, `/admin/*` require Basic Auth
+  with the approve token. The browser prompts for a password that
+  only you know.
+- Admin → OS root: the shell runs as the server process user.
+  `sudo` requires the OS password, which elastik never touches.
 
 ### Server hardening
 
 All POST routes require **`X-Auth-Token`** header (printed at startup).
 Admin routes self-check **`X-Approve-Token`** (defense-in-depth, not just middleware).
-GET routes are public (read-only).
+GET routes are public on localhost; behind `public_gate` on public internet.
 Request body capped at 5MB.
 World names restricted to **`[a-zA-Z0-9_-]`** with no path traversal.
 
@@ -585,119 +610,83 @@ One tool. Any machine. Any universe.
 When AI can send any strings to another program directly, MCP stays —
 not as a translator, but as a token isolator.
 
-## Remote MCP (HTTP mode)
+## Public Access (public_gate plugin)
 
-Same `mcp_server.py`, different transport. stdio is for local clients;
-HTTP is for anything that reaches you over a tunnel:
-
-```bash
-python mcp_server.py --http
-```
-
-Listens on `127.0.0.1:3006`. To the outside world it's a micro pastebin
-— POST anything, get back a 6-char key; GET the key, get the body.
-That's a real in-RAM 1MB-capped pastebin, not a fake — you can actually
-use it. POST `/mcp` is the only special route, and only if the request
-passes one of the two independent auth paths below. Anything else is
-stored as a paste, indistinguishable from normal pastebin traffic.
-
-**Two auth paths, both two-factor. `ELASTIK_MCP_TOKEN` is the shared
-second factor on both paths. The first factor is a reachability gate:
-either application-layer (knock) or network-layer (Anthropic CIDR).**
-
-### Path A — Direct knock + token
-
-For clients whose real IP is visible to the server: phone browser,
-a-Shell, laptop curl, Tailscale/LAN, any device **not** going through
-a hosted LLM.
-
-The client first hits a sequence of secret URLs **in order within
-`KNOCK_WINDOW` seconds**. Each one looks like a normal pastebin 404
-miss; the server silently advances state. When the sequence completes,
-the client's real IP goes into an in-memory whitelist for `KNOCK_TTL`
-seconds. `/mcp` POSTs from that IP are then accepted **if and only if**
-they also carry `?k=<ELASTIK_MCP_TOKEN>`. Wrong-order paths reset
-state instantly. Active authorized sessions slide the TTL forward on
-every call.
+Install the `public_gate` plugin and set `ELASTIK_MCP_TOKEN` to expose
+elastik on the public internet. Without the token, the plugin is inert
+and auth.py handles localhost access as before.
 
 ```bash
-# Knock, then POST with token. Same IP throughout the sequence.
-T=https://<your-tunnel>.trycloudflare.com
-K=<ELASTIK_MCP_TOKEN>
-curl $T/kn-firstSecretPath
-curl $T/kn-secondSecretPath
-curl -X POST -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
-  "$T/mcp?k=$K"
+python lucy.py install public_gate
+cloudflared tunnel --url http://localhost:3005
 ```
 
-Anthropic egress IPs are **rejected from knock**. A hosted LLM can
-never accidentally whitelist its shared exit IP — proxied clients must
-use Path B.
+One process, one port, one tunnel. Unauthorized visitors see a pastebin.
+Authorized visitors see elastik. The disguise works because it isn't
+one — elastik is a pastebin. POST strings, GET strings, render in a
+browser. Worlds, HMAC chains, plugins are layers on top. Underneath:
+store and retrieve text.
 
-Why require the token even after knock? Knock is a reachability proof
-(application-layer ACL), not an identity. If your client is behind
-IPv4 CGNAT, hundreds of other devices share your public IP and would
-inherit the whitelist entry; a rotating IPv6 privacy address can be
-reassigned to a new user mid-TTL. The token closes that gap: even if
-the whitelist entry is inherited, the attacker still needs the secret.
+### Browser login
 
-### Path B — Proxied bearer (Anthropic egress + token)
-
-For hosted LLMs that can't send custom headers (e.g. Claude.ai's remote
-MCP feature). The request arrives from Anthropic's egress network and
-the shared secret rides in the URL query:
+Visit `/gate?k=<token>` in your phone browser. The server checks the
+token, creates a server-side session tied to your IP, sets a cookie, and
+redirects to `/`. You see your worlds. Bookmark the URL, one tap to log
+in.
 
 ```
-https://<your-tunnel>.trycloudflare.com/mcp?k=<ELASTIK_MCP_TOKEN>
+https://<tunnel>/gate?k=<ELASTIK_MCP_TOKEN>
 ```
 
-Authorization requires **both**:
-1. Source IP inside an Anthropic egress CIDR (default:
-   `160.79.104.0/21`, `2607:6bc0::/48`)
-2. Constant-time HMAC match on `?k=` against `ELASTIK_MCP_TOKEN`
+Session expires after `ELASTIK_SESSION_TTL` (default 24 hours).
+Sessions are server-side — the cookie is a random session ID, not a
+computed value. Restart the server = sessions cleared = re-login.
 
-A leaked URL is useless from any IP outside that range. Kerckhoffs's
-principle — open design, only the key is secret.
+### Claude.ai remote MCP
 
-### Symmetry
+Claude.ai cannot send custom headers, so the token rides in the URL:
 
-Both paths are `reachability_gate × token`. Either factor alone is
-useless.
+```
+https://<tunnel>/mcp?k=<ELASTIK_MCP_TOKEN>
+```
 
-|              | Path A               | Path B                  |
-|--------------|----------------------|-------------------------|
-| 1st factor   | Knock sequence (app) | Anthropic CIDR (network)|
-| 2nd factor   | `?k=<token>`         | `?k=<token>`            |
+Authorization requires **both** an Anthropic egress IP (`160.79.104.0/21`,
+`2607:6bc0::/48`) and a valid `?k=`. A leaked URL is useless from any IP
+outside Anthropic's range.
 
----
+### Direct MCP (a-Shell, curl, Tailscale)
 
-**Publish via cloudflared**:
+For clients whose real IP is visible to the server. Knock first, then
+call with token:
 
 ```bash
-cloudflared tunnel --url http://localhost:3006
+curl https://<tunnel>/kn-firstSecretPath
+curl https://<tunnel>/kn-secondSecretPath
+curl -X POST -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
+  'https://<tunnel>/mcp?k=<ELASTIK_MCP_TOKEN>'
 ```
 
-**Env**:
-```
-ELASTIK_MCP_PORT=3006                       # listen port
-ELASTIK_MCP_BIND=127.0.0.1                  # bind addr
-ELASTIK_MCP_TOKEN=<random>                  # Path B: URL secret
-ELASTIK_KNOCK=/kn-long1/,/kn-long2/         # Path A: knock paths (each >= 12 chars)
-ELASTIK_KNOCK_WINDOW=10                     # Path A: seconds to complete sequence
-ELASTIK_KNOCK_TTL=600                       # Path A: whitelist lifetime per IP
-ELASTIK_TRUST_PROXY_HEADER=cf-connecting-ip # header to read real IP from
-ELASTIK_TRUST_PROXY_FROM=127.0.0.1/32       # CIDR(s) allowed to set that header
-```
+Knock paths look like normal pastebin 404s. After the sequence, your IP
+is whitelisted for `ELASTIK_KNOCK_TTL` seconds. Anthropic IPs are
+rejected from knock — proxied clients must use the bearer path above.
 
-`TRUST_PROXY_HEADER` is mandatory when behind cloudflared — otherwise
-the server sees `127.0.0.1` for every request and a single successful
-knock would whitelist the tunnel itself.
+### Pastebin disguise
 
-Refuses to start without at least one of (`ELASTIK_KNOCK`,
-`ELASTIK_MCP_TOKEN + ELASTIK_ANTHROPIC_IPS`). Only the `http` tool is
-exposed — `mcp_call` is deliberately omitted so remote callers cannot
-reach other local MCP servers.
+Unauthorized requests see a real micro pastebin. POST anything, get a
+6-char key. GET the key, get the body. 256-entry LRU, 4KB per paste,
+in-RAM only. Not a mock — you can actually use it.
+
+### Env
+
+```
+ELASTIK_MCP_TOKEN=<random>                  # shared secret (required for public mode)
+ELASTIK_SESSION_TTL=86400                   # browser cookie lifetime (default 24h)
+ELASTIK_KNOCK=/kn-secret1,/kn-secret2      # knock paths (each >= 12 chars, no trailing /)
+ELASTIK_KNOCK_WINDOW=10                     # seconds to complete knock
+ELASTIK_KNOCK_TTL=600                       # knock whitelist lifetime
+ELASTIK_TRUST_PROXY_HEADER=cf-connecting-ip # real IP header (required behind cloudflared)
+ELASTIK_TRUST_PROXY_FROM=127.0.0.1/32       # upstream CIDRs allowed to set that header
+```
 
 ---
 
