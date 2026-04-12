@@ -1,12 +1,33 @@
 """WebDAV — worlds as files. Optional data pipe for editors."""
 DESCRIPTION = "/dav/ → WebDAV surface. PROPFIND/GET/PUT/DELETE over worlds."
-AUTH = "approve"  # server gates at dispatch — plugin only sees authenticated calls
+AUTH = "none"  # reads are public (like core routes). writes check inline.
 from email.utils import formatdate
+import hmac as _hmac, os
 import server
 
 _EXT = {"html":".html","plain":".txt","markdown":".md","md":".md","json":".json","css":".css","js":".js","py":".py"}
 
 def _ext(typ): return _EXT.get(typ or 'plain', '.txt')
+
+def _check_write_auth(scope):
+    """Write ops need X-Auth-Token or Basic Auth (approve token). Read is open."""
+    headers = dict(scope.get("headers", []))
+    # X-Auth-Token
+    token = os.getenv("ELASTIK_TOKEN", "")
+    if token:
+        tok = headers.get(b"x-auth-token", b"").decode()
+        if tok and _hmac.compare_digest(tok, token): return True
+    # Basic Auth (password = approve token)
+    approve = os.getenv("ELASTIK_APPROVE_TOKEN", "")
+    if approve:
+        auth = headers.get(b"authorization", b"").decode()
+        if auth.startswith("Basic "):
+            import base64
+            try:
+                _, pwd = base64.b64decode(auth[6:]).decode().split(":", 1)
+                if _hmac.compare_digest(pwd, approve): return True
+            except (ValueError, UnicodeDecodeError): pass
+    return False
 
 def _world_name(path):
     rest = path[4:].lstrip("/")  # strip /dav
@@ -80,6 +101,10 @@ async def handle(method, body, params):
             return {"error":"not found", "_status":404}
         body, _ = _read(name)
         return {"_body":body, "_ct":"text/plain"}
+
+    if method in ("PUT", "DELETE") and not _check_write_auth(scope):
+        return {"error":"authentication required", "_status":401,
+                "_headers":[["www-authenticate",'Basic realm="elastik"']]}
 
     if method == "PUT":
         name = _world_name(path)

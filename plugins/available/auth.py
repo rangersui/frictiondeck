@@ -39,6 +39,8 @@ async def auth_middleware(scope, path, method):
     if path.startswith("/auth/"): return True
     # Plugin approve has its own token check inside handler
     if path == "/plugins/approve": return True
+    # WebDAV uses Basic Auth, not X-Auth-Token. dav plugin handles auth inline.
+    if path.startswith("/dav"): return True
 
     # Everything else — check X-Auth-Token (approve token also passes — higher privilege)
     token = os.getenv("ELASTIK_TOKEN", "")
