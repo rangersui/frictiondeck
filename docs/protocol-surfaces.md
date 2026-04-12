@@ -107,6 +107,50 @@ The calendar app sees events. The browser sees a rendered schedule.
 The TV sees a video. The file manager sees a file. RSS readers see
 a feed. All from the same row in stage_meta.
 
+### Apple native surfaces (via Content-Type alone)
+
+No protocol implementation needed. Just serve the right bytes with
+the right Content-Type from `/raw`. iOS does the rest.
+
+**Apple Wallet (.pkpass)**
+`application/vnd.apple.pkpass`
+
+Store a .pkpass BLOB in a world. iPhone visits `/boarding-pass/raw` →
+Safari sees the MIME type → "Add to Wallet" dialog. Boarding passes,
+event tickets, loyalty cards, coupons — all from a URL.
+
+.pkpass is a signed ZIP (pass.json + images). Creating one requires
+an Apple developer certificate. Serving one requires nothing —
+just bytes + Content-Type.
+
+```
+POST /boarding-pass/write?ext=pkpass  body: [signed .pkpass bytes]
+GET  /boarding-pass/raw → Content-Type: application/vnd.apple.pkpass
+→ iPhone: "Add to Apple Wallet?"
+```
+
+**iOS Configuration Profile (.mobileconfig)**
+`application/x-apple-aspen-config`
+
+Store a .mobileconfig XML in a world. iPhone visits `/setup/raw` →
+"Install Profile" dialog. Auto-configure WiFi, VPN, email, calendar
+accounts, certificates — from a URL.
+
+```
+POST /office-wifi/write?ext=mobileconfig  body: [profile XML]
+GET  /office-wifi/raw → Content-Type: application/x-apple-aspen-config
+→ iPhone: "Install Profile?"
+```
+
+No signing required (unsigned profiles show a warning but install).
+IT departments use this for device enrollment. You use it to configure
+your own phone from elastik.
+
+These aren't protocol surfaces — they're MIME type surfaces. The
+protocol is plain HTTP. The magic is the Content-Type header that
+triggers native iOS behavior. `/raw` already does this. Just needs
+the MIME types in `_CT`.
+
 ## Selection criteria
 
 A protocol surface is worth adding only if:
