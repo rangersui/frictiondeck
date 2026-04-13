@@ -13,9 +13,7 @@ async def handle_info(method, body, params):
         if (DATA / "skills-core").exists():
             skills = conn("skills-core").execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
     except Exception as e: print(f"  warn: skills-core read failed: {e}")
-    if not skills:
-        sp = _ROOT / "SKILLS.md"
-        if sp.exists(): skills = sp.read_text(encoding="utf-8")
+    # SKILLS.md removed — skills live in worlds now
     auth_name = next((p["name"] for p in _plugin_meta if p["name"] == "auth" or "auth" in p.get("description","").lower()), None)
     renderers, worlds = [], []
     if DATA.exists():

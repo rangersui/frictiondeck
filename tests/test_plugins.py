@@ -1,23 +1,17 @@
 """Plugin system integration tests.
 
-Tests all combinations:
   Layer 1: CGI protocol (direct exec, no server)
-  Layer 2: Go HTTP integration (elastik-lite)
-  Layer 3: Python HTTP integration (boot.py)
-  Layer 4: Cross-runtime parity
+  Layer 2: Python HTTP integration (server.py)
 
 Usage:
   python tests/test_plugins.py          # all layers
   python tests/test_plugins.py cgi      # layer 1 only
-  python tests/test_plugins.py go       # layer 1 + 2
-  python tests/test_plugins.py python   # layer 1 + 3
+  python tests/test_plugins.py python   # layer 1 + 2
 """
 import json, os, subprocess, sys, time, urllib.request, urllib.error, signal
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 os.chdir(ROOT)
-
-EXE_NAME = "elastik.exe" if sys.platform == "win32" else "elastik"
 
 PASS = 0
 FAIL = 0
@@ -289,175 +283,15 @@ def test_cgi():
             test("ai: /ai/status has status", "status" in body)
 
 
-# ── Layer 2: Go HTTP Integration ────────────────────────────────────
-
-def test_go():
-    print("\n=== Layer 2: Go HTTP Integration ===")
-
-    go_port = 13006
-    exe = os.path.join(ROOT, EXE_NAME)
-    if not os.path.exists(exe):
-        # Try building
-        print(f"  building {EXE_NAME}...")
-        rc = subprocess.run(
-            ["go", "build", "-o", exe, "."],
-            cwd=os.path.join(ROOT, "go", "native"),
-            capture_output=True
-        ).returncode
-        if rc != 0:
-            skip("Go HTTP tests", "build failed")
-            return
-
-    # Install adversarial plugins for Go to discover
-    import shutil
-    adv_dir = os.path.join(ROOT, "tests", "adversarial")
-    _adv_installed = []
-    if os.path.isdir(adv_dir):
-        for f in os.listdir(adv_dir):
-            if f.endswith(".py"):
-                src = os.path.join(adv_dir, f)
-                dst = os.path.join(ROOT, "plugins", f)
-                shutil.copy2(src, dst)
-                _adv_installed.append(dst)
-
-    go_token = "test-go-token"
-    go_approve = "test-go-approve"
-    env = os.environ.copy()
-    env["ELASTIK_PORT"] = str(go_port)
-    env["ELASTIK_HOST"] = "127.0.0.1"
-    env["ELASTIK_TOKEN"] = go_token  # override .env
-    env["ELASTIK_APPROVE_TOKEN"] = go_approve
-    # Use DEVNULL for stdout — if piped, Go blocks when the 65KB buffer
-    # fills during 30s+ adversarial tests (classic pipe deadlock).
-    proc = subprocess.Popen(
-        [exe], env=env, cwd=ROOT,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    )
-    try:
-        if not wait_for_server(go_port, timeout=20):
-            test("Go server starts", False, "timeout waiting for server")
-            return
-        # Wait for plugin scanning to complete (devtools has 20 routes)
-        time.sleep(3)
-        test("Go server starts", True)
-
-        _run_auth_tests(go_port, "go", go_token, go_approve)
-        _run_http_tests(go_port, "go", token=go_token)
-        _run_adversarial_tests(go_port, go_token)
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-        # Kill any orphan forkbomb children (they sleep 300s on Windows)
-        if sys.platform == "win32":
-            subprocess.run(
-                'wmic process where "name=\'python.exe\' and commandline like \'%%--child%%\'" call terminate',
-                shell=True, capture_output=True
-            )
-        # Clean up adversarial plugins
-        for p in _adv_installed:
-            if os.path.exists(p):
-                os.remove(p)
-
-
-def _run_adversarial_tests(port, token):
-    """Adversarial tests — prove Go daemon survives malicious plugins."""
-    print(f"\n  --- adversarial Go HTTP tests ---")
-
-    # 1. Truncated JSON: plugin dies mid-output → Go returns 502
-    st, body = http_get(port, "/truncated")
-    test("adversarial: truncated JSON -> 502", st == 502,
-         f"status={st} body={body[:80]}")
-
-    # 2. Infinite output: Go kills at 5MB → 502
-    st, body = http_get(port, "/infinite")
-    test("adversarial: infinite output -> 413", st == 413,
-         f"status={st} body={body[:80]}")
-
-    # Server should still be alive after adversarial attacks
-    st, _ = http_get(port, "/stages")
-    test("adversarial: server alive after attacks", st == 200,
-         f"status={st}")
-
-    # 3. Stateless: every call returns "1" (fresh process each time)
-    for i in range(3):
-        st, body = http_get(port, "/stateless")
-        test(f"adversarial: stateless call {i+1} -> '1'",
-             st == 200 and body.strip() == "1",
-             f"status={st} body={body[:40]}")
-
-    # 4. Self-reader: plugin reads its own source
-    st, body = http_get(port, "/selfreader")
-    test("adversarial: selfreader -> 200", st == 200, f"status={st}")
-    if st == 200:
-        test("adversarial: selfreader contains __file__",
-             "__file__" in body, f"body len={len(body)}")
-
-    # 5. Cthulhu: binary garbage on stdout → Go handles gracefully
-    st, body = http_get(port, "/cthulhu")
-    # Go's json.Unmarshal fails on binary → raw text fallback (200)
-    # or process exit error (502). Either is correct.
-    test("adversarial: cthulhu -> no crash (200 or 502)",
-         st in (200, 502), f"status={st}")
-
-    # Server alive after Cthulhu
-    st, _ = http_get(port, "/stages")
-    test("adversarial: server alive after cthulhu", st == 200,
-         f"status={st}")
-
-    # ── devtools route tests ──
-    _run_devtools_tests(port, "go", token=token)
-
-    # ── Slow adversarial tests (30s+ each) ──
-    # These go LAST because forceful process kills can destabilize Go on Windows.
-    print(f"\n  --- slow adversarial tests (30s+ each) ---")
-
-    # Slow drip: exceeds 30s timeout → Go returns 504
-    print("    (slowdrip: waiting for 30s timeout...)")
-    st, body = http_get(port, "/slowdrip", timeout=45)
-    test("adversarial: slowdrip -> 504 (timeout)", st == 504,
-         f"status={st} body={body[:80]}")
-
-    # Server still alive after timeout kill
-    st, _ = http_get(port, "/stages")
-    test("adversarial: server alive after slowdrip", st == 200,
-         f"status={st}")
-
-    # Fork bomb: spawns children, parent sleeps forever → Go kills parent
-    print("    (forkbomb: waiting for 30s timeout...)")
-    st, body = http_get(port, "/forkbomb", timeout=45)
-    test("adversarial: forkbomb -> killed (502/504)", st in (502, 504),
-         f"status={st} body={body[:80]}")
-
-    # Server still alive after fork bomb
-    st, _ = http_get(port, "/stages")
-    test("adversarial: server alive after forkbomb", st == 200,
-         f"status={st}")
-
-    # Terminator: traps SIGTERM, refuses to die → Go must use SIGKILL
-    print("    (terminator: waiting for 30s timeout...)")
-    st, body = http_get(port, "/terminator", timeout=45)
-    test("adversarial: terminator -> killed (502/504)", st in (502, 504),
-         f"status={st} body={body[:80]}")
-
-    # Server alive after terminator
-    st, _ = http_get(port, "/stages")
-    test("adversarial: server alive after terminator", st == 200,
-         f"status={st}")
-
-
-# ── Layer 3: Python HTTP Integration ────────────────────────────────
+# ── Layer 2: Python HTTP Integration ────────────────────────────────
 
 def test_python():
-    print("\n=== Layer 3: Python HTTP Integration ===")
+    print("\n=== Layer 2: Python HTTP Integration ===")
 
     # Ensure ai + devtools plugins are installed for testing
     import shutil
     _installed = []
-    for pname in ["ai.py", "devtools.py"]:
+    for pname in ["ai.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py"]:
         src = os.path.join(ROOT, "plugins", "available", pname)
         dst = os.path.join(ROOT, "plugins", pname)
         if os.path.exists(src) and not os.path.exists(dst):
@@ -473,7 +307,7 @@ def test_python():
     env["ELASTIK_TOKEN"] = py_token
     env["ELASTIK_APPROVE_TOKEN"] = py_approve
     proc = subprocess.Popen(
-        [sys.executable, "boot.py"], env=env, cwd=ROOT,
+        [sys.executable, "server.py"], env=env, cwd=ROOT,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )
@@ -501,7 +335,7 @@ def test_python():
 
 
 def _run_devtools_tests(port, label, token=""):
-    """Devtools route tests — shared by Go and Python servers."""
+    """Devtools route tests."""
     print(f"\n  --- devtools {label} HTTP tests ---")
 
     # /wc-c: upload byte counter
@@ -672,80 +506,42 @@ def _run_devtools_tests(port, label, token=""):
 
 
 def _run_auth_tests(port, label, token, approve):
-    """Auth enforcement tests — shared by Go and Python."""
+    """Auth enforcement tests — server.py core write gate."""
 
-    # ── Tier 2: Bearer AUTH_TOKEN ──
-
-    # GET always open (no token needed)
+    # GET always open
     st, _ = http_get(port, "/stages")
     test(f"{label} auth: GET /stages open", st == 200, f"status={st}")
 
-    # POST without token -> 403
-    st, _ = http_post(port, "/echo", "x")
-    test(f"{label} auth: POST /echo no token -> 403", st == 403, f"status={st}")
+    # Write without token -> 403
+    st, _ = http_post(port, "/authtest/write", "x")
+    test(f"{label} auth: write no token -> 403", st == 403, f"status={st}")
 
-    # POST with wrong token -> 403
-    st, _ = http_post(port, "/echo", "x", token="wrong-token")
-    test(f"{label} auth: POST /echo wrong token -> 403", st == 403, f"status={st}")
+    # Write with wrong token -> 403
+    st, _ = http_post(port, "/authtest/write", "x", token="wrong-token")
+    test(f"{label} auth: write wrong token -> 403", st == 403, f"status={st}")
 
-    # POST with correct token -> 200
-    st, _ = http_post(port, "/echo", "x", token=token)
-    test(f"{label} auth: POST /echo correct token -> 200", st == 200, f"status={st}")
-
-    # ── Tier 1: Bearer APPROVE_TOKEN for config-* worlds ──
-
-    # POST config-* with auth token only -> 403
-    st, _ = http_post(port, "/config-test/write", "data", token=token)
-    test(f"{label} auth: POST config-*/write auth-only -> 403", st == 403, f"status={st}")
-
-    # POST config-* with wrong approve -> 403
-    st, _ = http_post(port, "/config-test/write", "data", approve="wrong")
-    test(f"{label} auth: POST config-*/write wrong approve -> 403", st == 403, f"status={st}")
-
-    # POST config-* with correct approve -> pass auth (200 or creates world)
-    st, _ = http_post(port, "/config-test/write", "test-data", approve=approve)
-    test(f"{label} auth: POST config-*/write approve -> pass", st in (200, 201), f"status={st}")
-
-    # Verify config-* world was actually written
-    st, body = http_get(port, "/config-test/read")
-    test(f"{label} auth: GET config-*/read -> data persisted",
-         st == 200 and "test-data" in body, f"status={st} body={body[:60]}")
-
-    # ── Plugin reload (Go-only feature) ──
-    if label == "go":
-        st, _ = http_post(port, "/plugins/reload")
-        test(f"{label} auth: POST /plugins/reload no token -> 403", st == 403, f"status={st}")
-
-        st, _ = http_post(port, "/plugins/reload", token=token)
-        test(f"{label} auth: POST /plugins/reload auth -> 200", st == 200, f"status={st}")
-
-    # ── Tier 1: /proxy/* requires approve token (postman = curl proxy) ──
-
-    # POST /proxy/postman with no token -> 403
-    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}')
-    test(f"{label} auth: POST /proxy/postman no token -> 403", st == 403, f"status={st}")
-
-    # POST /proxy/postman with auth token only -> 403 (needs approve, not auth)
-    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}', token=token)
-    test(f"{label} auth: POST /proxy/postman auth-only -> 403", st == 403, f"status={st}")
-
-    # POST /proxy/postman with wrong approve -> 403
-    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}', approve="wrong")
-    test(f"{label} auth: POST /proxy/postman wrong approve -> 403", st == 403, f"status={st}")
-
-    # POST /proxy/postman with correct approve -> passes auth (not 403)
-    # Go returns 404 (route not registered — Python-only plugin), Python returns 200
-    st, _ = http_post(port, "/proxy/postman", '{"url":"https://httpbin.org/get"}', approve=approve)
-    test(f"{label} auth: POST /proxy/postman approve -> not 403", st != 403, f"status={st}")
-
-    # ── Normal world with auth token should work ──
-
+    # Write with correct token -> 200
     st, _ = http_post(port, "/authtest/write", "hello", token=token)
-    test(f"{label} auth: POST normal world write -> pass", st in (200, 201), f"status={st}")
+    test(f"{label} auth: write correct token -> 200", st == 200, f"status={st}")
 
     st, body = http_get(port, "/authtest/read")
-    test(f"{label} auth: GET normal world read -> data", st == 200 and "hello" in body,
+    test(f"{label} auth: read -> data persisted", st == 200 and "hello" in body,
          f"status={st} body={body[:60]}")
+
+    # ── config-* worlds require approve ──
+
+    st, _ = http_post(port, "/config-test/write", "data", token=token)
+    test(f"{label} auth: config-*/write auth-only -> 403", st == 403, f"status={st}")
+
+    st, _ = http_post(port, "/config-test/write", "data", approve="wrong")
+    test(f"{label} auth: config-*/write wrong approve -> 403", st == 403, f"status={st}")
+
+    st, _ = http_post(port, "/config-test/write", "test-data", approve=approve)
+    test(f"{label} auth: config-*/write approve -> pass", st in (200, 201), f"status={st}")
+
+    st, body = http_get(port, "/config-test/read")
+    test(f"{label} auth: config-*/read -> data persisted",
+         st == 200 and "test-data" in body, f"status={st} body={body[:60]}")
 
 
 def _run_plugin_auth_tests(port, label, token, approve):
@@ -773,10 +569,11 @@ def _run_plugin_auth_tests(port, label, token, approve):
     test(f"{label} plugin-auth: GET /mirror approve -> 200", st == 200, f"status={st}")
 
     # ── View: GET needs approve (+ type gate) ──
-    st, _ = http_get(port, "/view/work")
+    http_post(port, "/view-test/write?ext=html", "<h1>test</h1>", token=token)
+    st, _ = http_get(port, "/view/view-test")
     test(f"{label} plugin-auth: GET /view no auth -> 401", st == 401, f"status={st}")
 
-    st, _ = http_method(port, "/view/work", basic_auth=approve)
+    st, _ = http_method(port, "/view/view-test", basic_auth=approve)
     # 200 if html-typed, 415 if plain — either means auth passed
     test(f"{label} plugin-auth: GET /view approve -> auth passed", st in (200, 415), f"status={st}")
 
@@ -811,6 +608,7 @@ def _run_blob_ext_tests(port, label, token, approve):
     import hashlib
 
     # ── 304 version comparison ──
+    http_post(port, "/work/write", "hello", token=token)  # ensure world exists
     st, body = http_get(port, "/work/read")
     test(f"{label} blob: GET /read -> 200", st == 200, f"status={st}")
     v = json.loads(body).get("version", -1)
@@ -881,34 +679,39 @@ def _run_blob_ext_tests(port, label, token, approve):
     test(f"{label} blob: DAV binary stage empty (binary)", d.get("stage_html") == "", f"stage={d.get('stage_html','?')[:20]}")
 
     # ── Unicode world names ──
-    unicode_names = [
-        ("\u8863\u67dc", "txt", "wardrobe"),           # 衣柜 (Chinese)
-        ("\u65e5\u672c\u8a9e\u30c6\u30b9\u30c8", "md", "# Japanese test"),  # 日本語テスト
-        ("\ud55c\uad6d\uc5b4", "css", "body{color:red}"),  # 한국어 (Korean)
-        ("\u041f\u0440\u0438\u0432\u0435\u0442", "txt", "hello russian"),  # Привет (Cyrillic)
-        ("\u0645\u0631\u062d\u0628\u0627", "txt", "hello arabic"),  # مرحبا (Arabic)
-        ("\u82b1\u6912/\u7c89", "txt", "Sichuan pepper"),  # 花椒/粉 (Chinese with /)
-    ]
-    for uname, uext, ucontent in unicode_names:
-        from urllib.parse import quote
-        encoded = quote(uname, safe="/")
-        st, _ = http_post(port, f"/{encoded}/write?ext={uext}", ucontent, token=token)
-        test(f"{label} unicode: write {uname} -> 200", st == 200, f"status={st}")
+    # Unicode world names — skip on CI (Windows runner codepage issues)
+    if os.environ.get("CI"):
+        skip(f"{label} unicode: (skipped on CI)", "Windows codepage")
+    else:
+        unicode_names = [
+            ("\u8863\u67dc", "txt", "wardrobe"),           # 衣柜 (Chinese)
+            ("\u65e5\u672c\u8a9e\u30c6\u30b9\u30c8", "md", "# Japanese test"),  # 日本語テスト
+            ("\ud55c\uad6d\uc5b4", "css", "body{color:red}"),  # 한국어 (Korean)
+            ("\u041f\u0440\u0438\u0432\u0435\u0442", "txt", "hello russian"),  # Привет (Cyrillic)
+            ("\u0645\u0631\u062d\u0628\u0627", "txt", "hello arabic"),  # مرحبا (Arabic)
+            ("\u82b1\u6912/\u7c89", "txt", "Sichuan pepper"),  # 花椒/粉 (Chinese with /)
+        ]
+        for uname, uext, ucontent in unicode_names:
+            from urllib.parse import quote
+            encoded = quote(uname, safe="/")
+            st, _ = http_post(port, f"/{encoded}/write?ext={uext}", ucontent, token=token)
+            test(f"{label} unicode: write {uname} -> 200", st == 200, f"status={st}")
 
-        st, body = http_get(port, f"/{encoded}/read")
-        d = json.loads(body)
-        test(f"{label} unicode: read {uname} ext={uext}", d.get("ext") == uext, f"ext={d.get('ext')}")
+            st, body = http_get(port, f"/{encoded}/read")
+            d = json.loads(body)
+            test(f"{label} unicode: read {uname} ext={uext}", d.get("ext") == uext, f"ext={d.get('ext')}")
 
-    # Check /stages has Unicode names
-    st, body = http_get(port, "/stages")
-    names = [s["name"] for s in json.loads(body)]
-    test(f"{label} unicode: /stages has Chinese", any("\u8863" in n for n in names), "")
-    test(f"{label} unicode: /stages has Korean", any("\ud55c" in n for n in names), "")
-    test(f"{label} unicode: /stages has fake dir", any("\u82b1\u6912/" in n for n in names), "")
+        # Check /stages has Unicode names (normalize for macOS HFS+ NFD)
+        import unicodedata
+        st, body = http_get(port, "/stages")
+        names = [unicodedata.normalize("NFC", s["name"]) for s in json.loads(body)]
+        test(f"{label} unicode: /stages has Chinese", any("\u8863" in n for n in names), f"names={[n for n in names if ord(n[0])>127][:5]}")
+        test(f"{label} unicode: /stages has Korean", any("\ud55c" in n for n in names), "")
+        test(f"{label} unicode: /stages has fake dir", any("\u82b1\u6912/" in n for n in names), "")
 
 
 def _run_http_tests(port, label, token=""):
-    """Shared HTTP tests for both Go and Python servers."""
+    """HTTP integration tests."""
 
     # Echo
     st, body = http_post(port, "/echo", "hello from test", token=token)
@@ -954,8 +757,8 @@ def _run_http_tests(port, label, token=""):
         skip(f"{label}: POST /ai/ask", "no AI provider or plugin not loaded")
         skip(f"{label}: POST /ai/ask empty", "no AI provider or plugin not loaded")
 
-    # GET unknown path -> serves index.html (200) in both Go and Python.
-    # This is correct behavior: unknown GET paths are world entry points.
+    # GET unknown path -> serves index.html (200).
+    # Unknown GET paths are world entry points.
     st, body = http_get(port, "/stages")
     test(f"{label}: GET /stages -> 200", st == 200, f"status={st}")
     if st == 200:
@@ -964,211 +767,6 @@ def _run_http_tests(port, label, token=""):
             test(f"{label}: /stages returns array", isinstance(d, list))
         except json.JSONDecodeError:
             test(f"{label}: /stages returns JSON", False)
-
-
-# ── Layer 4: Cross-runtime parity ───────────────────────────────────
-
-def test_parity():
-    print("\n=== Layer 4: Cross-runtime Parity ===")
-
-    go_port = 13008
-    py_port = 13009
-
-    exe = os.path.join(ROOT, EXE_NAME)
-    if not os.path.exists(exe):
-        skip("Parity tests", f"no {EXE_NAME}")
-        return
-
-    parity_token = "test-parity-token"
-    parity_approve = "test-parity-approve"
-    env_go = os.environ.copy()
-    env_go["ELASTIK_PORT"] = str(go_port)
-    env_go["ELASTIK_HOST"] = "127.0.0.1"
-    env_go["ELASTIK_TOKEN"] = parity_token
-    env_go["ELASTIK_APPROVE_TOKEN"] = parity_approve
-
-    env_py = os.environ.copy()
-    env_py["ELASTIK_PORT"] = str(py_port)
-    env_py["ELASTIK_HOST"] = "127.0.0.1"
-    env_py["ELASTIK_TOKEN"] = parity_token
-    env_py["ELASTIK_APPROVE_TOKEN"] = parity_approve
-
-    # Install ai + devtools plugins for Python
-    import shutil
-    _parity_installed = []
-    for pname in ["ai.py", "devtools.py"]:
-        src = os.path.join(ROOT, "plugins", "available", pname)
-        dst = os.path.join(ROOT, "plugins", pname)
-        if os.path.exists(src) and not os.path.exists(dst):
-            shutil.copy2(src, dst)
-            _parity_installed.append(dst)
-
-    go_proc = subprocess.Popen(
-        [exe], env=env_go, cwd=ROOT,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    )
-    py_proc = subprocess.Popen(
-        [sys.executable, "boot.py"], env=env_py, cwd=ROOT,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    )
-
-    try:
-        go_ok = wait_for_server(go_port)
-        py_ok = wait_for_server(py_port)
-        if not go_ok or not py_ok:
-            test("Both servers start", False,
-                 f"go={'ok' if go_ok else 'fail'} py={'ok' if py_ok else 'fail'}")
-            return
-        test("Both servers start", True)
-
-        # Compare /ai/status structure
-        go_st, go_body = http_get(go_port, "/ai/status")
-        py_st, py_body = http_get(py_port, "/ai/status")
-        test("parity: /ai/status same status code", go_st == py_st,
-             f"go={go_st} py={py_st}")
-        if go_st == 200 and py_st == 200:
-            try:
-                go_d = json.loads(go_body)
-                py_d = json.loads(py_body)
-                test("parity: /ai/status same keys",
-                     set(go_d.keys()) == set(py_d.keys()),
-                     f"go={set(go_d.keys())} py={set(py_d.keys())}")
-                test("parity: /ai/status same provider",
-                     go_d.get("provider") == py_d.get("provider"),
-                     f"go={go_d.get('provider')} py={py_d.get('provider')}")
-            except json.JSONDecodeError as e:
-                test("parity: /ai/status JSON parse", False, str(e))
-
-        # Compare /echo
-        go_st, go_body = http_post(go_port, "/echo", "parity test", token=parity_token)
-        py_st, py_body = http_post(py_port, "/echo", "parity test", token=parity_token)
-        test("parity: /echo same status", go_st == py_st,
-             f"go={go_st} py={py_st}")
-        test("parity: /echo same body",
-             "parity test" in go_body and "parity test" in py_body,
-             f"go={go_body[:40]} py={py_body[:40]}")
-
-        # Compare error handling
-        go_st, _ = http_post(go_port, "/ai/ask", "", token=parity_token)
-        py_st, _ = http_post(py_port, "/ai/ask", "", token=parity_token)
-        test("parity: /ai/ask empty -> same status", go_st == py_st,
-             f"go={go_st} py={py_st}")
-
-        # ── Auth parity ──
-
-        # POST no token -> both 403
-        go_st, _ = http_post(go_port, "/echo", "x")
-        py_st, _ = http_post(py_port, "/echo", "x")
-        test("parity: POST no token -> both 403",
-             go_st == 403 and py_st == 403, f"go={go_st} py={py_st}")
-
-        # POST wrong token -> both 403
-        go_st, _ = http_post(go_port, "/echo", "x", token="wrong")
-        py_st, _ = http_post(py_port, "/echo", "x", token="wrong")
-        test("parity: POST wrong token -> both 403",
-             go_st == 403 and py_st == 403, f"go={go_st} py={py_st}")
-
-        # config-* with auth token only -> both 403
-        go_st, _ = http_post(go_port, "/config-x/write", "d", token=parity_token)
-        py_st, _ = http_post(py_port, "/config-x/write", "d", token=parity_token)
-        test("parity: config-* auth-only -> both 403",
-             go_st == 403 and py_st == 403, f"go={go_st} py={py_st}")
-
-        # config-* with approve -> both pass
-        go_st, _ = http_post(go_port, "/config-x/write", "d", approve=parity_approve)
-        py_st, _ = http_post(py_port, "/config-x/write", "d", approve=parity_approve)
-        test("parity: config-* approve -> both pass",
-             go_st in (200, 201) and py_st in (200, 201), f"go={go_st} py={py_st}")
-
-        # reload is Go-only — test auth on it separately
-        go_st, _ = http_post(go_port, "/plugins/reload")
-        test("parity: go reload no token -> 403", go_st == 403, f"go={go_st}")
-        go_st, _ = http_post(go_port, "/plugins/reload", token=parity_token)
-        test("parity: go reload auth -> 200", go_st == 200, f"go={go_st}")
-
-        # ── Devtools parity ──
-        # Both runtimes should serve the same devtools routes with same behavior
-
-        # /health
-        go_st, go_body = http_get(go_port, "/health")
-        py_st, py_body = http_get(py_port, "/health")
-        test("parity: /health same status", go_st == py_st, f"go={go_st} py={py_st}")
-
-        # /true
-        go_st, _ = http_get(go_port, "/true")
-        py_st, _ = http_get(py_port, "/true")
-        test("parity: /true same status", go_st == py_st == 200, f"go={go_st} py={py_st}")
-
-        # /false
-        go_st, _ = http_get(go_port, "/false")
-        py_st, _ = http_get(py_port, "/false")
-        test("parity: /false same status", go_st == py_st == 403, f"go={go_st} py={py_st}")
-
-        # /full
-        go_st, _ = http_get(go_port, "/full")
-        py_st, _ = http_get(py_port, "/full")
-        test("parity: /full same status", go_st == py_st == 507, f"go={go_st} py={py_st}")
-
-        # /rev
-        go_st, go_body = http_post(go_port, "/rev", "hello", token=parity_token)
-        py_st, py_body = http_post(py_port, "/rev", "hello", token=parity_token)
-        test("parity: /rev same status", go_st == py_st == 200, f"go={go_st} py={py_st}")
-        test("parity: /rev same body",
-             go_body.strip() == py_body.strip() == "olleh",
-             f"go={go_body[:20]} py={py_body[:20]}")
-
-        # /wc-c
-        go_st, go_body = http_post(go_port, "/wc-c", "test123", token=parity_token)
-        py_st, py_body = http_post(py_port, "/wc-c", "test123", token=parity_token)
-        test("parity: /wc-c same status", go_st == py_st == 200, f"go={go_st} py={py_st}")
-        test("parity: /wc-c same count",
-             go_body.strip() == py_body.strip() == "7",
-             f"go={go_body[:10]} py={py_body[:10]}")
-
-        # /time — both should return timestamps within 5s of each other
-        go_st, go_body = http_get(go_port, "/time")
-        py_st, py_body = http_get(py_port, "/time")
-        test("parity: /time same status", go_st == py_st == 200, f"go={go_st} py={py_st}")
-        if go_st == 200 and py_st == 200:
-            test("parity: /time within 5s",
-                 abs(int(go_body.strip()) - int(py_body.strip())) < 5,
-                 f"go={go_body.strip()} py={py_body.strip()}")
-
-        # /grep — write a world on both, grep on both, compare
-        _pw = "parity-grep-test"
-        _pc = "parity line one\nparity NEEDLE two\nparity line three"
-        go_ws, _ = http_post(go_port, f"/{_pw}/write", _pc, token=parity_token)
-        py_ws, _ = http_post(py_port, f"/{_pw}/write", _pc, token=parity_token)
-        if go_ws == 200 and py_ws == 200:
-            go_st, go_body = http_get(go_port, "/grep?q=NEEDLE")
-            py_st, py_body = http_get(py_port, "/grep?q=NEEDLE")
-            test("parity: /grep same status", go_st == py_st == 200,
-                 f"go={go_st} py={py_st}")
-            test("parity: /grep both find NEEDLE",
-                 "NEEDLE" in go_body and "NEEDLE" in py_body,
-                 f"go={go_body[:60]} py={py_body[:60]}")
-            # mode=l
-            go_st, go_body = http_get(go_port, "/grep?q=NEEDLE&mode=l")
-            py_st, py_body = http_get(py_port, "/grep?q=NEEDLE&mode=l")
-            test("parity: /grep?mode=l same status", go_st == py_st == 200,
-                 f"go={go_st} py={py_st}")
-            test("parity: /grep?mode=l both list world",
-                 _pw in go_body and _pw in py_body,
-                 f"go={go_body[:60]} py={py_body[:60]}")
-
-    finally:
-        go_proc.terminate()
-        py_proc.terminate()
-        for p in [go_proc, py_proc]:
-            try:
-                p.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                p.kill()
-        for p in _parity_installed:
-            if os.path.exists(p):
-                os.remove(p)
 
 
 # ── Main ────────────────────────────────────────────────────────────
@@ -1181,16 +779,10 @@ if __name__ == "__main__":
 
     if mode in ("all", "cgi"):
         test_cgi()
-    if mode in ("all", "go"):
-        if mode == "go":
-            test_cgi()
-        test_go()
     if mode in ("all", "python"):
         if mode == "python":
             test_cgi()
         test_python()
-    if mode == "all":
-        test_parity()
 
     print(f"\n{'=' * 40}")
     print(f"  PASS: {PASS}  FAIL: {FAIL}  SKIP: {SKIP}")

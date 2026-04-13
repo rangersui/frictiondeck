@@ -7,7 +7,7 @@ Usage:
   python scripts/lock.py --show       # show what would be locked
   python scripts/lock.py --list       # list locked file paths (for git hooks)
 
-Locks: server.py, plugins.py, boot.py, and plugins/available/*.py (shipped code only).
+Locks: server.py, plugins.py, and plugins/available/*.py (shipped code only).
 plugins/ is user-installed — not locked, not shipped.
 """
 import hashlib, sys
@@ -18,7 +18,7 @@ LOCK = ROOT / "plugins.lock"
 
 def _targets():
     """Files to lock — core + all plugin .py files."""
-    core = ["server.py", "plugins.py", "boot.py"]
+    core = ["server.py", "plugins.py"]
     files = []
     for name in core:
         f = ROOT / name

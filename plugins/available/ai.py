@@ -1,7 +1,7 @@
 """AI plugin — auto-detect provider, expose /ai/status and /ai/ask.
 
 Two modes, one file:
-  Python in-process: boot.py loads ROUTES dict via exec()
+  Python in-process: server loads ROUTES dict via exec()
   Go CGI:            go exec python ai.py --routes / stdin JSON
 """
 DESCRIPTION = "AI provider detection and prompt relay (ollama/claude/openai/deepseek/google)"
@@ -145,7 +145,7 @@ def _ask_ai(cfg, prompt):
 _ai_cfg = _detect_ai()
 
 
-# ── Python in-process handlers (boot.py loads these via ROUTES) ─────
+# ── Python in-process handlers (loaded via ROUTES) ─────
 
 async def handle_status(method, body, params):
     out = {"provider": _ai_cfg["provider"], "model": _ai_cfg["model"],

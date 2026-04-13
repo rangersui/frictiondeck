@@ -5,13 +5,11 @@ Strings in, UI out. HTTP + SQLite + HMAC. That's it.
 ## Install
 
 ```bash
-python boot.py
+python server.py
 ```
 
 No pip needed. Falls back to a built-in HTTP server if uvicorn is missing.
 Works on anything with Python 3.8+: laptop, Raspberry Pi, iOS (a-Shell), Android (Termux).
-
-Optional: `python elastik.py` for hardware detection + auto-browser.
 
 ## How it works
 
@@ -105,7 +103,7 @@ curl -H "Authorization: Bearer $APPROVE" http://A/self > elastik.tar.gz
 curl -H "Authorization: Bearer $APPROVE" http://A/__reality__ > data.tar.gz
 
 # Boot the clone
-tar xzf elastik.tar.gz && tar xzf data.tar.gz && python boot.py
+tar xzf elastik.tar.gz && tar xzf data.tar.gz && python server.py
 ```
 
 No secrets included. `.env` and tokens are excluded from `/self`.
@@ -115,17 +113,9 @@ Two curls. One clone. The clone can clone itself.
 ## Files
 
 ```
-server.py       ~540 lines    the protocol. ~60 lines are BIOS, rest is egg.
-plugins.py      ~250 lines    plugin load/unload/cron
-boot.py          ~80 lines    startup (server + plugins + sync)
-index.html       ~72 lines    one iframe, one polling loop
-```
-
-Three entry points:
-```
-python server.py   → bare protocol, no plugins
-python boot.py     → full system (plugins + cron)
-python elastik.py  → boot + hardware detect + browser
+server.py       the protocol + startup. One entry point.
+plugins.py      plugin load/unload/cron
+index.html      one iframe, one polling loop
 ```
 
 ## Security
@@ -143,13 +133,9 @@ Different keys. Not "shouldn't." **Can't.**
 ## Connect AI
 
 ```bash
-# Any AI with curl/bash — just POST
 curl -X POST http://localhost:3005/work/write \
   -H "Authorization: Bearer $TOKEN" \
   -d '<h1>hello world</h1>'
-
-# MCP (Claude Desktop, Cursor, etc.)
-# Point to mcp_server.py — it translates MCP→HTTP
 ```
 
 If it can send a string, it's an elastik client.

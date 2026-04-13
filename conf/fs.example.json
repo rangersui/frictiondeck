@@ -1,5 +1,0 @@
-{
-  "read_dirs": [],
-  "write_dirs": [],
-  "deny_write": ["*.py", "*.json", "*.env", "*.toml", "*.yaml", "*.yml", "*.sh"]
-}

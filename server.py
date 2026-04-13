@@ -1,6 +1,7 @@
 """elastik — the protocol. Core routes only; everything else is a plugin."""
 import asyncio, base64, hashlib, hmac as _hmac, json, os, re, sqlite3, sys
 from pathlib import Path
+if __name__ == "__main__": sys.modules["server"] = sys.modules[__name__]
 
 DATA = Path("data")
 # Load env file: .env, _env, .env.local (iOS doesn't support dotfiles)
@@ -20,7 +21,6 @@ HOST = os.getenv("ELASTIK_HOST", "127.0.0.1")
 PORT = int(os.getenv("ELASTIK_PORT", "3004"))
 MAX_BODY = 5 * 1024 * 1024
 INDEX = Path(__file__).with_name("index.html").read_text(encoding="utf-8")
-OPENAPI = Path(__file__).with_name("openapi.json").read_text(encoding="utf-8")
 SW = Path(__file__).with_name("sw.js").read_text(encoding="utf-8")
 MANIFEST = Path(__file__).with_name("manifest.json").read_text(encoding="utf-8")
 _icon_path = Path(__file__).with_name("icon.png")
@@ -301,7 +301,6 @@ async def app(scope, receive, send):
                f'<Url type="text/html" template="{scheme}://{host}/shell?q={{searchTerms}}"/>'
                f'</OpenSearchDescription>')
         return await send_r(send, 200, xml, ct="application/opensearchdescription+xml")
-    if method == "GET" and path == "/openapi.json": return await send_r(send, 200, OPENAPI)
     if method == "GET" and path == "/sw.js": return await send_r(send, 200, SW, "application/javascript")
     if method == "GET" and path == "/manifest.json": return await send_r(send, 200, MANIFEST, "application/manifest+json")
     if method == "GET" and path == "/icon.png" and ICON:
@@ -347,6 +346,13 @@ async def app(scope, receive, send):
         action = parts[-1]
         name = "/".join(parts[:-1])  # everything before the action
         if not _valid_name(name): return await send_r(send, 400, '{"error":"invalid world name"}')
+        # Write auth: token for mutations, approve for config-* worlds
+        if action in ("write", "append", "pending"):
+            if name.startswith("config-"):
+                if _check_auth(scope) != "approve":
+                    return await send_r(send, 403, '{"error":"config write requires approve"}')
+            elif AUTH_TOKEN and _check_auth(scope) is None:
+                return await send_r(send, 403, '{"error":"unauthorized"}')
         if method == "GET" and action == "read":
             if not (DATA / _disk_name(name) / "universe.db").exists():
                 return await send_r(send, 404, '{"error":"world not found"}')
@@ -532,11 +538,39 @@ def run(extra_tasks=None):
             await asyncio.gather(_mini_serve(app, HOST, PORT), *tasks)
         asyncio.run(_serve())
 
+def _sync_dir(directory, glob_pattern, world_name_fn, label):
+    """Sync files from a directory to worlds at startup."""
+    d = Path(__file__).resolve().parent / directory
+    if not d.exists(): return
+    for f in sorted(d.glob(glob_pattern)):
+        name = world_name_fn(f)
+        content = f.read_text(encoding="utf-8")
+        c = conn(name)
+        old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+        if old["stage_html"] != content:
+            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (content,))
+            c.commit()
+            print(f"  {label}: synced {name}")
+
 if __name__ == "__main__":
     if not AUTH_TOKEN:
         print("\n  ! ELASTIK_TOKEN not set. Refusing to start in public mode.")
         print("  Set ELASTIK_TOKEN in .env or environment.\n")
         sys.exit(1)
-    print(f"\n  elastik -> http://{HOST}:{PORT}  [protocol only]")
-    print(f"  no plugins loaded. use boot.py for full system.\n")
-    run()
+    _root = Path(__file__).resolve().parent
+    os.environ.setdefault("ELASTIK_DATA", str(_root / "data"))
+    os.environ.setdefault("ELASTIK_ROOT", str(_root))
+    try:
+        import plugins
+    except ImportError:
+        plugins = None
+    if plugins:
+        plugins.load_plugins()
+        plugins.register_plugin_routes()
+        _sync_dir("skills", "*.md", lambda f: f"skills-{f.stem}", "skills")
+        _sync_dir("renderers", "renderer-*.html", lambda f: f.stem, "renderers")
+        print(f"\n  elastik -> http://{HOST}:{PORT}\n")
+        run(extra_tasks=[plugins.cron_loop()])
+    else:
+        print(f"\n  elastik -> http://{HOST}:{PORT}  [no plugins.py]\n")
+        run()

@@ -1,2 +1,0 @@
-uvicorn  # recommended; falls back to built-in server if missing
-mcp      # needed for mcp_server.py; server.py runs without it

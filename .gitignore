@@ -2,8 +2,7 @@
 .env
 _env
 .env.local
-conf/*.json
-!conf/*.example.json
+conf/
 
 # Python
 __pycache__/
@@ -36,7 +35,6 @@ dist/
 bus.crt
 bus.key
 
-# Binaries — build locally, distribute via GitHub Releases.
+# Binaries
 *.exe
 *.exe~
-go/_*_data/

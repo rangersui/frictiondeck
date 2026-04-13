@@ -186,7 +186,7 @@ def load_plugins():
         available = PLUGINS / "available"
         if available.exists():
             PLUGINS.mkdir(exist_ok=True)
-            for name in ["admin.py", "auth.py", "info.py"]:
+            for name in ["admin.py", "info.py", "public_gate.py"]:
                 src = available / name
                 if src.exists():
                     (PLUGINS / name).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")

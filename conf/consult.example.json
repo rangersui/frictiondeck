@@ -1,5 +1,0 @@
-{
-  "url": "http://localhost:11434",
-  "advisor": "qwen3:8b",
-  "chief": "qwen3:1.7b"
-}
