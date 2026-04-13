@@ -506,53 +506,42 @@ def _run_devtools_tests(port, label, token=""):
 
 
 def _run_auth_tests(port, label, token, approve):
-    """Auth enforcement tests."""
+    """Auth enforcement tests — server.py core write gate."""
 
-    # ── Tier 2: Bearer AUTH_TOKEN ──
-
-    # GET always open (no token needed)
+    # GET always open
     st, _ = http_get(port, "/stages")
     test(f"{label} auth: GET /stages open", st == 200, f"status={st}")
 
-    # POST without token -> 403
-    st, _ = http_post(port, "/echo", "x")
-    test(f"{label} auth: POST /echo no token -> 403", st == 403, f"status={st}")
+    # Write without token -> 403
+    st, _ = http_post(port, "/authtest/write", "x")
+    test(f"{label} auth: write no token -> 403", st == 403, f"status={st}")
 
-    # POST with wrong token -> 403
-    st, _ = http_post(port, "/echo", "x", token="wrong-token")
-    test(f"{label} auth: POST /echo wrong token -> 403", st == 403, f"status={st}")
+    # Write with wrong token -> 403
+    st, _ = http_post(port, "/authtest/write", "x", token="wrong-token")
+    test(f"{label} auth: write wrong token -> 403", st == 403, f"status={st}")
 
-    # POST with correct token -> 200
-    st, _ = http_post(port, "/echo", "x", token=token)
-    test(f"{label} auth: POST /echo correct token -> 200", st == 200, f"status={st}")
-
-    # ── Tier 1: Bearer APPROVE_TOKEN for config-* worlds ──
-
-    # POST config-* with auth token only -> 403
-    st, _ = http_post(port, "/config-test/write", "data", token=token)
-    test(f"{label} auth: POST config-*/write auth-only -> 403", st == 403, f"status={st}")
-
-    # POST config-* with wrong approve -> 403
-    st, _ = http_post(port, "/config-test/write", "data", approve="wrong")
-    test(f"{label} auth: POST config-*/write wrong approve -> 403", st == 403, f"status={st}")
-
-    # POST config-* with correct approve -> pass auth (200 or creates world)
-    st, _ = http_post(port, "/config-test/write", "test-data", approve=approve)
-    test(f"{label} auth: POST config-*/write approve -> pass", st in (200, 201), f"status={st}")
-
-    # Verify config-* world was actually written
-    st, body = http_get(port, "/config-test/read")
-    test(f"{label} auth: GET config-*/read -> data persisted",
-         st == 200 and "test-data" in body, f"status={st} body={body[:60]}")
-
-    # ── Normal world with auth token should work ──
-
+    # Write with correct token -> 200
     st, _ = http_post(port, "/authtest/write", "hello", token=token)
-    test(f"{label} auth: POST normal world write -> pass", st in (200, 201), f"status={st}")
+    test(f"{label} auth: write correct token -> 200", st == 200, f"status={st}")
 
     st, body = http_get(port, "/authtest/read")
-    test(f"{label} auth: GET normal world read -> data", st == 200 and "hello" in body,
+    test(f"{label} auth: read -> data persisted", st == 200 and "hello" in body,
          f"status={st} body={body[:60]}")
+
+    # ── config-* worlds require approve ──
+
+    st, _ = http_post(port, "/config-test/write", "data", token=token)
+    test(f"{label} auth: config-*/write auth-only -> 403", st == 403, f"status={st}")
+
+    st, _ = http_post(port, "/config-test/write", "data", approve="wrong")
+    test(f"{label} auth: config-*/write wrong approve -> 403", st == 403, f"status={st}")
+
+    st, _ = http_post(port, "/config-test/write", "test-data", approve=approve)
+    test(f"{label} auth: config-*/write approve -> pass", st in (200, 201), f"status={st}")
+
+    st, body = http_get(port, "/config-test/read")
+    test(f"{label} auth: config-*/read -> data persisted",
+         st == 200 and "test-data" in body, f"status={st} body={body[:60]}")
 
 
 def _run_plugin_auth_tests(port, label, token, approve):

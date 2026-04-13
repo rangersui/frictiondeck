@@ -346,6 +346,13 @@ async def app(scope, receive, send):
         action = parts[-1]
         name = "/".join(parts[:-1])  # everything before the action
         if not _valid_name(name): return await send_r(send, 400, '{"error":"invalid world name"}')
+        # Write auth: token for mutations, approve for config-* worlds
+        if action in ("write", "append", "pending"):
+            if name.startswith("config-"):
+                if _check_auth(scope) != "approve":
+                    return await send_r(send, 403, '{"error":"config write requires approve"}')
+            elif AUTH_TOKEN and _check_auth(scope) is None:
+                return await send_r(send, 403, '{"error":"unauthorized"}')
         if method == "GET" and action == "read":
             if not (DATA / _disk_name(name) / "universe.db").exists():
                 return await send_r(send, 404, '{"error":"world not found"}')
