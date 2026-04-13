@@ -33,4 +33,6 @@ jobs:
           python-version: '3.12'
 
       - name: Run plugin tests
+        env:
+          PYTHONUTF8: 1
         run: python tests/test_plugins.py python
