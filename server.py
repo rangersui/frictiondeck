@@ -554,12 +554,15 @@ if __name__ == "__main__":
     os.environ.setdefault("ELASTIK_ROOT", str(_root))
     try:
         import plugins
+    except ImportError:
+        plugins = None
+    if plugins:
         plugins.load_plugins()
         plugins.register_plugin_routes()
         _sync_dir("skills", "*.md", lambda f: f"skills-{f.stem}", "skills")
         _sync_dir("renderers", "renderer-*.html", lambda f: f.stem, "renderers")
         print(f"\n  elastik -> http://{HOST}:{PORT}\n")
         run(extra_tasks=[plugins.cron_loop()])
-    except ImportError:
+    else:
         print(f"\n  elastik -> http://{HOST}:{PORT}  [no plugins.py]\n")
         run()
