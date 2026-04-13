@@ -30,7 +30,7 @@ def http(method, url, body=None):
     if data:
         req.add_header('Content-Type', 'application/json')
     if TOKEN and method == 'POST':
-        req.add_header('X-Auth-Token', TOKEN)
+        req.add_header('Authorization', f'Bearer {TOKEN}')
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             return json.loads(resp.read().decode('utf-8'))

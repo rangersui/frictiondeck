@@ -318,7 +318,7 @@ def write_world(port, world, body, host="127.0.0.1"):
     req.add_header("Content-Type", "text/plain")
     token = load_token()
     if token:
-        req.add_header("X-Auth-Token", token)
+        req.add_header("Authorization", f"Bearer {token}")
     try:
         urllib.request.urlopen(req, timeout=5)
         return True

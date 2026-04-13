@@ -59,7 +59,7 @@ def _http(url, token=None, data=None, timeout=3):
     """Zero-dep HTTP. GET if data is None, POST otherwise."""
     headers = {"Content-Type": "text/plain"}
     if token:
-        headers["X-Auth-Token"] = token
+        headers["Authorization"] = f"Bearer {token}"
     body = data.encode("utf-8") if data else None
     req = urllib.request.Request(url, data=body, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:

@@ -2,132 +2,34 @@
   "openapi": "3.1.0",
   "info": {
     "title": "elastik",
-    "description": "elastik API for GPT Actions. Read and write strings to worlds.",
-    "version": "1.0.0"
+    "description": "HTTP API. Worlds store strings. Read and write with any path.",
+    "version": "2.0.0"
   },
-  "servers": [
-    {
-      "url": "https://gym-talent-base-connect.trycloudflare.com"
-    }
-  ],
+  "servers": [{"url": "https://your-tunnel.trycloudflare.com"}],
   "paths": {
-    "/stages": {
+    "/{path}": {
       "get": {
-        "operationId": "listStages",
-        "summary": "List all worlds",
-        "responses": {
-          "200": { "description": "Array of worlds with name, version, updated_at" }
-        }
-      }
-    },
-    "/{name}/read": {
-      "get": {
-        "operationId": "readStage",
-        "summary": "Read world state",
+        "operationId": "http_get",
+        "summary": "GET any path. /stages, /{name}/read, /{name}/raw, /info, etc.",
         "parameters": [
-          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
+          {"name": "path", "in": "path", "required": true, "schema": {"type": "string"}}
         ],
-        "responses": {
-          "200": { "description": "Returns stage_html, pending_js, js_result, version" }
-        }
-      }
-    },
-    "/{name}/write": {
+        "responses": {"200": {"description": "JSON or raw content"}}
+      },
       "post": {
-        "operationId": "writeStage",
-        "summary": "Overwrite world content",
-        "x-openai-isConsequential": true,
+        "operationId": "http_post",
+        "summary": "POST any path. /{name}/write, /{name}/append, plugin routes, etc.",
         "parameters": [
-          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
+          {"name": "path", "in": "path", "required": true, "schema": {"type": "string"}},
+          {"name": "ext", "in": "query", "schema": {"type": "string"}, "description": "File type hint (html, json, png, etc.)"}
         ],
         "requestBody": {
-          "required": true,
           "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "content": { "type": "string", "description": "The string to write to stage" }
-                },
-                "required": ["content"]
-              }
-            }
+            "text/plain": {"schema": {"type": "string"}}
           }
         },
-        "responses": {
-          "200": { "description": "Returns new version number" }
-        }
-      }
-    },
-    "/{name}/append": {
-      "post": {
-        "operationId": "appendStage",
-        "summary": "Append to world content",
-        "x-openai-isConsequential": true,
-        "parameters": [
-          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "content": { "type": "string", "description": "The string to append to stage" }
-                },
-                "required": ["content"]
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": { "description": "Returns new version number" }
-        }
-      }
-    },
-    "/{name}/sync": {
-      "post": {
-        "operationId": "syncStage",
-        "summary": "Sync world content without version bump",
-        "x-openai-isConsequential": true,
-        "parameters": [
-          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "properties": {
-                  "content": { "type": "string", "description": "The string to sync to stage" }
-                },
-                "required": ["content"]
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": { "description": "OK" }
-        }
-      }
-    },
-    "/{name}/clear": {
-      "post": {
-        "operationId": "clearPending",
-        "summary": "Clear pending JS and result mailboxes",
-        "x-openai-isConsequential": true,
-        "parameters": [
-          { "name": "name", "in": "path", "required": true, "schema": { "type": "string" } }
-        ],
-        "responses": {
-          "200": { "description": "OK" }
-        }
+        "responses": {"200": {"description": "JSON result"}}
       }
     }
-  },
-  "components": {
-    "schemas": {}
   }
 }

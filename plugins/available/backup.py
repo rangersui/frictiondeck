@@ -4,9 +4,10 @@ CRON = 86400 (daily). Keeps last 7 backups.
 backup/run and backup/restore require approve token (seal-level ops).
 Restore requires server restart to clear connection cache.
 """
-import json, os, shutil, hmac as _hmac
+import json, os, shutil
 from datetime import datetime
 from pathlib import Path
+import server
 
 DESCRIPTION = "Backup and restore all worlds"
 ROUTES = {}
@@ -26,7 +27,7 @@ PARAMS_SCHEMA = {
         "method": "POST",
         "params": {"backup": {"type": "string", "required": True, "description": "Timestamp of backup to restore"}},
         "returns": {"restored": "string", "worlds": "int"},
-        "note": "Requires X-Approve-Token. Server restart required after restore."
+        "note": "Requires approve-level auth. Server restart required after restore."
     },
     "/proxy/backup/list": {
         "method": "GET",
@@ -46,9 +47,7 @@ def _check_approve(params):
     approve = os.getenv("ELASTIK_APPROVE_TOKEN", "")
     if not approve: return True
     scope = params.get("_scope", {})
-    headers = dict(scope.get("headers", []))
-    tok = headers.get(b"x-approve-token", b"").decode()
-    return _hmac.compare_digest(tok, approve)
+    return server._check_auth(scope) == "approve"
 
 
 def _checkpoint_all():

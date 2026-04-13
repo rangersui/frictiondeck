@@ -3,7 +3,8 @@
 Install: lucy install admin
 Self-checks approve token. Does NOT rely solely on auth middleware.
 """
-import os, json, hmac as _hmac
+import os, json
+import server
 
 DESCRIPTION = "Hot plug admin — load/unload/list plugins at runtime"
 NEEDS = ["load_plugin", "unload_plugin", "_plugins", "_plugin_meta"]
@@ -14,9 +15,7 @@ def _check_approve(params):
     approve = os.getenv("ELASTIK_APPROVE_TOKEN", "")
     if not approve: return True  # no token set
     scope = params.get("_scope", {})
-    headers = dict(scope.get("headers", []))
-    tok = headers.get(b"x-approve-token", b"").decode()
-    return _hmac.compare_digest(tok, approve)
+    return server._check_auth(scope) == "approve"
 
 PARAMS_SCHEMA = {
     "/admin/load": {

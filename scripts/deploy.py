@@ -26,7 +26,7 @@ if not TOKEN:
 
 def deploy_file(world_name, data):
     req = Request(f"{URL}/{world_name}/write", data=data, method="POST",
-                  headers={"X-Auth-Token": TOKEN})
+                  headers={"Authorization": f"Bearer {TOKEN}"})
     try:
         r = urlopen(req)
         print(f"  {world_name} -> {r.status}")

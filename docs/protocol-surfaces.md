@@ -12,7 +12,7 @@ speaks their protocols. They don't know elastik exists.
 |----------|--------|-------------|--------|
 | HTTP/HTML | Browser | Interactive UI, images, video, PDF | Done |
 | WebDAV | Finder, Explorer, VS Code | Files and folders | Done (v2.9) |
-| MCP | Claude, Cursor, Claude Code | Tool calls | Done (v2.8) |
+| MCP | Claude, Cursor, Claude Code | Tool calls | Done (v2.8), obsolete — AI has curl |
 | HTTP/JSON | curl, scripts, Shortcuts, Tasker | API endpoints | Done |
 | EBP | Microcontrollers, UART devices | Byte stream | Done |
 

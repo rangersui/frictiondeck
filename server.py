@@ -69,14 +69,6 @@ _CT = {"html":"text/html","htm":"text/html","txt":"text/plain","plain":"text/pla
 def _ext_to_ct(ext): return _CT.get(ext or "plain", "application/octet-stream")
 _BINARY_EXT = {"png","jpg","jpeg","gif","webp","ico","pdf","zip","mp3","mp4",
                "wav","ogg","woff","woff2","ttf","otf","eot","bin"}
-_TYPE_MARKER = re.compile(r'^:::type:(\w+):::\n?')
-
-def _parse_type(body):
-    """Out-of-band type marker. `:::type:xxx:::\\n` at byte 0.
-    Returns (type, stripped_body). No marker → ('plain', body)."""
-    m = _TYPE_MARKER.match(body)
-    if m: return m.group(1), body[m.end():]
-    return 'plain', body
 
 def _infer_type(stage_html):
     """Heuristic for one-time migration of pre-type-column worlds."""
@@ -88,13 +80,27 @@ def _infer_type(stage_html):
     if '<script' in sl or '<body' in sl or '<html' in sl: return 'html'
     return 'plain'
 
-def _check_approve_header(scope):
-    """X-Approve-Token header — CSRF-safe (browsers don't auto-attach it)."""
-    if not APPROVE_TOKEN: return False
+def _check_auth(scope):
+    """Authorization header → 'approve', 'auth', or None.
+    Bearer or Basic, same tokens."""
     for k, v in scope.get("headers", []):
-        if k == b"x-approve-token":
-            return _hmac.compare_digest(v.decode("utf-8","replace"), APPROVE_TOKEN)
-    return False
+        if k == b"authorization":
+            a = v.decode("utf-8", "replace")
+            if a.startswith("Bearer "):
+                tok = a[7:]
+                if APPROVE_TOKEN and _hmac.compare_digest(tok, APPROVE_TOKEN): return "approve"
+                if AUTH_TOKEN and _hmac.compare_digest(tok, AUTH_TOKEN): return "auth"
+            elif a.startswith("Basic "):
+                try:
+                    _, pwd = base64.b64decode(a[6:]).decode().split(":", 1)
+                    if APPROVE_TOKEN and _hmac.compare_digest(pwd, APPROVE_TOKEN): return "approve"
+                    if AUTH_TOKEN and _hmac.compare_digest(pwd, AUTH_TOKEN): return "auth"
+                except (ValueError, UnicodeDecodeError): pass
+            return None
+    return None
+
+    # _check_url_auth — injected by url_auth plugin if installed.
+    # Not here. No plugin = no URL auth = no attack surface.
 
 _db = {}
 
@@ -136,16 +142,22 @@ def conn(name):
             old_type = "plain"
             try: old_type = r["type"] or "plain"
             except (IndexError, KeyError): pass
-            parsed_type, clean = _parse_type(content) if content else ("plain", "")
-            ext = parsed_type if parsed_type != "plain" else old_type
-            if ext == "plain" and _infer_type(content) == "html":
-                ext = "html"
+            # Strip legacy :::type:xxx::: prefix if present
+            import re as _re
+            _m = _re.match(r'^:::type:(\w+):::\n?', content) if content else None
+            if _m:
+                ext = _m.group(1)
+                content = content[_m.end():]
+            else:
+                ext = old_type
+                if ext == "plain" and _infer_type(content) == "html":
+                    ext = "html"
             c.execute("DROP TABLE stage_meta")
             c.executescript("""CREATE TABLE stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),
                 stage_html BLOB DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
                 version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '', ext TEXT DEFAULT 'plain');""")
             c.execute("INSERT INTO stage_meta VALUES(?,?,?,?,?,?,?)",
-                (1, clean, _safe(r,"pending_js"), _safe(r,"js_result"),
+                (1, content, _safe(r,"pending_js"), _safe(r,"js_result"),
                  _safe(r,"version",0), _safe(r,"updated_at"), ext))
             c.commit()
             print(f"  migrated: {name} (ext={ext})")
@@ -196,18 +208,8 @@ async def send_r(send, status, data, ct="application/json", csp=False, extra_hea
     await send({"type": "http.response.body", "body": body})
 
 def _check_basic_auth(scope):
-    """Check Basic Auth against APPROVE_TOKEN. Returns True if valid."""
-    if not APPROVE_TOKEN: return False
-    for k, v in scope.get("headers", []):
-        if k == b"authorization":
-            auth = v.decode()
-            if auth.startswith("Basic "):
-                try:
-                    _, pwd = base64.b64decode(auth[6:]).decode().split(":", 1)
-                    return _hmac.compare_digest(pwd, APPROVE_TOKEN)
-                except (ValueError, UnicodeDecodeError) as e: print(f"  auth decode error: {e}")
-            break
-    return False
+    """Legacy compat — returns True if auth level is approve. Used by plugin dispatch."""
+    return _check_auth(scope) == "approve"
 
 # ── Plugin slots — empty by default. plugins.py fills them. ──────────
 _plugins = {}      # route path → async handler
@@ -216,12 +218,9 @@ _auth = None       # auth middleware (set by auth plugin)
 _plugin_meta = []  # plugin metadata list
 
 def _check_auth_token(scope):
-    """Check X-Auth-Token header against AUTH_TOKEN."""
+    """Legacy compat — returns True if any auth level present, or no token configured."""
     if not AUTH_TOKEN: return True  # no token configured = open
-    for k, v in scope.get("headers", []):
-        if k == b"x-auth-token":
-            return _hmac.compare_digest(v.decode("utf-8","replace"), AUTH_TOKEN)
-    return False
+    return _check_auth(scope) is not None
 
 def _match_plugin(base_path):
     """Exact match first, then prefix match (longest wins).
@@ -429,16 +428,14 @@ async def app(scope, receive, send):
             if action == "write":
                 new_ext = req_ext
                 if not new_ext and isinstance(b, str):
-                    # Backward compat: :::type::: prefix
-                    parsed, b = _parse_type(b)
-                    new_ext = parsed if parsed != "plain" else cur_ext
+                    new_ext = _infer_type(b)
                 elif not new_ext:
                     new_ext = cur_ext
             else:
                 new_ext = cur_ext  # append/sync preserve ext
             # Type gate: html worlds require approve token
-            if (cur_ext == 'html' or new_ext == 'html') and not _check_approve_header(scope):
-                return await send_r(send, 403, '{"error":"html type requires X-Approve-Token"}')
+            if (cur_ext == 'html' or new_ext == 'html') and _check_auth(scope) != "approve":
+                return await send_r(send, 403, '{"error":"html write requires approve-level auth"}')
         if action == "write":
             c.execute("UPDATE stage_meta SET stage_html=?,ext=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b, new_ext)); c.commit()
             log_event(name, "stage_written", {"len": len(b), "ext": new_ext})

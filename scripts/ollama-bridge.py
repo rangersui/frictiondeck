@@ -27,7 +27,7 @@ def read(world):
 
 
 def write(world, content):
-    h = {"X-Auth-Token": TOKEN} if TOKEN else {}
+    h = {"Authorization": f"Bearer {TOKEN}"} if TOKEN else {}
     req = Request(f"{ELASTIK}/{world}/write", data=content.encode("utf-8"), headers=h, method="POST")
     try:
         urlopen(req)
