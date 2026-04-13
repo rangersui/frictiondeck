@@ -291,7 +291,7 @@ def test_python():
     # Ensure ai + devtools plugins are installed for testing
     import shutil
     _installed = []
-    for pname in ["ai.py", "devtools.py"]:
+    for pname in ["ai.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py", "public_gate.py"]:
         src = os.path.join(ROOT, "plugins", "available", pname)
         dst = os.path.join(ROOT, "plugins", pname)
         if os.path.exists(src) and not os.path.exists(dst):
