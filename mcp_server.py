@@ -65,7 +65,7 @@ def _do_http(method, path, body="", headers="", target="default", timeout=30):
             if k.lower() in _ALLOWED_HEADERS:
                 h[k] = v
     if TOKEN:
-        h["X-Auth-Token"] = TOKEN  # always last -- AI cannot override
+        h["Authorization"] = f"Bearer {TOKEN}"  # always last -- AI cannot override
     data = body.encode("utf-8") if body else None
     req = Request(base + path, data=data, headers=h, method=method)
     try:

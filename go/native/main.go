@@ -108,15 +108,29 @@ func mapError(err error) (int, string) {
 	}
 }
 
-// getApproveToken extracts the approve token from X-Approve-Token header
-// or Basic Auth password (for /shell browser sessions).
-func getApproveToken(r *http.Request) string {
-	if t := r.Header.Get("X-Approve-Token"); t != "" {
-		return t
+// checkAuth mirrors Python's _check_auth(scope).
+// Authorization: Bearer TOKEN or Basic :TOKEN → "approve", "auth", or "".
+func (s *server) checkAuth(r *http.Request) string {
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		tok := auth[7:]
+		if s.cfg.approveToken != "" && hmacEqual(tok, s.cfg.approveToken) {
+			return "approve"
+		}
+		if s.cfg.token != "" && hmacEqual(tok, s.cfg.token) {
+			return "auth"
+		}
+		return ""
 	}
 	_, password, ok := r.BasicAuth()
 	if ok {
-		return password
+		if s.cfg.approveToken != "" && hmacEqual(password, s.cfg.approveToken) {
+			return "approve"
+		}
+		if s.cfg.token != "" && hmacEqual(password, s.cfg.token) {
+			return "auth"
+		}
+		return ""
 	}
 	return ""
 }
@@ -176,9 +190,7 @@ func (s *server) handleDAV(w http.ResponseWriter, r *http.Request, path string) 
 	// Write (PUT, DELETE) → auth token (like POST /{w}/write)
 	isWrite := r.Method == "PUT" || r.Method == "DELETE"
 	if isWrite && s.cfg.token != "" {
-		authOk := hmacEqual(r.Header.Get("X-Auth-Token"), s.cfg.token)
-		approveOk := s.cfg.approveToken != "" && hmacEqual(getApproveToken(r), s.cfg.approveToken)
-		if !authOk && !approveOk {
+		if s.checkAuth(r) == "" {
 			w.Header().Set("WWW-Authenticate", `Basic realm="elastik"`)
 			writeErr(w, 401, "unauthorized")
 			return
@@ -434,7 +446,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Mirror: /mirror?url=X (entry) or /m/domain/path (subsequent).
 	if target, domain, ok := mirrorTarget(path, r.URL.RawQuery); ok {
-		if s.cfg.approveToken == "" || !hmacEqual(getApproveToken(r), s.cfg.approveToken) {
+		if s.checkAuth(r) != "approve" {
 			w.Header().Set("WWW-Authenticate", `Basic realm="elastik"`)
 			writeErr(w, 401, "authentication required")
 			return
@@ -463,7 +475,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if domain != "" && s.cfg.approveToken != "" && hmacEqual(getApproveToken(r), s.cfg.approveToken) {
+		if domain != "" && s.checkAuth(r) == "approve" {
 			if r.Method == http.MethodGet {
 				// GET: 302 redirect to /m/domain/path — pull URL back into namespace.
 				redir := "/m/" + domain + path
@@ -484,26 +496,24 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Auth — two tiers, mirrors plugins/auth.py:
-	//   Tier 1: admin + config-* + /proxy/postman → require X-Approve-Token
-	//   Tier 2: all other POST/PUT/DELETE → require X-Auth-Token
+	//   Tier 1: admin + config-* + /proxy/postman → require approve
+	//   Tier 2: all other POST/PUT/DELETE → require auth or approve
 	//   GET is always open.
 	if r.Method != http.MethodGet {
+		level := s.checkAuth(r)
 		parts := splitPath(path)
 		isAdmin := strings.HasPrefix(path, "/admin/")
 		isConfig := len(parts) >= 1 && strings.HasPrefix(parts[0], "config-")
 		isPostman := strings.HasPrefix(path, "/proxy")
 		if isAdmin || isConfig || isPostman {
-			// Tier 1: approve token required — locked if not set.
-			if s.cfg.approveToken == "" || !hmacEqual(getApproveToken(r), s.cfg.approveToken) {
+			// Tier 1: approve required.
+			if level != "approve" {
 				writeErr(w, 403, "unauthorized")
 				return
 			}
 		} else if s.cfg.token != "" {
-			// Tier 2: auth token for normal writes.
-			// Approve token (via header or Basic Auth) also passes — higher privilege.
-			authOk := hmacEqual(r.Header.Get("X-Auth-Token"), s.cfg.token)
-			approveOk := s.cfg.approveToken != "" && hmacEqual(getApproveToken(r), s.cfg.approveToken)
-			if !authOk && !approveOk {
+			// Tier 2: any auth level for normal writes.
+			if level == "" {
 				writeErr(w, 403, "unauthorized")
 				return
 			}

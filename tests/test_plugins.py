@@ -65,12 +65,12 @@ def http_get(port, path, timeout=10):
 
 
 def http_method(port, path, method="GET", body=None, token="", basic_auth="", headers=None):
-    """Arbitrary HTTP method with optional X-Auth-Token or Basic Auth."""
+    """Arbitrary HTTP method with optional Bearer auth or Basic Auth."""
     try:
         data = body.encode() if isinstance(body, str) else body
         req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", data=data, method=method)
         if token:
-            req.add_header("X-Auth-Token", token)
+            req.add_header("Authorization", f"Bearer {token}")
         if basic_auth:
             import base64
             req.add_header("Authorization", "Basic " + base64.b64encode(f":{basic_auth}".encode()).decode())
@@ -93,9 +93,9 @@ def http_post(port, path, body="", token="", approve="", headers=None):
             data=body.encode(), method="POST"
         )
         if token:
-            req.add_header("X-Auth-Token", token)
+            req.add_header("Authorization", f"Bearer {token}")
         if approve:
-            req.add_header("X-Approve-Token", approve)
+            req.add_header("Authorization", f"Bearer {approve}")
         if headers:
             for k, v in headers.items():
                 req.add_header(k, v)
@@ -674,7 +674,7 @@ def _run_devtools_tests(port, label, token=""):
 def _run_auth_tests(port, label, token, approve):
     """Auth enforcement tests — shared by Go and Python."""
 
-    # ── Tier 2: X-Auth-Token ──
+    # ── Tier 2: Bearer AUTH_TOKEN ──
 
     # GET always open (no token needed)
     st, _ = http_get(port, "/stages")
@@ -692,7 +692,7 @@ def _run_auth_tests(port, label, token, approve):
     st, _ = http_post(port, "/echo", "x", token=token)
     test(f"{label} auth: POST /echo correct token -> 200", st == 200, f"status={st}")
 
-    # ── Tier 1: X-Approve-Token for config-* worlds ──
+    # ── Tier 1: Bearer APPROVE_TOKEN for config-* worlds ──
 
     # POST config-* with auth token only -> 403
     st, _ = http_post(port, "/config-test/write", "data", token=token)

@@ -214,13 +214,11 @@ async def handle_propose(method, body, params):
 
 async def handle_approve(method, body, params):
     """POST /plugins/approve — approve and install a plugin (requires approve token)."""
-    import hmac as _hmac
     try: b = json.loads(body)
     except (json.JSONDecodeError, TypeError): return {"error": "invalid json", "_status": 400}
     scope = params.get("_scope", {})
-    tok = dict(scope.get("headers", [])).get(b"x-approve-token", b"").decode()
-    if not _hmac.compare_digest(tok, APPROVE_TOKEN):
-        return {"error": "invalid token", "_status": 403}
+    if server._check_auth(scope) != "approve":
+        return {"error": "unauthorized", "_status": 403}
     n, code = b.get("name", ""), b.get("code", "")
     if n and not server._valid_name(n):
         return {"error": "invalid plugin name", "_status": 400}

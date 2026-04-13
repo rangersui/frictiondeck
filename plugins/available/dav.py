@@ -11,24 +11,8 @@ def _ext(typ):
     return ".txt"
 
 def _check_write_auth(scope):
-    """Write ops need X-Auth-Token or Basic Auth (approve token). Read is open."""
-    headers = dict(scope.get("headers", []))
-    # X-Auth-Token
-    token = os.getenv("ELASTIK_TOKEN", "")
-    if token:
-        tok = headers.get(b"x-auth-token", b"").decode()
-        if tok and _hmac.compare_digest(tok, token): return True
-    # Basic Auth (password = approve token)
-    approve = os.getenv("ELASTIK_APPROVE_TOKEN", "")
-    if approve:
-        auth = headers.get(b"authorization", b"").decode()
-        if auth.startswith("Basic "):
-            import base64
-            try:
-                _, pwd = base64.b64decode(auth[6:]).decode().split(":", 1)
-                if _hmac.compare_digest(pwd, approve): return True
-            except (ValueError, UnicodeDecodeError): pass
-    return False
+    """Write ops need Bearer or Basic auth. Read is open."""
+    return server._check_auth(scope) is not None
 
 def _world_name(path):
     rest = path[4:].lstrip("/")  # strip /dav
@@ -148,16 +132,7 @@ async def handle(method, body, params):
         # Ext from filename: /dav/photo.png → ext=png
         dot = path.rfind(".")
         ext = path[dot+1:].lower().strip() if dot > 0 else "plain"
-        if not ext: ext = "plain"  # /dav/foo. → empty ext → default
-        # Backward compat: if body has :::type::: prefix, strip and use that
-        try:
-            text = raw.decode("utf-8")
-            parsed, stripped = server._parse_type(text)
-            if parsed != "plain":
-                ext = parsed
-                raw = stripped.encode("utf-8")
-        except UnicodeDecodeError:
-            pass  # binary, ext from filename stands
+        if not ext: ext = "plain"
         c = server.conn(name)
         c.execute("UPDATE stage_meta SET stage_html=?,ext=?,version=version+1,updated_at=datetime('now') WHERE id=1", (raw, ext)); c.commit()
         server.log_event(name, "stage_written", {"len":len(raw), "ext":ext})

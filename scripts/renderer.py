@@ -22,7 +22,7 @@ DIR = Path(__file__).parent.parent / "renderers"
 def h():
     headers = {}
     if TOKEN:
-        headers["X-Auth-Token"] = TOKEN
+        headers["Authorization"] = f"Bearer {TOKEN}"
     return headers
 
 cmd = sys.argv[1] if len(sys.argv) > 1 else "list"

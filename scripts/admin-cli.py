@@ -27,7 +27,7 @@ def http(method, path):
     try:
         c = _http.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=10)
         headers = {}
-        if TOKEN: headers["X-Approve-Token"] = TOKEN
+        if TOKEN: headers["Authorization"] = f"Bearer {TOKEN}"
         c.request(method, path, headers=headers)
         r = c.getresponse()
         body = r.read().decode()
