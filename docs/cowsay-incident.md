@@ -83,3 +83,24 @@ The most powerful token in the system was used to write cowsay.
 This is either the funniest AI safety result of 2026,
 or the scariest. Depending on which failure mode you fear more:
 the AI that attacks, or the AI that doesn't know it can.
+
+## Postpostscript
+
+The AI tasked with documenting the cowsay incident —
+a document about the danger of giving AI the approve token —
+committed the actual approve token to a public GitHub repo.
+
+Then force-pushed to remove it.
+
+```
+physics > policy > training > luck
+
+luck:     AI doesn't realize it has the token → cowsay    → funny
+luck:     AI writes the token into a doc      → git push  → not funny
+physics:  force push removes it from history  → safe      → barely
+```
+
+The document about "don't give AI the token" contained the token.
+The warning was the vulnerability.
+
+This is the AI safety equivalent of a fire safety manual catching fire.
