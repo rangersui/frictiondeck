@@ -346,6 +346,9 @@ async def app(scope, receive, send):
         action = parts[-1]
         name = "/".join(parts[:-1])  # everything before the action
         if not _valid_name(name): return await send_r(send, 400, '{"error":"invalid world name"}')
+        # All mutations require POST
+        if action not in ("read", "raw") and method != "POST":
+            return await send_r(send, 405, '{"error":"method not allowed"}')
         # Write auth: token for mutations, approve for config-* worlds
         if action in ("write", "append", "pending"):
             if name.startswith("config-"):

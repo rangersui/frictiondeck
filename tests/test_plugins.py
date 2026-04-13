@@ -560,6 +560,10 @@ def _run_auth_tests(port, label, token, approve):
     st, _ = http_method(port, "/authtest/sync", method="POST", body="no-origin")
     test(f"{label} csrf: sync no origin -> 200", st == 200, f"status={st}")
 
+    # GET to mutation actions -> 405 (blocks <img src> CSRF)
+    st, _ = http_get(port, "/authtest/sync")
+    test(f"{label} csrf: GET /sync -> 405", st == 405, f"status={st}")
+
 
 def _run_plugin_auth_tests(port, label, token, approve):
     """Auth tests for plugin routes: shell, exec, mirror, view, dav."""
