@@ -7,7 +7,7 @@ Clone in two lines:
   curl -H "Authorization: Bearer $TOKEN" http://A/__reality__ > data.tar.gz
   curl -H "Authorization: Bearer $TOKEN" http://A/self > self.tar.gz
 """
-import io, os, sqlite3, tarfile, tempfile
+import io, os, sqlite3, subprocess, tarfile, tempfile
 from pathlib import Path
 import server
 
@@ -31,37 +31,45 @@ async def handle_reality(method, body, params):
                     continue
                 # Atomic snapshot — merges WAL, consistent read
                 src = sqlite3.connect(str(db))
-                tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".db")
+                tmp_path = tempfile.mktemp(suffix=".db")
                 try:
-                    dst = sqlite3.connect(tmp.name)
+                    dst = sqlite3.connect(tmp_path)
                     src.backup(dst)
                     dst.close()
                     src.close()
-                    tar.add(tmp.name, arcname=f"data/{d.name}/universe.db")
+                    tar.add(tmp_path, arcname=f"data/{d.name}/universe.db")
                 finally:
-                    os.unlink(tmp.name)
+                    try: os.unlink(tmp_path)
+                    except OSError: pass
     body_bytes = buf.getvalue()
     return {"_body": body_bytes, "_ct": "application/gzip",
             "_headers": [["content-disposition", "attachment; filename=reality.tar.gz"]]}
 
 
 async def handle_self(method, body, params):
-    """Source code tarball. No .env, no tokens, no data."""
+    """Source code tarball. Git-tracked files only. No .env, no tokens, no data."""
     if method != "GET":
         return {"error": "GET only", "_status": 405}
+    # Use git ls-files — only tracked files, excludes .git/data/backups/secrets
+    try:
+        out = subprocess.check_output(["git", "ls-files", "-z"],
+                                      cwd=str(_ROOT), stderr=subprocess.DEVNULL)
+        files = [f for f in out.decode("utf-8").split("\0") if f]
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        # No git? Fall back to essential files only
+        files = [str(f.relative_to(_ROOT)) for f in
+                 sorted(list(_ROOT.glob("*.py")) + list(_ROOT.glob("*.html")) +
+                        list(_ROOT.glob("*.json")) + list(_ROOT.glob("*.js")) +
+                        list((_ROOT / "plugins" / "available").glob("*.py")))]
+    _secret = {".env", "_env", ".env.local"}
     buf = io.BytesIO()
-    _skip = {".env", "_env", ".env.local", "__pycache__", ".git",
-             "data", "backups", "node_modules", "_mock"}
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
-        for f in sorted(_ROOT.rglob("*")):
-            if not f.is_file():
+        for rel in sorted(files):
+            if rel in _secret or rel.endswith((".pyc", ".pyo")):
                 continue
-            rel = f.relative_to(_ROOT)
-            if any(part in _skip for part in rel.parts):
-                continue
-            if rel.suffix in (".pyc", ".pyo"):
-                continue
-            tar.add(str(f), arcname=str(rel))
+            full = _ROOT / rel
+            if full.is_file():
+                tar.add(str(full), arcname=rel)
     body_bytes = buf.getvalue()
     return {"_body": body_bytes, "_ct": "application/gzip",
             "_headers": [["content-disposition", "attachment; filename=elastik.tar.gz"]]}
