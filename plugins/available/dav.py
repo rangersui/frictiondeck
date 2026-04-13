@@ -133,6 +133,8 @@ async def handle(method, body, params):
         dot = path.rfind(".")
         ext = path[dot+1:].lower().strip() if dot > 0 else "plain"
         if not ext: ext = "plain"
+        if ext == "html" and server._check_auth(scope) != "approve":
+            return {"error": "html write requires approve", "_status": 403}
         c = server.conn(name)
         c.execute("UPDATE stage_meta SET stage_html=?,ext=?,version=version+1,updated_at=datetime('now') WHERE id=1", (raw, ext)); c.commit()
         server.log_event(name, "stage_written", {"len":len(raw), "ext":ext})

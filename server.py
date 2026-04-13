@@ -313,6 +313,11 @@ async def app(scope, receive, send):
         return
     # Web Share Target — phone share sheet → store in "shared" world
     if method == "POST" and path == "/share":
+        _origin = ""
+        for k, v in scope.get("headers", []):
+            if k == b"origin": _origin = v.decode(); break
+        if _origin and not _origin.startswith(("http://localhost", "http://127.0.0.1", "http://[::1]")):
+            return await send_r(send, 403, '{"error":"cross-origin rejected"}')
         try: body = (await recv(receive)).decode("utf-8", "replace")
         except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
         qs = scope.get("query_string", b"").decode()

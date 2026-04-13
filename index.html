@@ -9,7 +9,8 @@ if(e.ctrlKey&&e.key==='z'&&!e.shiftKey){e.preventDefault();if(!_undoStack.length
 if(e.ctrlKey&&(e.key==='y'||(e.key==='z'&&e.shiftKey))){e.preventDefault();if(!_redoStack.length)return;_undoStack.push(_cur);if(_undoStack.length>50)_undoStack.shift();_cur=_redoStack.pop();f.srcdoc=injectHelper(_cur);fetch('/'+p+'/sync',{method:'POST',body:_cur})}
 });
 let _awl=null,_awlT=0;async function _loadAwl(){if(_awl&&Date.now()-_awlT<30000)return _awl;try{const r=await(await fetch('/config-actions/read')).json();_awl=new Set((r.stage_html||'').split('\n').map(s=>s.trim()).filter(Boolean));_awlT=Date.now()}catch(e){_awl=_awl||new Set()}return _awl}
-const helper='<script>window.__elastik={_p:{},_w:"'+p+'",fetch:function(path){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"fetch",path:path,_id:id},"*")})},read:function(world){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"world_read",world:world,_id:id},"*")})},write:function(world,body){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"world_write",world:world,body:body||"",_id:id},"*")})},append:function(world,body){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"world_append",world:world,body:body||"",_id:id},"*")})},stages:function(){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"stages",_id:id},"*")})},action:function(route,body){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"action",route:route,body:body||"",_id:id},"*")})},sync:function(d){window.parent.postMessage({_elastik:true,action:"sync",payload:d},"*")},result:function(d){window.parent.postMessage({_elastik:true,action:"result",payload:d},"*")},clear:function(){window.parent.postMessage({_elastik:true,action:"clear"},"*")}};window.addEventListener("message",function(e){if(e.data&&e.data._elastik_response&&e.data._id){var q=window.__elastik._p[e.data._id];if(q){delete window.__elastik._p[e.data._id];if(e.data.error)q.reject(new Error(e.data.error));else q.resolve(e.data.result)}}if(e.data&&e.data._elastik_exec){var code=e.data.code;try{var r=eval(code);window.parent.postMessage({_elastik:true,action:"result",payload:String(r==null?"":r)},"*")}catch(err){window.parent.postMessage({_elastik:true,action:"result",payload:"ERROR:"+err.message},"*")}}});document.addEventListener("keydown",function(e){if(e.ctrlKey&&(e.key==="z"||e.key==="y")){e.preventDefault();window.parent.postMessage({_elastik:true,action:"undo_redo",key:e.key,shift:e.shiftKey},"*")}})<\/script>';
+const _csp='<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\'; style-src \'unsafe-inline\' https: data:; img-src * data: blob:; font-src * data:; media-src * data: blob:; connect-src \'none\'">';
+const helper=_csp+'<script>window.__elastik={_p:{},_w:"'+p+'",fetch:function(path){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"fetch",path:path,_id:id},"*")})},read:function(world){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"world_read",world:world,_id:id},"*")})},write:function(world,body){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"world_write",world:world,body:body||"",_id:id},"*")})},append:function(world,body){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"world_append",world:world,body:body||"",_id:id},"*")})},stages:function(){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"stages",_id:id},"*")})},action:function(route,body){return new Promise(function(ok,no){var id=Math.random().toString(36).slice(2);window.__elastik._p[id]={resolve:ok,reject:no};window.parent.postMessage({_elastik:true,action:"action",route:route,body:body||"",_id:id},"*")})},sync:function(d){window.parent.postMessage({_elastik:true,action:"sync",payload:d},"*")},result:function(d){window.parent.postMessage({_elastik:true,action:"result",payload:d},"*")},clear:function(){window.parent.postMessage({_elastik:true,action:"clear"},"*")}};window.addEventListener("message",function(e){if(e.data&&e.data._elastik_response&&e.data._id){var q=window.__elastik._p[e.data._id];if(q){delete window.__elastik._p[e.data._id];if(e.data.error)q.reject(new Error(e.data.error));else q.resolve(e.data.result)}}if(e.data&&e.data._elastik_exec){var code=e.data.code;try{var r=eval(code);window.parent.postMessage({_elastik:true,action:"result",payload:String(r==null?"":r)},"*")}catch(err){window.parent.postMessage({_elastik:true,action:"result",payload:"ERROR:"+err.message},"*")}}});document.addEventListener("keydown",function(e){if(e.ctrlKey&&(e.key==="z"||e.key==="y")){e.preventDefault();window.parent.postMessage({_elastik:true,action:"undo_redo",key:e.key,shift:e.shiftKey},"*")}})<\/script>';
 function injectHelper(html){if(html.includes('</head>'))return html.replace('</head>',helper+'</head>');if(html.includes('<body'))return html.replace(/<body[^>]*>/i,function(m){return m+helper});return helper+html}
 window.addEventListener('message',async function(e){
 if(!e.data||!e.data._elastik)return;
@@ -25,44 +26,7 @@ else if(action==='stages'){try{const r=await(await fetch('/stages')).json();f.co
 else if(action==='navigate'){const u=e.data.url||'';if(!u.startsWith('/'))return;if(_lastNav&&_lastNav.url===u&&Date.now()-_lastNav.t<10000)return;_lastNav={url:u,t:Date.now()};if(confirm('AI wants to open:\n\n'+u+'\n\nAllow?'))window.location=u}
 else if(action==='undo_redo'){const k=e.data.key,sh=e.data.shift;if(k==='z'&&!sh){if(!_undoStack.length)return;_redoStack.push(_cur);if(_redoStack.length>50)_redoStack.shift();_cur=_undoStack.pop();f.srcdoc=injectHelper(_cur);fetch('/'+p+'/sync',{method:'POST',body:_cur})}if(k==='y'||(k==='z'&&sh)){if(!_redoStack.length)return;_undoStack.push(_cur);if(_undoStack.length>50)_undoStack.shift();_cur=_redoStack.pop();f.srcdoc=injectHelper(_cur);fetch('/'+p+'/sync',{method:'POST',body:_cur})}}
 });
-// --- WebRTC transport (manual peer connect) ---
-let _rtc=null,_dc=null,_myId=Math.random().toString(36).slice(2,8);
-async function rtcConnect(peerId){
-const pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
-const dc=pc.createDataChannel('elastik');
-pc.onicecandidate=e=>{if(e.candidate)fetch('/signal-'+_myId+'-to-'+peerId+'/append',{method:'POST',body:JSON.stringify(e.candidate)})};
-const offer=await pc.createOffer();await pc.setLocalDescription(offer);
-await fetch('/signal-'+_myId+'-to-'+peerId+'/write',{method:'POST',body:JSON.stringify(offer)});
-// poll for answer
-const ans=await new Promise(ok=>{const t=setInterval(async()=>{try{const r=await(await fetch('/signal-'+peerId+'-to-'+_myId+'/read')).json();if(r.stage_html){clearInterval(t);ok(r.stage_html)}}catch(e){}},500)});
-const answer=JSON.parse(ans);
-if(answer.type)await pc.setRemoteDescription(answer);
-// poll ICE candidates
-const ci=setInterval(async()=>{try{const r=await(await fetch('/signal-'+peerId+'-to-'+_myId+'-ice/read')).json();if(r.stage_html){for(const c of r.stage_html.split('\n').filter(Boolean))await pc.addIceCandidate(JSON.parse(c))}}catch(e){}},500);
-dc.onopen=()=>{clearInterval(ci);_rtc=pc;_dc=dc;console.log('WebRTC connected to '+peerId)};
-dc.onmessage=e=>{const msg=JSON.parse(e.data);if(msg.type==='update')_rtcWorld=msg};
-return dc}
-async function rtcAccept(){
-// poll for incoming offers
-const prefix='signal-';
-const stages=await(await fetch('/stages')).json();
-const incoming=stages.find(s=>s.name.startsWith('signal-')&&s.name.endsWith('-to-'+_myId)&&!s.name.includes('-ice'));
-if(!incoming)return null;
-const peerId=incoming.name.replace('signal-','').replace('-to-'+_myId,'');
-const offer=JSON.parse((await(await fetch('/'+incoming.name+'/read')).json()).stage_html);
-const pc=new RTCPeerConnection({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
-pc.onicecandidate=e=>{if(e.candidate)fetch('/signal-'+_myId+'-to-'+peerId+'-ice/append',{method:'POST',body:JSON.stringify(e.candidate)})};
-pc.ondatachannel=e=>{const dc=e.channel;dc.onopen=()=>{_rtc=pc;_dc=dc;console.log('WebRTC accepted from '+peerId)};dc.onmessage=ev=>{const msg=JSON.parse(ev.data);if(msg.type==='update')_rtcWorld=msg}};
-await pc.setRemoteDescription(offer);
-const answer=await pc.createAnswer();await pc.setLocalDescription(answer);
-await fetch('/signal-'+_myId+'-to-'+peerId+'/write',{method:'POST',body:JSON.stringify(answer)});
-return pc}
-let _rtcWorld=null;
-async function readWorld(){
-if(_dc&&_dc.readyState==='open'){_dc.send(JSON.stringify({op:'read',world:p}));return _rtcWorld||await(await fetch('/'+p+'/read')).json()}
-const _r=await fetch('/'+p+'/read?v='+v);if(_r.status===304)return null;return await _r.json()}
-// --- end WebRTC ---
-setInterval(async()=>{const r=await readWorld();if(!r)return;
+setInterval(async()=>{const _r=await fetch('/'+p+'/read?v='+v);const r=_r.status===304?null:await _r.json();if(!r)return;
 if(r.version!==v){v=r.version;let html=r.stage_html||'',rendered=false;
 if(_cur){_undoStack.push(_cur);if(_undoStack.length>50)_undoStack.shift();_redoStack.length=0}_cur=html;
 const t=r.ext||r.type||'plain';
