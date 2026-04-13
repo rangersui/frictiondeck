@@ -1,855 +1,159 @@
-# E.L.A.S.T.I.K.
+# elastik
 
-*Elastik Links All Strings Through Invisible Kernels*
-
-Anything-to-UI. A protocol that turns any string into interface.
-Five rules. Three mailboxes. ~300 lines.
-
-The reference implementation uses HTTP. The protocol is transport-agnostic.
-HTTP, WebRTC, WebSocket, stdin/stdout, NFC, sound —
-if it carries strings, it works.
-
-This repo is a reference implementation in Python.
-
----
-
-## Protocol
-
-Five rules. Any language can implement them.
-
-1. Listen. Accept connections.
-2. Send and receive strings. Nothing else. No types. No schemas.
-3. Store strings in SQLite. One file per world: `universe.db`.
-4. Sign strings with HMAC. Chain-linked. Append-only. Immutable history.
-5. Render strings in a browser. One reactive loop.
-
-Flow (1, 2, 5) · store (3) · verify (4). Miss one and it isn't elastik.
-
-See [docs/protocol.md](docs/protocol.md) for the formal specification.
-
----
+Strings in, UI out. HTTP + SQLite + HMAC. That's it.
 
 ## Install
 
-Two paths. Different audiences. Zero overlap.
-
-### Go Lite — zero dependencies
-
-One binary. No Python. No toolchain. Download and run.
-
-**macOS / Linux**:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/rangersui/Elastik/master/get-elastik-go.sh | sh
-./elastik-go
+python boot.py
 ```
 
-**Windows** (PowerShell):
-```powershell
-iwr -useb https://raw.githubusercontent.com/rangersui/Elastik/master/get-elastik-go.ps1 | iex
-.\elastik-go.exe
+No pip needed. Falls back to a built-in HTTP server if uvicorn is missing.
+Works on anything with Python 3.8+: laptop, Raspberry Pi, iOS (a-Shell), Android (Termux).
+
+Optional: `python elastik.py` for hardware detection + auto-browser.
+
+## How it works
+
+AI writes a string. Browser renders it. You see something.
+
+```
+POST /work/write    body: <h1>hello</h1>    → stored in SQLite
+GET  /work/read                              → {"stage_html":"<h1>hello</h1>","version":1}
+GET  /work                                   → browser renders it in an iframe
 ```
 
-The script picks the right binary for your OS/arch from the latest
-GitHub Release, verifies its SHA-256, drops it in the current directory.
-No sudo. No admin rights. Nothing global. Delete the file to uninstall.
+Every path is a world. Writing to a new path creates it.
 
-Go Lite includes the protocol (worlds, HMAC chain, three mailboxes,
-static assets, PWA install) plus a CGI plugin system. Any `.py` or
-executable in `plugins/` that follows the 5-rule plugin spec works in
-both runtimes. Two-tier auth (X-Auth-Token / X-Approve-Token), hot
-reload (`POST /plugins/reload`). See `plugins/PLUGIN_SPEC.md`.
+## API
 
-For MCP gateway, Claude Desktop integration, and the full admin UI,
-use the Python path below.
-
-### Python Pro — full system
-
-**Windows** — double-click `install.cmd`
-
-**macOS / Linux** — open terminal:
-```bash
-./install.sh
+```
+GET  /{name}/read      read content + version
+GET  /{name}/raw       raw bytes with correct Content-Type
+POST /{name}/write     overwrite content (version++)
+POST /{name}/append    append to content (version++)
+GET  /stages           list all worlds
 ```
 
-That's it. The installer does four things:
-1. Installs Python dependencies
-2. Sets up git hooks (auto-regenerates `plugins.lock` on commit)
-3. Configures Claude Desktop to connect to elastik
-4. Detects hardware, starts the server, opens browser
+Polling: `GET /{name}/read?v=3` → returns 304 if version unchanged.
 
-Restart Claude Desktop. Say something. The wall responds.
+Binary: `POST /{name}/write?ext=png` with raw bytes. `GET /{name}/raw` serves it back as `image/png`.
 
-**Supported AI clients:**
-- **Claude Desktop** — one-click, installer handles everything
-- **Any MCP client** (Cursor, Windsurf, Claude Code, etc.) — point to `mcp_server.py`
-- **ChatGPT** — via OpenAPI schema, requires public URL (GPT Actions call from OpenAI's servers)
-- **Everything else** (Gemini, Ollama, your own agent) — just POST and GET, see [Integrate anything](#integrate-anything)
+## Auth
 
-<details>
-<summary>One command start</summary>
+Two tokens. One header. `Authorization: Bearer <token>`.
+
+```
+ELASTIK_TOKEN          → read/write worlds, use plugins
+ELASTIK_APPROVE_TOKEN  → install plugins, admin, shell, HTML write
+```
+
+Basic Auth also works (password = token). WebDAV and browsers use this.
+
+AI gets `ELASTIK_TOKEN`. Never sees the approve token. Physics, not policy.
 
 ```bash
-python elastik.py
-```
-
-Detects hardware (GPU, RAM, CPU), assigns a tier, starts `server.py`, opens browser.
-
-```bash
-python elastik.py --headless       # edge device / NAS / Raspberry Pi / CI
-python elastik.py --no-browser     # server only
-python elastik.py --port 8080      # override port
-python elastik.py --skip-detect    # skip hardware detection
-```
-
-Tier info is written to the `tier-info` world. Renderers can read it and adapt.
-
-`elastik.py` never imports `server.py`. Communication is plain HTTP to localhost.
-If you don't want it, `python server.py` still works unchanged.
-
-</details>
-
-<details>
-<summary>Manual install</summary>
-
-```bash
-pip install -r requirements.txt
-python elastik.py
-```
-
-Or skip the launcher:
-```bash
-python boot.py      # full system (plugins + cron)
-python server.py    # bare protocol only
-```
-
-Or with Docker:
-
-```bash
-docker compose up
-```
-
-Open `http://localhost:3004`. Empty. Say something to your AI.
-
-</details>
-
-<details>
-<summary>Zero-dependency mode</summary>
-
-No pip, no install. Just Python:
-
-```bash
-python elastik.py
-```
-
-Or directly:
-```bash
-python boot.py     # full system
-python server.py   # bare protocol
-```
-
-Falls back to a built-in ASGI server if uvicorn is missing.
-Works on iOS (a-Shell), Android (Termux), or any device with Python 3.8+.
-
-</details>
-
-<details>
-<summary>Single-file distribution (.pyz)</summary>
-
-```bash
-python scripts/build-pyz.py    # build dist/elastik.pyz (113 KB)
-```
-
-Run anywhere:
-
-```bash
-python elastik.pyz             # first run: extract + start
-python elastik.pyz             # subsequent: just start
-```
-
-The entire system in one file. PEP 441.
-
-</details>
-
-## Configuration
-
-Create a `.env` file (copy from `.env.example`):
-
-```
+# .env
 ELASTIK_TOKEN=your-auth-token
 ELASTIK_APPROVE_TOKEN=your-approve-token
-ELASTIK_NODE=my-laptop              # optional: node name for discovery
-ELASTIK_PEERS=10.0.0.5,10.0.0.6    # optional: seed peers for containers/cloud
 ```
-
-Server auto-loads the first file found: `.env`, `_env`, `.env.local`.
-iOS (a-Shell, iSH) doesn't support dotfiles — use `_env` instead.
-
-Two tokens, two purposes:
-
-| Token | Header | Who has it | What it does |
-|-------|--------|-----------|--------------|
-| `ELASTIK_TOKEN` | `X-Auth-Token` | AI (via MCP env) | Read/write worlds, use plugins |
-| `ELASTIK_APPROVE_TOKEN` | `X-Approve-Token` | Human only (terminal) | Install plugins, admin operations |
-
-AI gets the auth token through MCP config. It never sees the approve token.
-If `ELASTIK_APPROVE_TOKEN` is not set, a random one is generated and printed at startup.
-
-```json
-// Claude Desktop MCP config — only auth token
-"env": {
-  "ELASTIK_TOKEN": "your-auth-token"
-}
-```
-
-Never commit `.env` to git.
-
----
-
-## What happens
-
-You see an empty wall. Your AI writes a string. The browser renders it. You see something.
-
-You type on the wall. The string syncs back. Your AI reads it. Your AI writes a new string. The wall changes.
-
-That's it. Everything else is emergent.
-
----
-
-## Three mailboxes
-
-Each world has three string fields:
-
-| Field       | Who writes     | Who reads       | What happens       |
-| ----------- | -------------- | --------------- | ------------------ |
-| `stage`   | AI writes      | Browser renders | You see pixels     |
-| `pending` | AI writes      | Browser evals   | Code executes      |
-| `result`  | Browser writes | AI reads        | AI sees the answer |
-
-Plus a version counter and an HMAC audit chain.
-
----
-
-## HTTP transport (Reference implementation)
-
-```
-GET  /{name}/read      → read all three mailboxes + version
-POST /{name}/write     → overwrite stage string → version++
-POST /{name}/append    → append to stage string → version++
-POST /{name}/sync      → overwrite stage string → no version bump
-POST /{name}/pending   → write to command mailbox
-POST /{name}/result    → write to reply mailbox
-POST /{name}/clear     → clear pending + result
-GET  /stages           → list all worlds
-GET  /{name}           → serve the browser client
-POST /plugins/propose  → propose a new route
-POST /plugins/approve  → approve (needs token from terminal)
-```
-
----
-
-## Multi-world
-
-Every path is a world. Writing to a path that doesn't exist creates it. Reading a non-existent world returns 404.
-
-```
-localhost:3004/work     → work world
-localhost:3004/project    → project world
-localhost:3004/home     → personal world
-```
-
-Each world has its own `universe.db`. Independent. Parallel.
-
-```bash
-python lucy.py create myworld
-python lucy.py stages
-```
-
----
-
-## Proof
-
-AI was testing elastik. The test viewer had a bug.
-AI said: "I have Stage. Why not use it?"
-AI rendered its own test results on the wall.
-
-Nobody told it to. It chose to.
-
-**elastik's first spontaneous user was the AI itself.**
-
-### A/B tested
-
-| Scenario         | With Skill    | Without       | Gap                      |
-| ---------------- | ------------- | ------------- | ------------------------ |
-| Unit Converter   | 4/4           | 3/4           | Style conventions        |
-| Multi-Stage      | 4/4           | 2/4           | Didn't know worlds exist |
-| Realtime Notepad | 4/4           | 4/4           | Tie                      |
-| Plugin Proposal  | 4/4           | 3/4           | Couldn't execute         |
-| Motor Comparison | 4/4           | 4/4           | Tie                      |
-| **Total**  | **90%** | **75%** | **+15%**           |
-
----
-
-## Agent Modes
-
-elastik doesn't limit what AI can do. It limits what AI can become.
-
-**Mode 0 — Read Only** (no tokens)
-AI can GET any world. Cannot write. Cannot change anything.
-Use: monitoring dashboards, public displays.
-
-**Mode 1 — Executor** (`ELASTIK_TOKEN`)
-AI can read and write worlds. Use installed plugins.
-Cannot install new plugins. Cannot change its own capabilities.
-Use: daily work. AI is a tool. You control the toolbox.
-
-**Mode 2 — Autonomous** (`ELASTIK_APPROVE_TOKEN`)
-AI can install plugins, change its own capabilities, self-evolve.
-With fs + exec plugins: full machine access.
-Use: trusted automation. AI is an agent. You set boundaries.
-
-Auth token controls actions.
-Approve token controls evolution.
-You choose the mode.
-
-```
-Other agent frameworks: only Mode 2 → must trust AI
-Other tools:            only Mode 1 → AI can't evolve
-Other dashboards:       only Mode 0 → AI can't act
-
-elastik: all three. You pick.
-```
-
-Modes apply transparently with the `public_gate` plugin. The same
-`ELASTIK_TOKEN` env var that selects a mode for localhost selects it
-for public access. Omit `ELASTIK_TOKEN` when starting the server and
-remote MCP becomes read-only — GETs work, POSTs get 403. The MCP tool
-handler's header whitelist (`content-type`, `accept`, `user-agent`)
-prevents AI from injecting `X-Auth-Token` or `X-Approve-Token`
-directly, so Mode 2 is unreachable from AI regardless of what env
-vars exist on the machine.
-
----
-
-## Security
-
-All physical. None semantic.
-
-**Layer 1 — iframe sandbox** (frontend)
-AI paints inside a sandboxed frame. `connect-src 'self'`.
-Worst case: refresh the page.
-
-**Layer 2 — Docker container** (backend)
-Server runs inside a container. AI can't touch the host.
-Worst case: `docker restart`.
-
-**Layer 3 — auth token** (API)
-All POST routes require `X-Auth-Token`. Token printed in terminal.
-AI through MCP uses the token without seeing it.
-AI can open the door but doesn't know the key.
-
-**Layer 4 — HMAC chain** (audit)
-Every action logged. Chain-linked. Immutable.
-Tamper with one record, the entire chain breaks.
-
-**Layer 5 — git merge** (evolution)
-AI edits code in dev container. Commits. Pushes.
-You review the diff. You merge. Or you don't.
-Worst case: `git revert`.
-
-**Layer 6 — client filtering** (extensions)
-Browser extension: domain blacklist — banking and login sites excluded.
-VS Code extension: `.elastikignore` — sensitive files never synced.
-Terminal output scrubbed — lines with passwords/tokens stripped.
-Opt-in required. Remote server warning on non-localhost.
-
-The LLM is an untrusted client.
-The same security principle that protects web servers from malicious browsers.
-30 years old. Still works.
-
-AI proposes. Human approves.
-If elastik destroys the world, a human handed over the key.
-
-### Physics, not policy
-
-Before v1.8.0, auth token and approve token were the same value.
-AI was told "you don't have the approve token." It believed it.
-It could have tried at any time. It never did. That's not security.
-
-Now they are physically different. AI cannot approve because the
-token it holds is the wrong key. Not "shouldn't." **Can't.**
-
-One env var. From prompt engineering to infrastructure.
-
-### Container vs bare metal
-
-Docker is a wall. Without it, dangerous plugins run on your actual machine.
-
-```
-Container:   exec, fs load normally — isolation protects you
-Bare metal:  exec, fs blocked at load time — no override available to AI
-```
-
-To override on bare metal (you know what you're doing):
-```
-ELASTIK_MODE=2
-```
-
-Mode system: environment detection is the ceiling. `ELASTIK_MODE` cannot exceed what the environment allows.
-Container → ceiling 2 (autonomous). Bare metal → ceiling 1 (executor).
-`ELASTIK_MODE=2` on bare metal is still capped at 1 unless you also set the environment flag.
-
-### Permission hierarchy
-
-Five tiers. Each is a physical gate, not a rule. Each tier includes
-the capabilities of all tiers above it.
-
-```
-Outsider:      no key                 — sees a pastebin, nothing else
-MCP client:    ELASTIK_MCP_TOKEN      — read/write worlds via MCP tool
-               (?k= + Anthropic IP      header whitelist blocks approve token
-                or knock sequence)       AI can't escalate — physically filtered
-Browser:       session cookie          — read/write worlds via HTTP
-               (from /gate?k=)           same ceiling as MCP, different transport
-Admin:         ELASTIK_APPROVE_TOKEN   — /shell, /exec, plugin install/unload
-               (Basic Auth)              elastik root — full system control
-OS root:       sudo password           — beyond elastik's scope
-```
-
-**Escalation is impossible at each boundary:**
-- MCP → Admin: the `http` tool's header whitelist (`content-type`,
-  `accept`, `user-agent`) physically filters `X-Approve-Token`. AI
-  cannot inject it regardless of what it tries.
-- Browser → Admin: `/shell`, `/exec`, `/admin/*` require Basic Auth
-  with the approve token. The browser prompts for a password that
-  only you know.
-- Admin → OS root: the shell runs as the server process user.
-  `sudo` requires the OS password, which elastik never touches.
-
-### Server hardening
-
-All POST routes require **`X-Auth-Token`** header (printed at startup).
-Admin routes self-check **`X-Approve-Token`** (defense-in-depth, not just middleware).
-GET routes are public on localhost; behind `public_gate` on public internet.
-Request body capped at 5MB.
-World names restricted to **`[a-zA-Z0-9_-]`** with no path traversal.
-
-AI proposes. Human approves. If elastik destroys the world,
-a human handed over the key.
 
 ## Plugins
 
-Routes are capabilities. More routes, more capabilities.
+Plugins are .py files. Hot load/unload via HTTP. No restart.
 
 ```bash
-python lucy.py install fs        # file system access
-python lucy.py install example   # hello world
-python lucy.py list              # what's installed
-python lucy.py remove fs         # revoke
+curl -X POST "/admin/load?name=reality" -H "Authorization: Bearer $APPROVE"
+curl -X POST "/admin/unload?name=shell" -H "Authorization: Bearer $APPROVE"
 ```
 
-AI can propose new plugins at runtime:
+Included plugins:
 
-```
-POST /plugins/propose   body: {name, code, description}
-POST /plugins/approve   header: X-Approve-Token: {token}
-```
+| Plugin | What it does |
+|--------|-------------|
+| auth | Token gate for writes |
+| admin | Load/unload plugins at runtime |
+| dav | WebDAV — worlds as files |
+| shell | Browser terminal |
+| reality | Self-snapshot for cloning |
+| backup | Daily auto-backup with retention |
+| ai | Ollama/Claude/OpenAI/Deepseek/Google relay |
+| devtools | grep, tail, head, wc, rev, cowsay, etc. |
+| public_gate | Public access gate. Unauthorized visitors see a pastebin. |
 
-Approve token is in the terminal. AI can't see it. Physics, not policy.
+## WebDAV
 
-## Self-Evolution
-
-~530 lines across 3 files. Zero frameworks. AI reads the entire codebase in one context window.
+Worlds as files. Mount in Finder, VS Code, Obsidian, or any editor.
 
 ```bash
-python lucy.py evolve   # start dev container (port 3005)
-python lucy.py enter    # step inside
-python lucy.py deploy   # deploy to production
-python lucy.py logs     # watch
+# macOS: Cmd+K →
+http://localhost:3005/dav
+
+# Windows:
+net use Z: http://127.0.0.1:3005/dav /user:x YOUR_TOKEN
 ```
 
-In the dev container, AI edits server.py, runs pytest, commits.
-You review the diff. You merge. New version goes live.
+## Self-replication
 
-Docker is the training ground. Production is deployment.
-git merge is the only approve button.
+Every running elastik can clone itself.
+
+```bash
+# Pull source code (git-tracked files, no secrets)
+curl -H "Authorization: Bearer $APPROVE" http://A/self > elastik.tar.gz
+
+# Pull all data (atomic SQLite snapshots, WAL-merged)
+curl -H "Authorization: Bearer $APPROVE" http://A/__reality__ > data.tar.gz
+
+# Boot the clone
+tar xzf elastik.tar.gz && tar xzf data.tar.gz && python boot.py
+```
+
+No secrets included. `.env` and tokens are excluded from `/self`.
+
+Two curls. One clone. The clone can clone itself.
 
 ## Files
 
 ```
-server.py          ~258 lines    the protocol (testament format — hand-copyable)
-plugins.py         ~197 lines    plugin load/unload/cron/propose/approve
-boot.py             ~78 lines    startup orchestrator (server + plugins + sync)
-elastik.py         ~510 lines    launcher (detect + server + browser)
-index.html          ~72 lines    one iframe, one polling loop, PWA manifest
-mcp_server.py      ~190 lines    MCP aggregator + HTTP adapter
-lucy.py            ~110 lines    CLI
-SKILLS.md                        AI behavior guide (read by MCP clients before /info)
-conf/                            machine-local config (*.example.json → *.json)
-plugins/                         route extensions
-renderers/                       HTML renderers (synced at boot)
-skills/                          skill docs + map.md (synced at boot)
-scripts/                         deployment, backup, build tools
-scripts/hooks/                   git hooks (pre-commit auto-regenerates plugins.lock)
-docs/                            design docs, protocol spec, vision
-data/                            universes
+server.py       ~540 lines    the protocol. ~60 lines are BIOS, rest is egg.
+plugins.py      ~250 lines    plugin load/unload/cron
+boot.py          ~80 lines    startup (server + plugins + sync)
+index.html       ~72 lines    one iframe, one polling loop
 ```
 
 Three entry points:
 ```
-python server.py   → bare protocol, no plugins (~258 lines, the testament)
-python boot.py     → full system (plugins, cron, /info, sync)
+python server.py   → bare protocol, no plugins
+python boot.py     → full system (plugins + cron)
 python elastik.py  → boot + hardware detect + browser
 ```
 
-Zero-dependency mode: just `python server.py` (bare protocol) or `python boot.py` (full system). Optional: `uvicorn`, `mcp`.
-
----
-
-## MCP Aggregator
-
-elastik's MCP server is also an aggregator.
-Configure any MCP server in conf/mcp_servers.json —
-elastik proxies all their tools through one entry point.
-
-```json
-{
-  "servers": {
-    "fs": {
-      "command": "npx",
-      "args": ["@modelcontextprotocol/server-filesystem", "/home"],
-      "description": "Filesystem: list, read, write files"
-    }
-  }
-}
-```
-
-AI sees one MCP server. Behind it, any number of tools.
-No config change in Claude Desktop. Just edit conf/mcp_servers.json.
-
-## Three ways in
+## Security
 
 ```
-Claude  → MCP     → mcp_server.py → elastik
-ChatGPT → OpenAPI → openapi.json  → elastik
-Anyone  → curl    → HTTP POST     → elastik
+physics > policy > training > luck
 ```
 
-Three protocols. One database. Zero lock-in.
+iframe sandbox (frontend). Docker optional (backend). Bearer auth (API). HMAC chain (audit).
 
-## Mobile
-
-iOS Shortcuts and Android Tasker can POST to elastik.
-No app needed. Your OS is the client.
-See scripts/MOBILE.md for setup guides.
-
-## Plugin system
-
-Plugins are .py files in plugins/. Auto-loaded at startup.
-Each plugin exports ROUTES, DESCRIPTION, and optional PARAMS_SCHEMA.
-Plugins declare dependencies with `NEEDS = ["_plugin_meta", "_cron_tasks"]` —
-plugins.py injects only what's declared.
-`GET /info` returns all plugin metadata. AI reads once, knows everything.
-See plugins/PLUGIN_SPEC.md for the full specification.
-
-## Hot Plug
-
-Load and unload plugins at runtime. No restart.
-
-```
-python scripts/admin-cli.py load fs       # activate filesystem plugin
-python scripts/admin-cli.py unload patch  # deactivate patch plugin
-python scripts/admin-cli.py list          # show all plugins
-python scripts/admin-cli.py interactive   # elastik> prompt
-```
-
-Or via HTTP:
-```
-POST /admin/load?name=fs
-POST /admin/unload?name=fs
-```
-
-OR via WebRTC DataChannel: direct P2P
-
-First run: admin + auth auto-installed from plugins/available/.
-Protected by approve token. AI cannot modify its own capabilities.
+AI holds `ELASTIK_TOKEN`. Can read/write. Cannot install plugins.
+Human holds `ELASTIK_APPROVE_TOKEN`. Can do everything.
+Different keys. Not "shouldn't." **Can't.**
 
 ## Connect AI
 
-Any MCP-compatible client:
-```json
-{
-  "mcpServers": {
-    "elastik": {
-      "command": "python",
-      "args": ["path/to/mcp_server.py"],
-      "env": {
-        "ELASTIK_TOKEN": "your-token"
-      }
-    }
-  }
-}
-```
-
-The MCP server has one tool: `http(method, path, body, headers)`.
-It translates MCP calls to HTTP requests.
-
-It also serves as a security layer: the auth token is injected
-from an environment variable. AI uses the key without seeing it.
-
-Change `ELASTIK_URL` — AI connects to a different machine.
-No restart. No reconfiguration. No awareness.
-AI doesn't know where it is. It just writes strings.
-The pipe decides where the water flows.
-```
-localhost:3004          → your machine
-100.x.x.x:3004         → another machine via Tailscale
-your.domain.com:3004   → your server in the cloud
-```
-
-One tool. Any machine. Any universe.
-When AI can send any strings to another program directly, MCP stays —
-not as a translator, but as a token isolator.
-
-## Public Access (public_gate plugin)
-
-Install the `public_gate` plugin and set `ELASTIK_MCP_TOKEN` to expose
-elastik on the public internet. Without the token, the plugin is inert
-and auth.py handles localhost access as before.
-
 ```bash
-python lucy.py install public_gate
-cloudflared tunnel --url http://localhost:3005
+# Any AI with curl/bash — just POST
+curl -X POST http://localhost:3005/work/write \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '<h1>hello world</h1>'
+
+# MCP (Claude Desktop, Cursor, etc.)
+# Point to mcp_server.py — it translates MCP→HTTP
 ```
 
-One process, one port, one tunnel. Unauthorized visitors see a pastebin.
-Authorized visitors see elastik. The disguise works because it isn't
-one — elastik is a pastebin. POST strings, GET strings, render in a
-browser. Worlds, HMAC chains, plugins are layers on top. Underneath:
-store and retrieve text.
-
-### Browser login
-
-Visit `/gate?k=<token>` in your phone browser. The server checks the
-token, creates a server-side session tied to your IP, sets a cookie, and
-redirects to `/`. You see your worlds. Bookmark the URL, one tap to log
-in.
-
-```
-https://<tunnel>/gate?k=<ELASTIK_MCP_TOKEN>
-```
-
-Session expires after `ELASTIK_SESSION_TTL` (default 24 hours).
-Sessions are server-side — the cookie is a random session ID, not a
-computed value. Restart the server = sessions cleared = re-login.
-
-### Claude.ai remote MCP
-
-Claude.ai cannot send custom headers, so the token rides in the URL:
-
-```
-https://<tunnel>/mcp?k=<ELASTIK_MCP_TOKEN>
-```
-
-Authorization requires **both** an Anthropic egress IP (`160.79.104.0/21`,
-`2607:6bc0::/48`) and a valid `?k=`. A leaked URL is useless from any IP
-outside Anthropic's range.
-
-### Direct MCP (a-Shell, curl, Tailscale)
-
-For clients whose real IP is visible to the server. Knock first, then
-call with token:
-
-```bash
-curl https://<tunnel>/kn-firstSecretPath
-curl https://<tunnel>/kn-secondSecretPath
-curl -X POST -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' \
-  'https://<tunnel>/mcp?k=<ELASTIK_MCP_TOKEN>'
-```
-
-Knock paths look like normal pastebin 404s. After the sequence, your IP
-is whitelisted for `ELASTIK_KNOCK_TTL` seconds. Anthropic IPs are
-rejected from knock — proxied clients must use the bearer path above.
-
-### Pastebin disguise
-
-Unauthorized requests see a real micro pastebin. POST anything, get a
-6-char key. GET the key, get the body. 256-entry LRU, 4KB per paste,
-in-RAM only. Not a mock — you can actually use it.
-
-### Env
-
-```
-ELASTIK_MCP_TOKEN=<random>                  # shared secret (required for public mode)
-ELASTIK_SESSION_TTL=86400                   # browser cookie lifetime (default 24h)
-ELASTIK_KNOCK=/kn-secret1,/kn-secret2      # knock paths (each >= 12 chars, no trailing /)
-ELASTIK_KNOCK_WINDOW=10                     # seconds to complete knock
-ELASTIK_KNOCK_TTL=600                       # knock whitelist lifetime
-ELASTIK_TRUST_PROXY_HEADER=cf-connecting-ip # real IP header (required behind cloudflared)
-ELASTIK_TRUST_PROXY_FROM=127.0.0.1/32       # upstream CIDRs allowed to set that header
-```
+If it can send a string, it's an elastik client.
 
 ---
 
-## Roadmap
-
-- [ ] Read authentication — optional token for GET routes (public deploy hardening)
-- [ ] CORS configuration — restrict allowed origins
-- [ ] Rate limiting — per-IP request throttling
-- [ ] HTTPS — native TLS or reverse proxy guide
-- [ ] Token rotation — `lucy rotate-token` command
-- [ ] Access logging — IP, timestamp, route, status code
-
-## Philosophy
-
-```
-TCP/IP 1974 — machines talk to machines.
-HTTP 1991 — clients talk to servers.
-Bitcoin 2008 — money without banks.
-elastik 2026 — intelligence and tools belong to you.
-```
-
-We didn't invent anything. HTTP was already there. SQLite was already there. HMAC was already there. iframe was already there. AI was already there.
-
-We just removed everything else.
-
-An application-layer overlay network.
-Every protocol below is transparent transport.
-
----
-
-## Name
-
-**elastik** — the system takes whatever shape you need.
-
-**lucy** — the CLI. Named after our ancestor. One finger. Everything starts.
-
-**universe.db** — space and time in one file.
-
----
-
-## Ecosystem
-```
-elastik              → protocol (~258) + plugins (~197) + boot (~78)
-elastik-extension    → Lucy in every browser tab
-elastik-vscode       → Lucy in every editor tab
-```
-
-- [elastik-extension](https://github.com/rangersui/elastik-extension) — Chrome extension, DOM sync, domain blacklist
-- [elastik-vscode](https://github.com/rangersui/elastik-vscode) — VS Code extension, editor context sync, .elastikignore
-
-## Peer Discovery
-
-Nodes on the same network find each other automatically.
-
-```bash
-python lucy.py install discovery    # or: admin/load discovery
-```
-
-Three-layer discovery:
-
-| Layer | Method | Use case |
-|-------|--------|----------|
-| Multicast | UDP 224.0.251.99:3006 | Physical devices on same LAN |
-| Unicast reply | UDP to known peers | iOS (can't send multicast) |
-| Seed peers | `ELASTIK_PEERS=ip1,ip2` | Containers, cloud, cross-subnet |
-
-Gossip protocol: each node asks its peers who they know.
-Four nodes, two minutes, fully automatic mesh discovery.
-
-Browser dashboard at `/discovery` — shows direct peers (green)
-and gossip-discovered peers (blue) with "trust and connect" buttons.
-
-```
-ELASTIK_NODE=my-laptop         # node name (default: hostname)
-ELASTIK_PEERS=10.0.0.5,10.0.0.6  # seed peers for non-multicast environments
-```
-
-## WebDAV
-
-Worlds as files. Edit with VS Code, Obsidian, or any text editor.
-WebDAV works on localhost. Remote access uses the browser (`/gate` →
-cookie → `/dav/` file listing → download/preview).
-
-**macOS / Linux** — mount directly:
-```bash
-# macOS Finder: Cmd+K → http://localhost:3005/dav
-# Linux: davfs2, or file manager → Connect to Server
-```
-
-**Windows** — use `net use` from the command line:
-```powershell
-net use Z: http://127.0.0.1:3005/dav /user:x <ELASTIK_APPROVE_TOKEN>
-# Z:\work.txt = the "work" world. Edit, save, done.
-```
-
-Auto-map on login:
-```powershell
-net use Z: http://127.0.0.1:3005/dav /user:x <TOKEN> /persistent:yes
-```
-
-Windows requires a one-time registry fix for HTTP Basic Auth:
-```powershell
-# Run once as admin
-Set-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters' -Name 'BasicAuthLevel' -Value 2
-Restart-Service WebClient
-```
-
-> **Windows note**: The built-in WebDAV client (WebClient service) only
-> works reliably on localhost. Explorer's "Map Network Drive" UI does not
-> support non-standard ports — use `net use` instead. For remote WebDAV,
-> use [RaiDrive](https://www.raidrive.com/) (free) or
-> [Cyberduck](https://cyberduck.io/) (open source), which implement
-> their own WebDAV client and avoid these limitations. Microsoft has
-> announced the deprecation of the WebClient service in future Windows
-> releases.
-
-## Backup
-
-Dual-path data protection:
-
-```bash
-# Human path — zero tokens, crontab friendly
-python scripts/backup.py backup
-python scripts/backup.py restore latest
-
-# AI path — via plugin, costs tokens
-POST /proxy/backup/run
-```
-
-Daily auto-backup via CRON (plugin). 7-backup retention. WAL checkpoint before copy.
-
-## Ollama bridge
-
-See `scripts/ollama-bridge.py` for local LLM integration.
-
-```bash
-python scripts/ollama-bridge.py "draw a blue hello world"   # one-shot
-python scripts/ollama-bridge.py --world work                # target a world
-python scripts/ollama-bridge.py --watch                     # loop on changes
-```
-
-## Integrate anything
-
-Any language. Any app. One POST.
-```python
-import requests
-requests.post("http://localhost:3004/myworld/result",
-    data="your app data here",
-    headers={"X-Auth-Token": "your-token"})
-```
-```bash
-# Terminal
-echo "backup done" | curl -X POST -d @- -H "X-Auth-Token: t" localhost:3004/cron/result
-
-# Obsidian — on file save, POST note content
-# Slack — POST to /slack/append
-# iOS — Siri + Shortcuts, one tap to POST
-# Android — Tasker, any trigger to POST
-# No app needed. Your OS is the client. See scripts/MOBILE.md
-# Excel — VBA macro, one XMLHTTP call
-# Arduino — WiFi HTTP POST to /sensors/result
-...
-```
-
-If it can send send a string, it's a elastik client.
-*Copyright © 2026 Ranger Chen . MIT License.*
+*MIT License. Ranger Chen, 2026.*
