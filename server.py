@@ -532,11 +532,36 @@ def run(extra_tasks=None):
             await asyncio.gather(_mini_serve(app, HOST, PORT), *tasks)
         asyncio.run(_serve())
 
+def _sync_dir(directory, glob_pattern, world_name_fn, label):
+    """Sync files from a directory to worlds at startup."""
+    d = Path(__file__).resolve().parent / directory
+    if not d.exists(): return
+    for f in sorted(d.glob(glob_pattern)):
+        name = world_name_fn(f)
+        content = f.read_text(encoding="utf-8")
+        c = conn(name)
+        old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+        if old["stage_html"] != content:
+            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (content,))
+            c.commit()
+            print(f"  {label}: synced {name}")
+
 if __name__ == "__main__":
     if not AUTH_TOKEN:
         print("\n  ! ELASTIK_TOKEN not set. Refusing to start in public mode.")
         print("  Set ELASTIK_TOKEN in .env or environment.\n")
         sys.exit(1)
-    print(f"\n  elastik -> http://{HOST}:{PORT}  [protocol only]")
-    print(f"  no plugins loaded. use boot.py for full system.\n")
-    run()
+    _root = Path(__file__).resolve().parent
+    os.environ.setdefault("ELASTIK_DATA", str(_root / "data"))
+    os.environ.setdefault("ELASTIK_ROOT", str(_root))
+    try:
+        import plugins
+        plugins.load_plugins()
+        plugins.register_plugin_routes()
+        _sync_dir("skills", "*.md", lambda f: f"skills-{f.stem}", "skills")
+        _sync_dir("renderers", "renderer-*.html", lambda f: f.stem, "renderers")
+        print(f"\n  elastik -> http://{HOST}:{PORT}\n")
+        run(extra_tasks=[plugins.cron_loop()])
+    except ImportError:
+        print(f"\n  elastik -> http://{HOST}:{PORT}  [no plugins.py]\n")
+        run()

@@ -4,4 +4,4 @@ COPY . .
 RUN pip install uvicorn
 EXPOSE 3004
 ENV PYTHONUNBUFFERED=1
-CMD ["python", "boot.py"]
+CMD ["python", "server.py"]

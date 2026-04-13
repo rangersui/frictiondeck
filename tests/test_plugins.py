@@ -3,7 +3,7 @@
 Tests all combinations:
   Layer 1: CGI protocol (direct exec, no server)
   Layer 2: Go HTTP integration (elastik-lite)
-  Layer 3: Python HTTP integration (boot.py)
+  Layer 3: Python HTTP integration (server.py)
   Layer 4: Cross-runtime parity
 
 Usage:
@@ -473,7 +473,7 @@ def test_python():
     env["ELASTIK_TOKEN"] = py_token
     env["ELASTIK_APPROVE_TOKEN"] = py_approve
     proc = subprocess.Popen(
-        [sys.executable, "boot.py"], env=env, cwd=ROOT,
+        [sys.executable, "server.py"], env=env, cwd=ROOT,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )
@@ -1009,7 +1009,7 @@ def test_parity():
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )
     py_proc = subprocess.Popen(
-        [sys.executable, "boot.py"], env=env_py, cwd=ROOT,
+        [sys.executable, "server.py"], env=env_py, cwd=ROOT,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     )

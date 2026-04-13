@@ -4,7 +4,7 @@ Two runtimes. Same routes. Same behavior. Different mechanisms.
 
 ## Python (in-process)
 
-Python plugins are `.py` files in `plugins/`. `boot.py` loads them at startup
+Python plugins are `.py` files in `plugins/`. Loaded at startup
 via `exec()`. They run inside the server process.
 
 ### Required exports

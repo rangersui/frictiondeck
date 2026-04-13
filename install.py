@@ -24,8 +24,6 @@ from pathlib import Path
 ELASTIK_DIR = Path(__file__).resolve().parent
 REQUIREMENTS = ELASTIK_DIR / "requirements.txt"
 MCP_SERVER = ELASTIK_DIR / "mcp_server.py"
-LAUNCHER = ELASTIK_DIR / "elastik.py"
-BOOT = ELASTIK_DIR / "boot.py"
 SERVER = ELASTIK_DIR / "server.py"
 
 # Claude Desktop config paths per platform
@@ -154,33 +152,23 @@ def step_configure_claude(dry_run=False):
 
 
 def step_start_server(dry_run=False):
-    """Step 3: Start elastik via elastik.py (hardware detect + server + browser)."""
+    """Step 3: Start elastik."""
     print("\n[3/3] Starting elastik...")
 
-    # Prefer elastik.py (detect + server + browser), fallback to boot.py, then server.py
-    if LAUNCHER.exists():
-        target = LAUNCHER
-        label = "elastik.py"
-    elif BOOT.exists():
-        target = BOOT
-        label = "boot.py"
-    elif SERVER.exists():
-        target = SERVER
-        label = "server.py"
-    else:
-        print(f"  neither elastik.py nor boot.py nor server.py found at {ELASTIK_DIR}")
+    if not SERVER.exists():
+        print(f"  server.py not found at {ELASTIK_DIR}")
         return False
 
     if dry_run:
-        print(f"  (dry run) would run: python {target}")
+        print(f"  (dry run) would run: python server.py")
         return True
 
-    print(f"  starting: python {label}")
+    print(f"  starting: python server.py")
     print(f"  press Ctrl+C to stop\n")
     print("=" * 50)
 
     try:
-        subprocess.call([find_python(), str(target)], cwd=str(ELASTIK_DIR))
+        subprocess.call([find_python(), str(SERVER)], cwd=str(ELASTIK_DIR))
     except KeyboardInterrupt:
         print("\n  elastik stopped")
     return True
