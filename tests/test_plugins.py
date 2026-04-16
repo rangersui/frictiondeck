@@ -613,22 +613,22 @@ def _run_plugin_auth_tests(port, label, token, approve):
     st, _ = http_method(port, "/dav/", method="PROPFIND", headers={"Depth": "0"})
     test(f"{label} plugin-auth: PROPFIND /dav no auth -> 207", st == 207, f"status={st}")
 
-    st, _ = http_method(port, "/dav/auth-test-world", method="PUT", body="test")
+    st, _ = http_method(port, "/dav/home/auth-test-world", method="PUT", body="test")
     test(f"{label} plugin-auth: PUT /dav no auth -> 401", st == 401, f"status={st}")
 
-    st, _ = http_method(port, "/dav/auth-test-world", method="PUT", body="dav-write", token=token)
+    st, _ = http_method(port, "/dav/home/auth-test-world", method="PUT", body="dav-write", token=token)
     test(f"{label} plugin-auth: PUT /dav token -> 201", st == 201, f"status={st}")
 
-    st, body = http_get(port, "/dav/auth-test-world")
+    st, body = http_get(port, "/dav/home/auth-test-world")
     test(f"{label} plugin-auth: GET /dav read back -> ok", st == 200 and "dav-write" in body, f"status={st}")
 
-    st, _ = http_method(port, "/dav/auth-test-world", method="PUT", body="dav-basic", basic_auth=approve)
+    st, _ = http_method(port, "/dav/home/auth-test-world", method="PUT", body="dav-basic", basic_auth=approve)
     test(f"{label} plugin-auth: PUT /dav Basic Auth -> 201", st == 201, f"status={st}")
 
-    st, _ = http_method(port, "/dav/auth-test-world", method="DELETE")
+    st, _ = http_method(port, "/dav/home/auth-test-world", method="DELETE")
     test(f"{label} plugin-auth: DELETE /dav no auth -> 401", st == 401, f"status={st}")
 
-    st, _ = http_method(port, "/dav/auth-test-world", method="DELETE", basic_auth=approve)
+    st, _ = http_method(port, "/dav/home/auth-test-world", method="DELETE", basic_auth=approve)
     test(f"{label} plugin-auth: DELETE /dav approve -> 204", st == 204, f"status={st}")
 
 
@@ -690,16 +690,16 @@ def _run_blob_ext_tests(port, label, token, approve):
     test(f"{label} blob: fakedir/child1 content", "hello child1" in d.get("stage_html", ""), f"body={d.get('stage_html','')[:20]}")
 
     # ── DAV ext mapping ──
-    st, _ = http_method(port, "/dav/ext-blob-test.css", basic_auth=approve)
+    st, _ = http_method(port, "/dav/home/ext-blob-test.css", basic_auth=approve)
     test(f"{label} blob: DAV GET .css", st == 200, f"status={st}")
 
     # ── DAV virtual directories ──
-    st, body = http_method(port, "/dav/fakedir/", method="PROPFIND", basic_auth=approve, headers={"Depth": "1"})
+    st, body = http_method(port, "/dav/home/fakedir/", method="PROPFIND", basic_auth=approve, headers={"Depth": "1"})
     test(f"{label} blob: DAV PROPFIND fakedir/ -> 207", st == 207, f"status={st}")
     test(f"{label} blob: DAV fakedir/ has children", "child1" in body and "child2" in body, f"body={body[:100]}")
 
     # ── DAV binary PUT round-trip ──
-    st, _ = http_method(port, "/dav/dav-bin-test.png", method="PUT", body=png_bytes, basic_auth=approve)
+    st, _ = http_method(port, "/dav/home/dav-bin-test.png", method="PUT", body=png_bytes, basic_auth=approve)
     test(f"{label} blob: DAV PUT binary -> 201", st == 201, f"status={st}")
 
     st, body = http_get(port, "/home/dav-bin-test/read")
