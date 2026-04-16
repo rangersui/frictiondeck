@@ -373,13 +373,34 @@ async def app(scope, receive, send):
             if accept.startswith("text/html") and callable(handler) and handler.__doc__:
                 doc = handler.__doc__.strip()
                 route = base_path_override or matched
-                # Build a simple form from the docstring
+                # Parse params from docstring: find ?key=value and &key=value patterns
+                import re as _re
+                _params = list(dict.fromkeys(_re.findall(r'[?&](\w+)=', doc)))  # dedupe, keep order
+                _is_post = "POST " in doc or "body" in doc.lower()[:200]
+                # Build form fields
+                if _is_post:
+                    _fields = (f'<textarea name="_body" rows="4" placeholder="body..." '
+                               f'style="font:14px monospace;padding:6px;width:95%;display:block;margin:4px 0"></textarea>')
+                    _method = "POST"
+                    _curl = f'curl -X POST localhost:3005{route} -d "..."'
+                else:
+                    seen = set()
+                    _fields = ""
+                    for p in (_params or ["q"]):
+                        if p not in seen:
+                            seen.add(p)
+                            _fields += (f'<div style="margin:4px 0"><label style="display:inline-block;width:80px;font-weight:bold">{p}</label>'
+                                        f'<input name="{p}" placeholder="{p}..." style="font:14px monospace;padding:4px;width:60%"></div>')
+                    _method = "GET"
+                    _qex = "&".join(f"{p}=..." for p in (_params or ["q"]))
+                    _curl = f'curl "localhost:3005{route}?{_qex}"'
                 _man = (f'<meta charset="utf-8"><div style="font:14px/1.6 system-ui;max-width:700px;margin:2em auto;padding:0 1em">'
                         f'<h2 style="margin:0 0 .5em">{route}</h2>'
-                        f'<pre style="white-space:pre-wrap;background:#f5f5f5;padding:1em;border-radius:4px">{doc}</pre>'
-                        f'<form method="GET" action="{route}" style="margin-top:1em">'
-                        f'<input name="q" placeholder="query..." style="font:14px monospace;padding:6px;width:60%">'
-                        f' <button style="padding:6px 12px">execute</button></form></div>')
+                        f'<pre style="white-space:pre-wrap;background:#f5f5f5;padding:1em;border-radius:4px;font-size:13px">{doc}</pre>'
+                        f'<div style="margin:8px 0"><code style="background:#e8e8e8;padding:4px 8px;border-radius:3px;font-size:12px">{_curl}</code></div>'
+                        f'<form method="{_method}" action="{route}" style="margin-top:1em;padding:1em;background:#fafafa;border:1px solid #eee;border-radius:4px">'
+                        f'{_fields}'
+                        f'<button style="margin-top:8px;padding:6px 16px;cursor:pointer">{_method} {route}</button></form></div>')
                 return await send_r(send, 200, _man, "text/html")
         params["_scope"] = scope
         params["_body_raw"] = body_raw  # raw bytes for binary plugins (dav PUT)
