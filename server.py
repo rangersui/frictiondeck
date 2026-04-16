@@ -81,9 +81,52 @@ def _infer_type(stage_html):
     if '<script' in sl or '<body' in sl or '<html' in sl: return 'html'
     return 'plain'
 
+def _lookup_etc_auth(user, pwd):
+    """Look up user:password in /etc/passwd (user:tier) + /etc/shadow (user:sha256(tok)).
+    Returns 'approve' for T3, 'auth' for T2, None for T1 or unknown.
+
+    /etc/passwd format, one per line:   user:T1|T2|T3
+    /etc/shadow format, one per line:   user:<sha256 hex of token>
+    Both stored as regular worlds under etc/. Read auth for /etc/shadow is
+    enforced separately (T3 only — see the /read dispatch)."""
+    passwd_disk = DATA / "etc%2Fpasswd"
+    shadow_disk = DATA / "etc%2Fshadow"
+    if not (passwd_disk.exists() and shadow_disk.exists()): return None
+    try:
+        pwd_raw = conn("etc/passwd").execute(
+            "SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"] or ""
+        if isinstance(pwd_raw, bytes): pwd_raw = pwd_raw.decode("utf-8", "replace")
+        tiers = {}
+        for line in pwd_raw.splitlines():
+            if ":" in line:
+                u, t = line.split(":", 1); tiers[u.strip()] = t.strip()
+        if user not in tiers: return None
+        tier = tiers[user]
+        shd_raw = conn("etc/shadow").execute(
+            "SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"] or ""
+        if isinstance(shd_raw, bytes): shd_raw = shd_raw.decode("utf-8", "replace")
+        hashes = {}
+        for line in shd_raw.splitlines():
+            if ":" in line:
+                u, h = line.split(":", 1); hashes[u.strip()] = h.strip()
+        expected = hashes.get(user)
+        if not expected: return None
+        actual = hashlib.sha256(pwd.encode("utf-8")).hexdigest()
+        if not _hmac.compare_digest(actual, expected): return None
+        if tier == "T3": return "approve"
+        if tier == "T2": return "auth"
+        return None  # T1 or unknown tier — treat as unauthenticated for write gates
+    except Exception:
+        return None
+
+
 def _check_auth(scope):
-    """Authorization header → 'approve', 'auth', or None.
-    Bearer or Basic, same tokens."""
+    """Authorization header → 'approve' (T3), 'auth' (T2), or None.
+
+    Sources, in priority order:
+      1. Env tokens APPROVE_TOKEN / AUTH_TOKEN (bootstrap, Bearer or Basic pwd)
+      2. /etc/passwd + /etc/shadow lookup (Basic user:pass, multi-user)
+    """
     for k, v in scope.get("headers", []):
         if k == b"authorization":
             a = v.decode("utf-8", "replace")
@@ -93,9 +136,10 @@ def _check_auth(scope):
                 if AUTH_TOKEN and _hmac.compare_digest(tok, AUTH_TOKEN): return "auth"
             elif a.startswith("Basic "):
                 try:
-                    _, pwd = base64.b64decode(a[6:]).decode().split(":", 1)
+                    user, pwd = base64.b64decode(a[6:]).decode().split(":", 1)
                     if APPROVE_TOKEN and _hmac.compare_digest(pwd, APPROVE_TOKEN): return "approve"
                     if AUTH_TOKEN and _hmac.compare_digest(pwd, AUTH_TOKEN): return "auth"
+                    return _lookup_etc_auth(user, pwd)
                 except (ValueError, UnicodeDecodeError): pass
             return None
     return None
@@ -387,6 +431,11 @@ async def app(scope, receive, send):
                     return await send_r(send, 403, '{"error":"etc write requires approve"}')
             elif AUTH_TOKEN and _check_auth(scope) is None:
                 return await send_r(send, 403, '{"error":"unauthorized"}')
+        # Read auth: /etc/shadow is chmod 000 except to root (T3). Everyone
+        # else would only see sha256 hashes, but even that leaks who exists.
+        if action in ("read", "raw") and name == "etc/shadow":
+            if _check_auth(scope) != "approve":
+                return await send_r(send, 403, '{"error":"shadow is chmod 000"}')
         # CSRF gate: browser-only actions check Origin (physics, not policy)
         if action in ("sync", "result", "clear"):
             origin = ""
