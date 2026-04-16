@@ -27,11 +27,11 @@
 </div>
 <div class="code-block">
 <div class="code-line"><span class="code-comment"># read</span></div>
-<div class="code-line"><span class="code-prompt">$ </span><span class="code-cmd">curl</span> http://localhost:3005/work/read</div>
-<div class="code-line"><span class="code-output">{"stage_html":"&lt;h1&gt;hello world&lt;/h1&gt;","version":47,"hmac":"a3f8..."}</span></div>
+<div class="code-line"><span class="code-prompt">$ </span><span class="code-cmd">curl</span> http://localhost:3005/home/work</div>
+<div class="code-line"><span class="code-output">{"stage_html":"&lt;h1&gt;hello world&lt;/h1&gt;","version":47}</span></div>
 <div class="code-line" style="height:1rem"></div>
 <div class="code-line"><span class="code-comment"># write</span></div>
-<div class="code-line"><span class="code-prompt">$ </span><span class="code-cmd">curl -X POST</span> http://localhost:3005/work/write -d '&lt;h1&gt;new&lt;/h1&gt;'</div>
+<div class="code-line"><span class="code-prompt">$ </span><span class="code-cmd">curl -X PUT</span> http://localhost:3005/home/work -d '&lt;h1&gt;new&lt;/h1&gt;'</div>
 <div class="code-line"><span class="code-output">{"version":48,"hmac":"b7c2..."}</span></div>
 <div class="code-line" style="height:1rem"></div>
 <div class="code-line"><span class="code-comment"># that's the entire client</span></div>

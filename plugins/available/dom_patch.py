@@ -43,7 +43,7 @@ When creating HTML for patching, embed stable IDs:
 </div>
 
 dom_patch is the downgrade path — not the daily driver.
-Use renderer + JSON data separation when possible (see /skills-data).
+Use renderer + JSON data separation when possible (see /usr/lib/skills/data).
 """
 ROUTES = {}
 

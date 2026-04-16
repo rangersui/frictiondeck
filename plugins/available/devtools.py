@@ -4,9 +4,15 @@ fetch('/grep?q=error').then(r=>r.json())  → grep
   .then(ws=>fetch('/tail?world='+ws[0]+'&n=5')).then(r=>r.text())  → tail
   .then(t=>__elastik.sync(t))  → write back
 
+Text-processing routes (grep/head/tail/wc) duplicate what a DAV mount
+gives you for free: `grep -r NEEDLE /mnt/elastik/home/*.txt`. They're
+kept for curl callers, AI agents, and quick scripts — but the native
+Unix tools on a mounted /dav/ are the better path when you have a
+shell handy.
+
 Not loaded by default. Load with: POST /admin/load  body=devtools
 """
-DESCRIPTION = "Unix pipe primitives + cave primitives (stone/fire+ash/wall/drum/trail/hunt/tomb/bones/river/soil/knot/shadow/amber/eclipse/narcissus) — grep (-l), tail, head, wc (-c), rev, echo, null, full, true, false, yes, cowsay, moaisay, stone, fire, ash, wall, drum, trail, hunt, tomb, bones, river, soil, knot, shadow, amber, eclipse, narcissus, health, db/size, whoami, uuid, verify, delay, bench, config/dump, time"
+DESCRIPTION = "Unix pipes + cave primitives + logic gates + electronic components. grep/tail/head/wc/rev/echo/null/full/true/false/yes/cowsay/moaisay/stone/fire/ash/wall/drum/trail/hunt/tomb/bones/river/soil/knot/shadow/amber/eclipse/narcissus/not/and/or/xor/nand/resistor/capacitor/inductor/diode/led/transistor/mosfet/relay/fuse/health/db/size/whoami/uuid/verify/delay/bench/config/dump/time"
 
 import sys, json, os, subprocess, time, sqlite3, hashlib, asyncio, random
 from pathlib import Path
@@ -200,7 +206,7 @@ async def handle_whoami(method, body, params):
 
 
 async def handle_uuid(method, body, params):
-    """uuid — cryptographic randomness. One per call."""
+    """/uuid?n=5 — cryptographic randomness. One per call, or n at once."""
     import uuid
     n = min(int(params.get("n", "1")), 100)
     if n == 1:
@@ -237,7 +243,7 @@ async def handle_delay(method, body, params):
 
 
 async def handle_bench(method, body, params):
-    """bench — micro-benchmark. Measures sqlite read + JSON round-trip."""
+    """/bench?n=100 — micro-benchmark. Measures sqlite read + JSON round-trip."""
     iterations = min(int(params.get("n", "100")), 1000)
     names = _world_names()
     t0 = time.time()
@@ -300,6 +306,193 @@ async def handle_yes(method, body, params):
     return {"_html": "\n".join(["yes"] * n), "_status": 200}
 
 
+# ── Logic gates — the minimum vocabulary ─────────────────────────────
+# From these five the tribe builds every circuit. true/false are the
+# source; not/and/or/xor/nand are the operations. NAND alone suffices
+# (universal gate) — the others are kept because fewer words = more
+# misreadings.
+
+async def handle_not(method, body, params):
+    """/not — negation. true becomes false. false becomes true.
+    POST 'true' → false. POST 'false' → true.
+    POST anything else → nothing.
+    """
+    text = (body if isinstance(body, str) else body.decode()).strip().lower()
+    if text == "true":
+        return {"_html": "false", "_status": 200}
+    if text == "false":
+        return {"_html": "true", "_status": 200}
+    return {"_html": "nothing", "_status": 200}
+
+
+async def handle_and(method, body, params):
+    """/and — both or neither. ?a=true&b=true → true.
+    The tribe speaks only when all voices agree.
+    """
+    a = params.get("a", "false").lower() == "true"
+    b = params.get("b", "false").lower() == "true"
+    return {"_html": str(a and b).lower(), "_status": 200}
+
+
+async def handle_or(method, body, params):
+    """/or — any voice is enough. ?a=false&b=true → true.
+    One ember keeps the fire alive.
+    """
+    a = params.get("a", "false").lower() == "true"
+    b = params.get("b", "false").lower() == "true"
+    return {"_html": str(a or b).lower(), "_status": 200}
+
+
+async def handle_xor(method, body, params):
+    """/xor — only one. never both. never neither. ?a=true&b=true → false.
+    Two fires cancel. Two silences cancel. Only difference survives.
+    """
+    a = params.get("a", "false").lower() == "true"
+    b = params.get("b", "false").lower() == "true"
+    return {"_html": str(a ^ b).lower(), "_status": 200}
+
+
+async def handle_nand(method, body, params):
+    """/nand — the universal gate. everything can be built from this.
+    ?a=true&b=true → false. All other combinations → true.
+    One gate to rule them all.
+    """
+    a = params.get("a", "false").lower() == "true"
+    b = params.get("b", "false").lower() == "true"
+    return {"_html": str(not (a and b)).lower(), "_status": 200}
+
+
+# ── Electronic components — feedstock for circuit-editor ─────────────
+# Each route returns a small JSON descriptor. The circuit editor reads
+# these when building schematics; curl users get human-readable part
+# sheets. Values come from query params with sensible defaults.
+
+def _num(s, default):
+    try: return float(s)
+    except (TypeError, ValueError): return default
+
+
+async def handle_resistor(method, body, params):
+    """/resistor?ohm=470 — passive resistance."""
+    return {"type": "R", "value": _num(params.get("ohm"), 470), "unit": "\u03a9"}
+
+
+async def handle_capacitor(method, body, params):
+    """/capacitor?uf=100 — charge storage."""
+    return {"type": "C", "value": _num(params.get("uf"), 100), "unit": "\u03bcF"}
+
+
+async def handle_inductor(method, body, params):
+    """/inductor?mh=10 — magnetic field storage."""
+    return {"type": "L", "value": _num(params.get("mh"), 10), "unit": "mH"}
+
+
+async def handle_diode(method, body, params):
+    """/diode?vf=0.7 — one-way gate. forward voltage ~0.7V."""
+    return {"type": "D", "forward_v": _num(params.get("vf"), 0.7)}
+
+
+async def handle_led(method, body, params):
+    """/led?color=blue — light-emitting diode. color→wavelength."""
+    _WL = {"red": 635, "amber": 605, "yellow": 590, "green": 525,
+           "blue": 470, "violet": 405, "white": 0, "ir": 940, "uv": 385}
+    color = params.get("color", "red").lower()
+    return {"type": "LED", "color": color, "wavelength": _WL.get(color, 635)}
+
+
+async def handle_transistor(method, body, params):
+    """/transistor?type=npn&hfe=100 — bipolar junction. npn or pnp."""
+    config = params.get("type", "npn").lower()
+    if config not in ("npn", "pnp"): config = "npn"
+    return {"type": "BJT", "config": config, "hfe": int(_num(params.get("hfe"), 100))}
+
+
+async def handle_mosfet(method, body, params):
+    """/mosfet?type=n&vgs_th=2.0 — field-effect. n-channel or p-channel."""
+    config = params.get("type", "n").lower()
+    if config not in ("n", "p"): config = "n"
+    return {"type": "MOSFET", "channel": config,
+            "vgs_th": _num(params.get("vgs_th"), 2.0)}
+
+
+async def handle_relay(method, body, params):
+    """/relay?coil=24&contact=70 — electromechanical switch. coil voltage + contact rating."""
+    return {"type": "RELAY",
+            "coil_v": _num(params.get("coil"), 24),
+            "contact_a": _num(params.get("contact"), 70)}
+
+
+async def handle_fuse(method, body, params):
+    """/fuse?a=15 — sacrificial link. amp rating."""
+    return {"type": "FUSE", "rating": _num(params.get("a"), 15), "unit": "A"}
+
+
+# ── /flush — progressive erasure ─────────────────────────────────────
+# Flushing is streaming, not atomic. You watch it go.
+
+def _write_stage(world, content):
+    """Write to a world, bump version. SSE viewers see it live."""
+    db = _DATA / _disk_name(world) / "universe.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    c = sqlite3.connect(str(db))
+    c.execute("CREATE TABLE IF NOT EXISTS stage_meta("
+              "id INTEGER PRIMARY KEY CHECK(id=1),stage_html TEXT DEFAULT '',"
+              "pending_js TEXT DEFAULT '',js_result TEXT DEFAULT '',"
+              "version INTEGER DEFAULT 0,updated_at TEXT DEFAULT '',ext TEXT DEFAULT 'html')")
+    c.execute("INSERT OR IGNORE INTO stage_meta(id) VALUES(1)")
+    c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,"
+              "updated_at=datetime('now') WHERE id=1", (content,))
+    c.commit(); c.close()
+
+
+async def handle_flush(method, body, params):
+    """/flush — SSE debug tool disguised as a toilet.
+
+    POST /flush?world=toilet    (default world: toilet)
+
+    Open /stream/toilet in another tab first. Then POST /flush.
+    Same SSE pipe as any world. Same debug purpose.
+    But you'll actually watch this one to the end.
+
+    If the world is empty or already clean, seeds it first.
+    Repeatable — one POST, full show, every time.
+    """
+    world = params.get("world", "")
+    if not world:
+        world = (body if isinstance(body, str) else body.decode()).strip()
+    if not world:
+        world = "toilet"
+    content = _read_stage(world)
+    # Seed if empty, clean, or nonexistent
+    if content is None or not content.strip() or content.strip() == "\u2728":
+        _write_stage(world, "\U0001f4a9")  # 💩
+        await asyncio.sleep(0.3)
+        content = "\U0001f4a9"
+    # --- the flush ---
+    chars = list(content)
+    n = len(chars)
+    # Phase 1: water rises. replace chars bottom-up with droplets.
+    steps = min(n, 12)
+    for step in range(1, steps + 1):
+        cutoff = n - int(n * step / steps)
+        stage = chars[:cutoff] + ["\U0001f4a7"] * (n - cutoff)
+        _write_stage(world, "".join(stage))
+        await asyncio.sleep(0.08)
+    # Phase 2: swirl — water + content mixed
+    _write_stage(world, "\U0001f4a7\U0001f4a9\U0001f4a7")
+    await asyncio.sleep(0.15)
+    _write_stage(world, "\U0001f4a7\U0001f4a7\U0001f4a7")
+    await asyncio.sleep(0.15)
+    # Phase 3: drain
+    _write_stage(world, "\U0001f4a7\U0001f4a7")
+    await asyncio.sleep(0.1)
+    _write_stage(world, "\U0001f4a7")
+    await asyncio.sleep(0.1)
+    # Phase 4: clean
+    _write_stage(world, "\u2728")
+    return {"_html": "\u2728", "_status": 200}
+
+
 _COW = r"""
  {border}
 < {msg} >
@@ -313,7 +506,7 @@ _COW = r"""
 
 
 async def handle_cowsay(method, body, params):
-    """cowsay — if the cow renders intact, your encoding is fine."""
+    """/cowsay?say=hello — if the cow renders intact, your encoding is fine."""
     text = params.get("say", "") or (body if isinstance(body, str) else body.decode("utf-8", "replace")) or "moo"
     n = max(len(text), 2)
     cow = _COW.format(msg=text.ljust(n), border="-" * (n + 2))
@@ -337,7 +530,7 @@ _MOAI = """
 
 
 async def handle_moaisay(method, body, params):
-    """moaisay — because cowsay is too cheerful."""
+    """/moaisay?say=hello — because cowsay is too cheerful."""
     text = params.get("say", "") or (body if isinstance(body, str) else body.decode("utf-8", "replace")) or "🗿"
     n = max(len(text), 2)
     moai = _MOAI.format(msg=text.ljust(n), border="─" * (n + 2))
@@ -347,7 +540,7 @@ _STONE_LOG = _DATA / "dev_stone.log"
 
 
 async def handle_stone_dev(method, body, params):
-    """/dev/stone — receives, remembers, never replies.
+    """/dev/stone?say=text — receives, remembers, never replies.
     Not /dev/null. Input is preserved, but there is no read path.
     Petrification, not discard. The stone's signature is the full sha256.
     """
@@ -415,7 +608,7 @@ async def handle_stone_weight(method, body, params):
 _ASH_LOG = _DATA / "dev_ash.log"
 
 async def handle_fire(method, body, params):
-    """/dev/fire — burns on contact. Content consumed. Hash → /ash.
+    """/dev/fire?say=text — burns on contact. Content consumed. Hash → /ash.
     Fire and ash are one event seen from two sides: the warmth that
     leaves, and the residue that doesn't quite. You cannot get the
     content back from /ash — only proof that something once was.
@@ -457,7 +650,7 @@ async def handle_ash(method, body, params):
 _WALL_LOG = _DATA / "dev_wall.log"
 
 async def handle_wall(method, body, params):
-    """/wall — cave painting. Append-only public record.
+    """/wall?say=text — cave painting. Append-only public record.
     Unlike stone (private hash), wall keeps the actual marks.
     POST to add, GET to read all (oldest first).
     """
@@ -484,7 +677,7 @@ async def handle_wall(method, body, params):
 _DRUM_LISTENERS = []  # in-memory list of asyncio.Queue
 
 async def handle_drum(method, body, params):
-    """/drum — beat once, heard by all CURRENT listeners. No replay.
+    """/drum?say=beat — beat once, heard by all CURRENT listeners. No replay.
     POST = beat. GET = listen (SSE stream of beats).
     If you weren't listening when the drum was beaten, you missed it.
     This is the original push notification.
@@ -528,7 +721,7 @@ async def handle_drum(method, body, params):
 _TRAIL_LOG = _DATA / "dev_trail.log"
 
 async def handle_trail(method, body, params):
-    """/trail — breadcrumbs. Each POST adds a step. GET shows the path.
+    """/trail?say=step — breadcrumbs. Each POST adds a step. GET shows the path.
     No rewind, no delete. You can see where you've been — not go back.
     """
     if method == "POST":
@@ -550,19 +743,18 @@ async def handle_trail(method, body, params):
     return {"_html": "\n".join(steps) + "\n" if steps else "(no trail yet)\n", "_status": 200}
 
 
-_HUNT_SKIP_PREFIXES = ("renderer-", "skills-", "config-", "sys-", "plugin-", ".")
+_HUNT_SKIP_PREFIXES = ("etc/", "usr/", "var/", "boot/", "sys-", "plugin-", ".")
 
 async def handle_hunt(method, body, params):
     """/hunt — random encounter. You don't browse. You stumble in.
-    302 redirect to a random world. System worlds (renderer-*, skills-*,
-    config-*, sys-*, plugin-*) are excluded — this is about wildlife,
-    not organs.
+    302 redirect to a random world. System worlds (etc/*, usr/*,
+    sys-*, plugin-*) are excluded — this is about wildlife, not organs.
     """
     names = [n for n in _world_names()
              if not any(n.startswith(p) for p in _HUNT_SKIP_PREFIXES)]
     if not names:
         return {"_html": "🗿\n", "_status": 404}
-    return {"_redirect": f"/{random.choice(names)}", "_status": 302}
+    return {"_redirect": f"/home/{random.choice(names)}", "_status": 302}
 
 
 async def handle_tomb(method, body, params):
@@ -638,7 +830,7 @@ _BONES_SIGNS = ["great blessing", "blessing", "small blessing", "future blessing
                 "curse", "small curse", "future curse", "great curse"]
 
 async def handle_bones(method, body, params):
-    """/bones — SHA-256 divination. Throw the oracle bone into the fire.
+    """/bones?q=question — SHA-256 divination. Throw the oracle bone into the fire.
     POST your question. Receive an omen based on the hash.
     Pure physical entropy — no LLM, no training, no bias. Just the bone.
     """
@@ -787,7 +979,7 @@ async def handle_river(method, body, params):
 _KNOT_LOG = _DATA / "dev_knot.txt"
 
 async def handle_knot(method, body, params):
-    """/knot — quipu. Records that events happened, and their magnitude.
+    """/knot?say=text — quipu. Records that events happened, and their magnitude.
     Never what they said. Anti-semantic.
 
     POST: discards content. Ties one knot in the rope, sized by byte length.
@@ -846,7 +1038,7 @@ async def handle_shadow(method, body, params):
 _AMBER_DIR = _DATA / "amber"
 
 async def handle_amber(method, body, params):
-    """/amber — beautiful death. POST text → zlib + base64 + chmod 400.
+    """/amber?id=xxx — beautiful death. POST text → zlib + base64 + chmod 400.
     GET returns only the garbled base64. Never the original.
 
     Unlike stone (metadata of an event), amber keeps the whole corpse —
@@ -889,7 +1081,7 @@ async def handle_amber(method, body, params):
 
 
 async def handle_narcissus(method, body, params):
-    """/narcissus — your own voice as oracle.
+    """/narcissus?q=query — your own voice as oracle.
     POST a question. Instead of reaching out to the cloud, fuzzy-match
     across ALL your local worlds (skipping system worlds like /hunt does).
     Return the forgotten passage that most echoes your query.
@@ -992,6 +1184,7 @@ async def handle_eclipse(method, body, params):
 
 
 async def handle_proxy(method, body, params):
+    """/proxy?url=https://example.com — fetch a URL via curl."""
     from urllib.parse import unquote
     url = unquote(params.get("url", ""))
     if not url or not url.startswith(("http://", "https://")):
@@ -1039,6 +1232,21 @@ ROUTES = {
     "/true": handle_true,
     "/false": handle_false,
     "/yes": handle_yes,
+    "/not": handle_not,
+    "/and": handle_and,
+    "/or": handle_or,
+    "/xor": handle_xor,
+    "/nand": handle_nand,
+    "/resistor": handle_resistor,
+    "/capacitor": handle_capacitor,
+    "/inductor": handle_inductor,
+    "/diode": handle_diode,
+    "/led": handle_led,
+    "/transistor": handle_transistor,
+    "/mosfet": handle_mosfet,
+    "/relay": handle_relay,
+    "/fuse": handle_fuse,
+    "/flush": handle_flush,
     "/wc-c": handle_wc_c,
     "/full": handle_full,
     "/time": handle_time,

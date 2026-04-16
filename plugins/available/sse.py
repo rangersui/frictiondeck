@@ -21,7 +21,7 @@ Browser:
 Terminal test:
     curl -N "http://localhost:3005/stream/foo" -H "Authorization: Bearer $TOKEN"
     # then in another terminal:
-    curl -X POST "http://localhost:3005/foo/write" -H "Authorization: Bearer $TOKEN" -d "hello"
+    curl -X PUT "http://localhost:3005/home/foo" -H "Authorization: Bearer $TOKEN" -d "hello"
     # → first terminal receives event immediately
 """
 import asyncio, json
@@ -29,7 +29,7 @@ import server
 
 DESCRIPTION = "Server-sent events — push per-world updates on version change"
 ROUTES = ["/stream"]   # prefix match: /stream/foo, /stream/a/b
-AUTH = "none"          # matches /read — reads are public (browsers can't send Authorization header via EventSource)
+AUTH = "none"          # reads are public (browsers can't send Authorization header via EventSource)
 
 PARAMS_SCHEMA = {
     "/stream/{name}": {

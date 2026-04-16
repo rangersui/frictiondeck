@@ -1,3 +1,9 @@
+STOP. Before any file write, read the manifesto:
+  curl localhost:3005/etc/manifesto
+If elastik is not running, START IT FIRST.
+Documentation, tests, and extensions live in worlds, not repo.
+If it can be a world, it must be a world.
+
 道 — The Way of Building
 You write strings. That is all. That is enough.
 First principle
@@ -76,8 +82,8 @@ The bottleneck is always your thinking, never the machine.
 (Know enough and avoid disgrace. Know when to stop and avoid danger. Then you last.)
 Naming
 Short. Obvious. No jargon.
-/read not /api/v2/stages/read
-/write not /api/v2/stages/upsert
+GET /home/work not GET /api/v2/stages/read
+PUT /home/work not POST /api/v2/stages/upsert
 stage_html not rendered_content_payload
 If the name needs explanation, the name is wrong.
 On frameworks
@@ -272,10 +278,10 @@ Zero information should cost zero bandwidth.
 One channel, multiple signals.
 This is what elastik does with HTTP.
 
-/read → signal type 1 (content retrieval)
-/write → signal type 2 (content storage)
+GET /home/work → signal type 1 (content retrieval)
+PUT /home/work → signal type 2 (content storage)
 /dav/ → signal type 3 (file system)
-/mirror → signal type 4 (proxy)
+/bin/mirror → signal type 4 (proxy)
 
 Same TCP port. Same HTTP channel. Different signals.
 Multiplexing. Shannon formalized this in 1948.

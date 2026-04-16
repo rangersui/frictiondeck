@@ -33,14 +33,14 @@ const out=document.getElementById('output'),cmd=document.getElementById('cmd'),p
 let _cwd='',_history=[],_hi=-1,_worlds=[],_pending=null,_user='__ELASTIK_USER__';
 
 // fetch world list for tab completion
-fetch('/stages').then(r=>r.json()).then(d=>{_worlds=d.map(s=>s.name)}).catch(()=>{});
+fetch('/proc/worlds').then(r=>r.json()).then(d=>{_worlds=d.map(s=>s.name)}).catch(()=>{});
 
-// convenience object: el.r('work') → fetch read, el.w('work','hi') → write
+// convenience object: el.r('work') → GET, el.w('work','hi') → PUT, el.a → POST (append)
 const el={
-  r:(w)=>fetch('/'+(w||_cwd)+'/read').then(r=>r.json()),
-  w:(w,b)=>fetch('/'+(w||_cwd)+'/write',{method:'POST',body:b}).then(r=>r.json()),
-  a:(w,b)=>fetch('/'+(w||_cwd)+'/append',{method:'POST',body:b}).then(r=>r.json()),
-  stages:()=>fetch('/stages').then(r=>r.json()),
+  r:(w)=>fetch('/home/'+(w||_cwd)).then(r=>r.json()),
+  w:(w,b)=>fetch('/home/'+(w||_cwd),{method:'PUT',body:b}).then(r=>r.json()),
+  a:(w,b)=>fetch('/home/'+(w||_cwd),{method:'POST',body:b}).then(r=>r.json()),
+  stages:()=>fetch('/proc/worlds').then(r=>r.json()),
   grep:(q,w)=>fetch('/grep?q='+encodeURIComponent(q)+(w?'&world='+w:'')).then(r=>r.text()),
   post:(url,body,headers)=>fetch('/proxy/postman',{method:'POST',body:JSON.stringify({url,method:'POST',body,headers:headers||{}})}).then(r=>r.text()),
   get:(url)=>fetch('/proxy?url='+encodeURIComponent(url)).then(r=>r.text()),
@@ -116,7 +116,7 @@ function parseCommand(input){
   if(c==='pwd')return{v:_cwd||'~'};
   if(c==='clear')return{v:(out.textContent='',null)};
   if(c==='history')return{v:_history.map((h,i)=>(i+1)+' '+h).join('\n')||'(empty)'};
-  if(c==='ls')return{p:fetch('/stages').then(r=>r.json()).then(d=>d.map(s=>s.name+'  (v'+s.version+')').join('\n')||'(no worlds)')};
+  if(c==='ls')return{p:fetch('/proc/worlds').then(r=>r.json()).then(d=>d.map(s=>s.name+'  (v'+s.version+')').join('\n')||'(no worlds)')};
   if(c==='whoami')return{p:fetch('/whoami').then(r=>r.text())};
 
   if(c==='cd'){
@@ -132,16 +132,16 @@ function parseCommand(input){
     const w=parts[i]||_cwd;
     if(!w)return{v:'usage: cat [-s|--safe] <world>'};
     if(mode==='source'){
-      return{p:fetch('/'+w+'/read').then(r=>r.json()).then(d=>d.stage_html||'(empty)')};
+      return{p:fetch('/home/'+w).then(r=>r.json()).then(d=>d.stage_html||'(empty)')};
     }
     if(mode==='safe'){
-      return{p:fetch('/'+w+'/read').then(r=>r.json()).then(d=>{
+      return{p:fetch('/home/'+w).then(r=>r.json()).then(d=>{
         if(!d.stage_html)return '(empty)';
         renderSafe(d.stage_html);
         return null;
       })};
     }
-    return{p:fetch('/'+w+'/read').then(r=>r.json()).then(d=>{
+    return{p:fetch('/home/'+w).then(r=>r.json()).then(d=>{
       if(!d.stage_html)return '(empty)';
       appendOut(previewSource(d.stage_html));
       appendOut('Render in root context? [y/n]','warn');
@@ -183,8 +183,8 @@ function parseCommand(input){
     const raw=input.slice(5).trim();
     const am=raw.match(/^(.+?)\s*>>\s*(\S+)$/);
     const wm=raw.match(/^(.+?)\s*>\s*(\S+)$/);
-    if(am)return{p:fetch('/'+am[2]+'/append',{method:'POST',body:am[1]}).then(r=>r.json())};
-    if(wm)return{p:fetch('/'+wm[2]+'/write',{method:'POST',body:wm[1]}).then(r=>r.json())};
+    if(am)return{p:fetch('/home/'+am[2],{method:'POST',body:am[1]}).then(r=>r.json())};
+    if(wm)return{p:fetch('/home/'+wm[2],{method:'PUT',body:wm[1]}).then(r=>r.json())};
     return{v:raw};
   }
 

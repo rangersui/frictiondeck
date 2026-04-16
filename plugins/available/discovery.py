@@ -164,7 +164,7 @@ async def _tick():
                   for ip, p in _known.items()},
         "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    payload = "<!--use:renderer-discovery-->\n" + json.dumps(snap)
+    payload = "<!--use:usr/lib/renderer/discovery-->\n" + json.dumps(snap)
     c = conn("discovery")
     old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
     if old is None or old["stage_html"] != payload:
@@ -182,7 +182,7 @@ async def handle_peers(method, body, params):
 
 
 async def handle_trust(method, body, params):
-    """Add a discovered peer to config-endpoints."""
+    """Add a discovered peer to etc/endpoints."""
     try:
         req = json.loads(body) if body else {}
     except (json.JSONDecodeError, TypeError):
@@ -195,7 +195,7 @@ async def handle_trust(method, body, params):
         return {"error": "ip required"}
     url = f"http://{ip}:{port}"
     # Read current endpoints
-    c = conn("config-endpoints")
+    c = conn("etc/endpoints")
     row = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
     try:
         endpoints = json.loads(row["stage_html"]) if row and row["stage_html"] else {}

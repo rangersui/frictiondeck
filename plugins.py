@@ -113,10 +113,10 @@ def load_plugin(name):
         # Auto-create skills world from plugin SKILL field
         skill_doc = ns.get("SKILL", "")
         if skill_doc:
-            c = server.conn(f"skills-{name.replace('_', '-')}")
+            c = server.conn(f"usr/lib/skills/{name.replace('_', '-')}")
             c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (skill_doc,))
             c.commit()
-            print(f"  skill: skills-{name.replace('_', '-')}")
+            print(f"  skill: usr/lib/skills/{name.replace('_', '-')}")
         # Auto-register cron task
         if "CRON" in ns and "CRON_HANDLER" in ns:
             _cron_tasks[name] = {"interval": int(ns["CRON"]), "handler": ns["CRON_HANDLER"], "last_run": time.time()}
@@ -138,9 +138,9 @@ def unload_plugin(name):
     if name == "auth" or "auth" in meta.get("description", "").lower(): server._auth = None
     _sync_actions_remove(name, meta["routes"])
     # Auto-clear skills world
-    skill_world = f"skills-{name.replace('_', '-')}"
+    skill_world = f"usr/lib/skills/{name.replace('_', '-')}"
     try:
-        if (server.DATA / skill_world).exists():
+        if (server.DATA / server._disk_name(skill_world)).exists():
             c = server.conn(skill_world)
             c.execute("UPDATE stage_meta SET stage_html='',version=version+1,updated_at=datetime('now') WHERE id=1")
             c.commit()
@@ -152,10 +152,10 @@ def unload_plugin(name):
 
 
 def _sync_actions_add(name):
-    """Register a plugin's routes in config-actions whitelist."""
+    """Register a plugin's routes in etc/actions whitelist."""
     meta = next((m for m in server._plugin_meta if m["name"] == name), None)
     if not meta or not meta["routes"]: return
-    c = server.conn("config-actions")
+    c = server.conn("etc/actions")
     old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
     existing = set(l.strip() for l in old.splitlines() if l.strip())
     added = [r for r in meta["routes"] if r not in existing]
@@ -166,10 +166,10 @@ def _sync_actions_add(name):
 
 
 def _sync_actions_remove(name, routes):
-    """Remove a plugin's routes from config-actions whitelist."""
+    """Remove a plugin's routes from etc/actions whitelist."""
     if not routes: return
     try:
-        c = server.conn("config-actions")
+        c = server.conn("etc/actions")
         old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
         remove = set(routes)
         lines = [l for l in old.splitlines() if l.strip() and l.strip() not in remove]
