@@ -16,7 +16,7 @@ DESCRIPTION = "/opt/browser — Chrome via CDP. Screenshot, eval, click."
 AUTH = "approve"  # browser control is root-only
 ROUTES = {}
 
-import asyncio, base64, json, os, platform, secrets, socket, struct, subprocess
+import asyncio, base64, json, os, platform, secrets, socket, struct, subprocess, threading
 import urllib.request
 
 # ── CDP WebSocket client — stdlib only, ~50 lines ────────────────────
@@ -38,17 +38,29 @@ class CDP:
             buf += self.sock.recv(4096)
         if b"101" not in buf.split(b"\r\n")[0]:
             raise ConnectionError(f"WS handshake failed: {buf[:80]}")
-        self.sock.settimeout(10)
+        self.sock.settimeout(30)  # screenshots can be big
         self._id = 0
+        self._lock = threading.Lock()
 
     def send(self, method, params=None):
-        self._id += 1
-        mid = self._id
-        msg = json.dumps({"id": mid, "method": method, "params": params or {}}).encode()
+        with self._lock:
+            self._id += 1
+            mid = self._id
+            msg = json.dumps({"id": mid, "method": method, "params": params or {}}).encode()
+            self._ws_send(msg)
+            # recv until we get OUR response (skip CDP events)
+            while True:
+                r = self._recv_frame()
+                if r.get("id") == mid:
+                    if "error" in r:
+                        return {"error": r["error"].get("message", str(r["error"]))}
+                    return r.get("result", {})
+
+    def _ws_send(self, payload):
         mask = secrets.token_bytes(4)
-        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(msg))
+        masked = bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
         frame = bytes([0x81])
-        n = len(msg)
+        n = len(payload)
         if n < 126:
             frame += bytes([0x80 | n])
         elif n < 65536:
@@ -56,25 +68,25 @@ class CDP:
         else:
             frame += bytes([0x80 | 127]) + struct.pack(">Q", n)
         frame += mask + masked
-        self.sock.send(frame)
-        # recv until we get OUR response (skip CDP events)
-        while True:
-            r = self._recv()
-            if r.get("id") == mid:
-                if "error" in r:
-                    return {"error": r["error"].get("message", str(r["error"]))}
-                return r.get("result", {})
+        self.sock.sendall(frame)
 
-    def _recv(self):
-        h = self._readn(2)
-        n = h[1] & 0x7F
-        if n == 126:
-            n = struct.unpack(">H", self._readn(2))[0]
-        elif n == 127:
-            n = struct.unpack(">Q", self._readn(8))[0]
-        if h[1] & 0x80:
-            self._readn(4)  # server shouldn't mask, but tolerate
-        return json.loads(self._readn(n))
+    def _recv_frame(self):
+        """Read one logical message. Handles continuation frames (fragmentation)."""
+        buf = b""
+        while True:
+            h = self._readn(2)
+            fin = h[0] & 0x80
+            n = h[1] & 0x7F
+            if n == 126:
+                n = struct.unpack(">H", self._readn(2))[0]
+            elif n == 127:
+                n = struct.unpack(">Q", self._readn(8))[0]
+            if h[1] & 0x80:
+                self._readn(4)  # server shouldn't mask, but tolerate
+            buf += self._readn(n)
+            if fin:
+                break
+        return json.loads(buf)
 
     def _readn(self, n):
         buf = b""
@@ -142,7 +154,15 @@ async def handle_open(method, body, params):
             try:
                 targets = json.loads(urllib.request.urlopen(
                     f"http://127.0.0.1:{_CDP_PORT}/json", timeout=1).read())
-                _cdp = CDP(targets[0]["webSocketDebuggerUrl"])
+                page = next((t for t in targets if t.get("type") == "page"), None)
+                if not page:
+                    # no page tab — create one
+                    urllib.request.urlopen(f"http://127.0.0.1:{_CDP_PORT}/json/new")
+                    await asyncio.sleep(0.5)
+                    targets = json.loads(urllib.request.urlopen(
+                        f"http://127.0.0.1:{_CDP_PORT}/json", timeout=1).read())
+                    page = next((t for t in targets if t.get("type") == "page"), targets[0])
+                _cdp = CDP(page["webSocketDebuggerUrl"])
                 _cdp.send("Page.enable")
                 break
             except Exception:
