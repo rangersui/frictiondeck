@@ -269,6 +269,26 @@ def _check_auth_token(scope):
     if not AUTH_TOKEN: return True  # no token configured = open
     return _check_auth(scope) is not None
 
+def _ls(prefix):
+    """List immediate children under a world-name prefix. Like ls.
+    prefix="" → top-level names. prefix="photos" → children of photos/.
+    Returns sorted list of (child_name, is_dir) tuples."""
+    all_names = []
+    if DATA.exists():
+        for d in sorted(DATA.iterdir()):
+            if d.is_dir() and (d / "universe.db").exists():
+                all_names.append(_logical_name(d.name))
+    children = {}
+    pfx = prefix + "/" if prefix else ""
+    for w in all_names:
+        if pfx and not w.startswith(pfx): continue
+        rest = w[len(pfx):] if pfx else w
+        if "/" in rest:
+            children[rest.split("/")[0]] = True   # directory
+        else:
+            children[rest] = False                 # file
+    return sorted(children.items())
+
 def _match_plugin(base_path):
     """Exact match first, then prefix match (longest wins).
     Returns (handler, matched_route) or (None, None)."""
@@ -282,7 +302,8 @@ def _match_plugin(base_path):
 
 async def app(scope, receive, send):
     if scope["type"] != "http": return
-    path = scope["path"].rstrip("/") or "/"; method = scope["method"]
+    _raw_path = scope["path"]; trailing_slash = _raw_path.endswith("/") and len(_raw_path) > 1
+    path = _raw_path.rstrip("/") or "/"; method = scope["method"]
     try: print(f"  {method} {path}")
     except UnicodeEncodeError: print(f"  {method} {ascii(path)}")
     # Auth gate — if a plugin sets _auth, it can intercept any request.
@@ -313,7 +334,10 @@ async def app(scope, receive, send):
             if k == b"accept": accept = v.decode(); break
         if accept.startswith("text/html"):
             return await send_r(send, 200, INDEX, "text/html", csp=True)
-        return await send_r(send, 200, json.dumps(bins))
+        if "json" in accept:
+            return await send_r(send, 200, json.dumps(bins))
+        # plain text — one per line, pipe-friendly (curl | grep)
+        return await send_r(send, 200, "\n".join(b["route"].lstrip("/") for b in bins) + "\n", "text/plain")
     if path.startswith("/bin/"):
         path = path[4:]  # /bin/grep → /grep
         base_path_override = path.split("?")[0]
@@ -443,15 +467,40 @@ async def app(scope, receive, send):
         (DATA / _disk_name(name)).rename(trash)
         return await send_r(send, 200, json.dumps({"deleted": name}))
 
-    # World routes — HTTP method IS the action. No /read /write /append suffixes.
-    #   GET    /home/foo       → read (Accept: text/html → index.html, else → JSON)
-    #   GET    /home/foo?raw   → raw bytes with correct Content-Type
-    #   PUT    /home/foo       → overwrite content
-    #   POST   /home/foo       → append content
-    #   DELETE /home/foo       → handled above
-    # Internal ops (iframe protocol) keep sub-paths: /sync /pending /result /clear
+    # Trailing slash on FHS paths = ls (list children). Like Unix: cd dir/ vs cat file.
+    # GET /home/       → ls all user worlds
+    # GET /etc/        → ls config worlds
+    # GET /home/photos/→ ls worlds under photos/
     _FHS = {"home", "etc", "usr", "var", "boot"}
     _INTERNAL = {"sync", "pending", "result", "clear"}
+    if method == "GET" and len(parts) >= 1 and parts[0] in _FHS and trailing_slash:
+        # Determine world-name prefix for ls
+        if parts[0] == "home":
+            ls_prefix = "/".join(parts[1:])  # "home" → "", "home/photos" → "photos"
+            # Only show non-system worlds
+            entries = [(n, d) for n, d in _ls(ls_prefix)
+                       if not any(n.startswith(p) for p in ("etc/","usr/","var/","boot/"))]
+        else:
+            ls_prefix = "/".join(parts)  # "etc" → "etc", "usr/lib" → "usr/lib"
+            entries = _ls(ls_prefix)
+        accept = ""
+        for k, v in scope.get("headers", []):
+            if k == b"accept": accept = v.decode(); break
+        if accept.startswith("text/html"):
+            return await send_r(send, 200, INDEX, "text/html", csp=True)
+        if "json" in accept:
+            return await send_r(send, 200, json.dumps([{"name": n, "dir": d} for n, d in entries]))
+        # plain text — one per line. dirs get trailing /
+        lines = [(n + "/" if d else n) for n, d in entries]
+        return await send_r(send, 200, "\n".join(lines) + "\n" if lines else "", "text/plain")
+
+    # World routes — HTTP method IS the action.
+    #   GET    /home/foo       → read content (no trailing slash)
+    #   GET    /home/foo?raw   → raw bytes
+    #   PUT    /home/foo       → overwrite
+    #   POST   /home/foo       → append
+    #   DELETE /home/foo       → handled above
+    # If world doesn't exist but children do → 302 redirect to path/
     if len(parts) >= 2 and parts[0] in _FHS:
         # Parse: is last segment an internal op, or part of the world name?
         if len(parts) >= 3 and parts[-1] in _INTERNAL:
@@ -496,6 +545,10 @@ async def app(scope, receive, send):
                 if _check_auth(scope) != "approve":
                     return await send_r(send, 403, '{"error":"read requires approve"}')
             if not (DATA / _disk_name(name) / "universe.db").exists():
+                # World doesn't exist — check if it's a prefix with children → 302 to ls
+                children = _ls(name if parts[0] != "home" else "/".join(parts[1:]))
+                if children:
+                    return await send_r(send, 302, "", extra_headers=[[b"location", (path + "/").encode()]])
                 return await send_r(send, 404, '{"error":"world not found"}')
             # ?raw → raw bytes with correct Content-Type
             if "raw" in params or "raw" in qs.split("&"):
