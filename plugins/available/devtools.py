@@ -427,6 +427,55 @@ async def handle_fuse(method, body, params):
     return {"type": "FUSE", "rating": _num(params.get("a"), 15), "unit": "A"}
 
 
+# ── /flush — progressive erasure ─────────────────────────────────────
+# Flushing is streaming, not atomic. You watch it go.
+
+def _write_stage(world, content):
+    """Write to a world, bump version. SSE viewers see it live."""
+    db = _DATA / _disk_name(world) / "universe.db"
+    c = sqlite3.connect(str(db))
+    c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,"
+              "updated_at=datetime('now') WHERE id=1", (content,))
+    c.commit(); c.close()
+
+
+async def handle_flush(method, body, params):
+    """/flush?world=toilet — progressive flush. Open /stream/toilet in
+    another tab and watch. Each stage is a real write; SSE delivers it.
+
+    Flushing is streaming, not atomic. You see every moment.
+    """
+    world = params.get("world", "")
+    if not world:
+        world = (body if isinstance(body, str) else body.decode()).strip()
+    if not world:
+        return {"_html": "flush what?\nPOST /flush?world=name", "_status": 400}
+    content = _read_stage(world)
+    if content is None:
+        return {"_html": "nothing to flush (world not found)", "_status": 404}
+    if not content.strip():
+        return {"_html": "\u2728", "_status": 200}
+    # --- the flush ---
+    chars = list(content)
+    n = len(chars)
+    # Phase 1: water rises. replace chars bottom-up with droplets.
+    steps = min(n, 12)
+    for step in range(1, steps + 1):
+        cutoff = n - int(n * step / steps)
+        stage = chars[:cutoff] + ["\U0001f4a7"] * (n - cutoff)
+        _write_stage(world, "".join(stage))
+        await asyncio.sleep(0.08)
+    # Phase 2: water drains. remove droplets one by one.
+    drops = n
+    while drops > 0:
+        drops = max(0, drops - max(1, drops // 3))
+        _write_stage(world, "\U0001f4a7" * drops if drops else "\u2728")
+        await asyncio.sleep(0.08)
+    # Phase 3: clean.
+    _write_stage(world, "\u2728")
+    return {"_html": "\u2728", "_status": 200}
+
+
 _COW = r"""
  {border}
 < {msg} >
@@ -1179,6 +1228,7 @@ ROUTES = {
     "/mosfet": handle_mosfet,
     "/relay": handle_relay,
     "/fuse": handle_fuse,
+    "/flush": handle_flush,
     "/wc-c": handle_wc_c,
     "/full": handle_full,
     "/time": handle_time,
