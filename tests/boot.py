@@ -5,7 +5,7 @@ Does this thing behave like a Linux box?
 Boot up, poke every subsystem, report.
 
 Lives in the elastik world /home/boot. Run it:
-  curl -s localhost:3005/home/boot/raw | python -X utf8 -
+  curl -s localhost:3005/home/boot?raw | python -X utf8 -
   python tests/boot.py
   python tests/boot.py http://remote:3005
 
@@ -102,58 +102,58 @@ check("/proc/worlds → array", isinstance(worlds, list) and len(worlds) >= 0)
 # ═══════════════════════════════════════════════════════════════
 print(f"\n\033[1m/home — user worlds\033[0m\n")
 
-st, _ = _req("/home/boot-test/write?ext=txt", "POST", "boot test data",
+st, _ = _req("/home/boot-test?ext=txt", "PUT", "boot test data",
              auth=f"Bearer {TOKEN}")
 check("write /home (T2)", st == 200, f"st={st}")
 
-st, body = _req("/home/boot-test/read")
+st, body = _req("/home/boot-test")
 d = j(body)
 check("read /home → content", d.get("stage_html") == "boot test data")
 check("read /home → ext", d.get("ext") == "txt")
 check("read /home → version", d.get("version", 0) > 0)
 
 v = d.get("version", 0)
-st, _ = _req(f"/home/boot-test/read?v={v}")
+st, _ = _req(f"/home/boot-test?v={v}")
 check("304 when version matches", st == 304, f"st={st}")
 
-st, _ = _req("/home/boot-test/raw")
+st, _ = _req("/home/boot-test?raw")
 check("/home/raw → 200", st == 200)
 
-st, _ = _req("/home/boot-test/write", "POST", "no auth")
+st, _ = _req("/home/boot-test", "PUT", "no auth")
 check("write /home no auth → 403", st == 403, f"st={st}")
 
 # ═══════════════════════════════════════════════════════════════
 print(f"\n\033[1m/etc — config (T3 only write)\033[0m\n")
 
-st, _ = _req("/etc/boot-cfg/write", "POST", "test=1", auth=f"Bearer {TOKEN}")
+st, _ = _req("/etc/boot-cfg", "PUT", "test=1", auth=f"Bearer {TOKEN}")
 check("/etc write T2 → 403", st == 403, f"st={st}")
 
-st, _ = _req("/etc/boot-cfg/write", "POST", "test=1", auth=_auth(APPROVE))
+st, _ = _req("/etc/boot-cfg", "PUT", "test=1", auth=_auth(APPROVE))
 check("/etc write T3 → 200", st == 200, f"st={st}")
 
-st, body = _req("/etc/boot-cfg/read")
+st, body = _req("/etc/boot-cfg")
 check("/etc read → open", st == 200 and "test=1" in j(body).get("stage_html", ""))
 
 # shadow
-_req("/etc/shadow/write", "POST", "root:deadbeef", auth=_auth(APPROVE))
-st, _ = _req("/etc/shadow/read")
+_req("/etc/shadow", "PUT", "root:deadbeef", auth=_auth(APPROVE))
+st, _ = _req("/etc/shadow")
 check("/etc/shadow read (no auth) → 403", st == 403, f"st={st}")
 
-st, body = _req("/etc/shadow/read", auth=_auth(APPROVE))
+st, body = _req("/etc/shadow", auth=_auth(APPROVE))
 check("/etc/shadow read (T3) → 200", st == 200 and "deadbeef" in body, f"st={st}")
 
 # ═══════════════════════════════════════════════════════════════
 print(f"\n\033[1m/usr/lib — system worlds (T3 only write)\033[0m\n")
 
-st, _ = _req("/usr/lib/skills/boot-s/write?ext=md", "POST", "# test",
+st, _ = _req("/usr/lib/skills/boot-s?ext=md", "PUT", "# test",
              auth=_auth(APPROVE))
 check("/usr/lib write T3 → 200", st == 200, f"st={st}")
 
-st, _ = _req("/usr/lib/skills/boot-s/write?ext=md", "POST", "# test",
+st, _ = _req("/usr/lib/skills/boot-s?ext=md", "PUT", "# test",
              auth=f"Bearer {TOKEN}")
 check("/usr/lib write T2 → 403", st == 403, f"st={st}")
 
-st, _ = _req("/usr/lib/skills/boot-s/read")
+st, _ = _req("/usr/lib/skills/boot-s")
 check("/usr/lib read → open", st == 200)
 
 # ═══════════════════════════════════════════════════════════════
@@ -178,7 +178,7 @@ st, _ = _req("/dav/home/dav-boot.txt", "PUT", "dav wrote",
              auth=_auth(APPROVE))
 check("DAV PUT → 201", st == 201, f"st={st}")
 
-st, body = _req("/home/dav-boot/read")
+st, body = _req("/home/dav-boot")
 check("DAV write → /home readable", "dav wrote" in j(body).get("stage_html", ""))
 
 st, _ = _req("/dav/etc/shadow.txt")
@@ -200,7 +200,7 @@ try:
     with open(os.path.join(tmpdir, "hello.txt"), "w") as f:
         f.write("mounted!")
     fstab = f"{tmpdir}  /mnt/boottest  rw"
-    _req("/etc/fstab/write", "POST", fstab, auth=_auth(APPROVE))
+    _req("/etc/fstab", "PUT", fstab, auth=_auth(APPROVE))
 
     st, body = _req("/mnt/boottest/")
     d = j(body)
@@ -285,27 +285,27 @@ if events:
     check("SSE has water", "\U0001f4a7" in "".join(events))
     check("SSE ends clean", "\u2728" in events[-1], f"last={events[-1][:10]}")
 
-st, body = _req("/home/toilet/read")
+st, body = _req("/home/toilet")
 check("toilet → clean after flush", "\u2728" in j(body).get("stage_html", ""))
 
 # ═══════════════════════════════════════════════════════════════
 print(f"\n\033[1m=== THREE-TIER AUTH ===\033[0m\n")
 
 # T1
-st, _ = _req("/home/boot-test/read")
+st, _ = _req("/home/boot-test")
 check("T1 read → 200", st == 200)
-st, _ = _req("/home/boot-test/write", "POST", "x")
+st, _ = _req("/home/boot-test", "PUT", "x")
 check("T1 write → 403", st == 403, f"st={st}")
 
 # T2
-st, _ = _req("/home/boot-test/write?ext=txt", "POST", "t2",
+st, _ = _req("/home/boot-test?ext=txt", "PUT", "t2",
              auth=f"Bearer {TOKEN}")
 check("T2 /home write → 200", st == 200, f"st={st}")
-st, _ = _req("/etc/boot-cfg/write", "POST", "t2 etc", auth=f"Bearer {TOKEN}")
+st, _ = _req("/etc/boot-cfg", "PUT", "t2 etc", auth=f"Bearer {TOKEN}")
 check("T2 /etc write → 403", st == 403, f"st={st}")
 
 # T3
-st, _ = _req("/etc/boot-cfg/write", "POST", "t3", auth=_auth(APPROVE))
+st, _ = _req("/etc/boot-cfg", "PUT", "t3", auth=_auth(APPROVE))
 check("T3 /etc write → 200", st == 200, f"st={st}")
 
 # ═══════════════════════════════════════════════════════════════

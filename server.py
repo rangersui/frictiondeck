@@ -421,153 +421,155 @@ async def app(scope, receive, send):
         (DATA / _disk_name(name)).rename(trash)
         return await send_r(send, 200, json.dumps({"deleted": name}))
 
-    # World routes. Namespaces map to world names as follows:
-    #   /home/foo/read        →  world "foo"                  →  data/foo/              (user)
-    #   /etc/cdn/read         →  world "etc/cdn"              →  data/etc%2Fcdn/        (config)
-    #   /usr/lib/skills/s/read →  world "usr/lib/skills/s"    →  data/usr%2Flib%2F…/    (system)
-    # /home/ strips its prefix (user worlds stay flat on disk, back compat).
-    # /etc/ and /usr/ keep their prefixes in the world name (system worlds
-    # namespaced on disk).
-    _ACTIONS = {"read","raw","write","append","pending","result","clear","sync"}
-    if len(parts) >= 3 and parts[0] in ("home", "etc", "usr", "var", "boot") and parts[-1] in _ACTIONS:
-        action = parts[-1]
-        if parts[0] == "home":
-            name = "/".join(parts[1:-1])
+    # World routes — HTTP method IS the action. No /read /write /append suffixes.
+    #   GET    /home/foo       → read (Accept: text/html → index.html, else → JSON)
+    #   GET    /home/foo?raw   → raw bytes with correct Content-Type
+    #   PUT    /home/foo       → overwrite content
+    #   POST   /home/foo       → append content
+    #   DELETE /home/foo       → handled above
+    # Internal ops (iframe protocol) keep sub-paths: /sync /pending /result /clear
+    _FHS = {"home", "etc", "usr", "var", "boot"}
+    _INTERNAL = {"sync", "pending", "result", "clear"}
+    if len(parts) >= 2 and parts[0] in _FHS:
+        # Parse: is last segment an internal op, or part of the world name?
+        if len(parts) >= 3 and parts[-1] in _INTERNAL:
+            iop = parts[-1]
+            name = "/".join(parts[1:-1]) if parts[0] == "home" else parts[0] + "/" + "/".join(parts[1:-1])
         else:
-            name = parts[0] + "/" + "/".join(parts[1:-1])
+            iop = None
+            name = "/".join(parts[1:]) if parts[0] == "home" else "/".join(parts)
         if not _valid_name(name): return await send_r(send, 400, '{"error":"invalid world name"}')
-        # All mutations require POST
-        if action not in ("read", "raw") and method != "POST":
-            return await send_r(send, 405, '{"error":"method not allowed"}')
-        # Write auth: token for mutations, approve for system worlds (/etc/, /usr/)
-        if action in ("write", "append", "pending"):
+        qs = scope.get("query_string", b"").decode()
+        params = dict(x.split("=",1) for x in qs.split("&") if "=" in x) if qs else {}
+        # ── Auth gates ──
+        if method in ("PUT", "POST") and iop not in ("sync",):
             if name.startswith(("etc/", "usr/", "var/", "boot/")):
                 if _check_auth(scope) != "approve":
                     return await send_r(send, 403, '{"error":"system write requires approve"}')
             elif AUTH_TOKEN and _check_auth(scope) is None:
                 return await send_r(send, 403, '{"error":"unauthorized"}')
-        # Read auth: sensitive paths need T3.
-        # /etc/shadow — hashes leak who exists.
-        # /boot/* — contains tokens, port, plugin list. Read once at boot.
-        if action in ("read", "raw") and (name == "etc/shadow" or name.startswith("boot/")):
+        if method == "GET" and (name == "etc/shadow" or name.startswith("boot/")):
             if _check_auth(scope) != "approve":
                 return await send_r(send, 403, '{"error":"read requires approve"}')
-        # CSRF gate: browser-only actions check Origin (physics, not policy)
-        if action in ("sync", "result", "clear"):
+        # ── CSRF for internal ops ──
+        if iop:
+            if method != "POST":
+                return await send_r(send, 405, '{"error":"method not allowed"}')
             origin = ""
             for k, v in scope.get("headers", []):
                 if k == b"origin": origin = v.decode(); break
             if origin and not origin.startswith(("http://localhost", "http://127.0.0.1", "http://[::1]")):
                 return await send_r(send, 403, '{"error":"cross-origin rejected"}')
-        if method == "GET" and action == "read":
+        # ── GET: read / raw / browser ──
+        if method == "GET":
+            # Content negotiation: browser gets index.html, API gets JSON
+            accept = ""
+            for k, v in scope.get("headers", []):
+                if k == b"accept": accept = v.decode(); break
+            is_browser = accept.startswith("text/html")
             if not (DATA / _disk_name(name) / "universe.db").exists():
+                if is_browser: return await send_r(send, 200, INDEX, "text/html", csp=True)
                 return await send_r(send, 404, '{"error":"world not found"}')
+            # ?raw → raw bytes with correct Content-Type
+            if "raw" in params or "raw" in qs.split("&"):
+                c = conn(name)
+                r = c.execute("SELECT stage_html,ext FROM stage_meta WHERE id=1").fetchone()
+                body = r["stage_html"] or b""
+                if isinstance(body, str): body = body.encode("utf-8")
+                ext = r["ext"] or "plain"
+                ct = _ext_to_ct(ext)
+                total = len(body)
+                range_h = ""
+                for k, v in scope.get("headers", []):
+                    if k == b"range": range_h = v.decode(); break
+                if range_h.startswith("bytes="):
+                    rp = range_h[6:].split("-", 1)
+                    start = int(rp[0]) if rp[0] else 0
+                    end = int(rp[1]) if len(rp) > 1 and rp[1] else total - 1
+                    if start >= total: start = total - 1
+                    if end >= total: end = total - 1
+                    chunk = body[start:end+1]
+                    await send({"type":"http.response.start","status":206,"headers":[
+                        [b"content-type", ct.encode()],
+                        [b"content-range", f"bytes {start}-{end}/{total}".encode()],
+                        [b"content-length", str(len(chunk)).encode()],
+                        [b"accept-ranges", b"bytes"]]})
+                    await send({"type":"http.response.body","body":chunk})
+                else:
+                    await send({"type":"http.response.start","status":200,"headers":[
+                        [b"content-type", ct.encode()],
+                        [b"content-length", str(total).encode()],
+                        [b"accept-ranges", b"bytes"]]})
+                    await send({"type":"http.response.body","body":body})
+                return
+            if is_browser: return await send_r(send, 200, INDEX, "text/html", csp=True)
+            # JSON read
             c = conn(name)
             r = c.execute("SELECT stage_html,pending_js,js_result,version,ext FROM stage_meta WHERE id=1").fetchone()
-            # 304: client sends ?v=N from last poll → skip body if unchanged
-            qs = scope.get("query_string", b"").decode()
-            for p in qs.split("&"):
-                if p.startswith("v="):
-                    try:
-                        if int(p[2:]) == r["version"]:
-                            return await send_r(send, 304, "")
-                    except ValueError: pass
-                    break
-            # Normalize: stage_html might be bytes (binary content) or str
+            cv = params.get("v")
+            if cv:
+                try:
+                    if int(cv) == r["version"]: return await send_r(send, 304, "")
+                except ValueError: pass
             raw = r["stage_html"] or ""
             if isinstance(raw, bytes):
                 try: raw = raw.decode("utf-8")
-                except UnicodeDecodeError: raw = ""  # binary — use /raw
+                except UnicodeDecodeError: raw = ""
             ext = r["ext"] or "html"
             return await send_r(send, 200, json.dumps({
                 "stage_html": raw, "pending_js": r["pending_js"] or "",
                 "js_result": r["js_result"] or "", "version": r["version"],
                 "ext": ext, "type": ext}))
-        if method == "GET" and action == "raw":
-            if not (DATA / _disk_name(name) / "universe.db").exists():
-                return await send_r(send, 404, '{"error":"world not found"}')
+        # ── PUT: overwrite ──
+        if method == "PUT":
             c = conn(name)
-            r = c.execute("SELECT stage_html,ext FROM stage_meta WHERE id=1").fetchone()
-            body = r["stage_html"] or b""
-            if isinstance(body, str): body = body.encode("utf-8")
-            ext = r["ext"] or "plain"
-            ct = _ext_to_ct(ext)
-            total = len(body)
-            # Range header — lets TVs fast-forward, browsers seek, AirPlay work
-            range_h = ""
-            for k, v in scope.get("headers", []):
-                if k == b"range": range_h = v.decode(); break
-            if range_h.startswith("bytes="):
-                parts = range_h[6:].split("-", 1)
-                start = int(parts[0]) if parts[0] else 0
-                end = int(parts[1]) if len(parts) > 1 and parts[1] else total - 1
-                if start >= total: start = total - 1
-                if end >= total: end = total - 1
-                chunk = body[start:end+1]
-                await send({"type":"http.response.start","status":206,"headers":[
-                    [b"content-type", ct.encode()],
-                    [b"content-range", f"bytes {start}-{end}/{total}".encode()],
-                    [b"content-length", str(len(chunk)).encode()],
-                    [b"accept-ranges", b"bytes"]]})
-                await send({"type":"http.response.body","body":chunk})
+            req_ext = params.get("ext")
+            try: body_bytes = await recv(receive)
+            except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
+            if req_ext and req_ext in _BINARY_EXT:
+                b = body_bytes
             else:
-                await send({"type":"http.response.start","status":200,"headers":[
-                    [b"content-type", ct.encode()],
-                    [b"content-length", str(total).encode()],
-                    [b"accept-ranges", b"bytes"]]})
-                await send({"type":"http.response.body","body":body})
-            return
-        c = conn(name)
-        # Check ?ext= early — binary exts skip text decode
-        req_ext = None
-        qs = scope.get("query_string", b"").decode()
-        for p in qs.split("&"):
-            if p.startswith("ext="):
-                req_ext = p[4:].lower().strip() or None
-                break
-        try:
-            body_bytes = await recv(receive)
-        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
-        if req_ext and req_ext in _BINARY_EXT:
-            b = body_bytes  # raw bytes for binary content
-        else:
-            b = body_bytes.decode("utf-8", "replace")
-            b = _extract(b, action)
-        # Determine ext
-        if action in ("write","append","sync"):
+                b = body_bytes.decode("utf-8", "replace")
+                b = _extract(b, "write")
             cur = c.execute("SELECT ext FROM stage_meta WHERE id=1").fetchone()
             cur_ext = (cur["ext"] if cur else "plain") or "plain"
-            if action == "write":
-                new_ext = req_ext
-                if not new_ext and isinstance(b, str):
-                    new_ext = _infer_type(b)
-                elif not new_ext:
-                    new_ext = cur_ext
-            else:
-                new_ext = cur_ext  # append/sync preserve ext
-            # Type gate: html worlds require approve token
-            if (cur_ext == 'html' or new_ext == 'html') and _check_auth(scope) != "approve":
-                return await send_r(send, 403, '{"error":"html write requires approve-level auth"}')
-        if action == "write":
+            new_ext = req_ext or (_infer_type(b) if isinstance(b, str) else cur_ext)
+            if (cur_ext == "html" or new_ext == "html") and _check_auth(scope) != "approve":
+                return await send_r(send, 403, '{"error":"html write requires approve"}')
             c.execute("UPDATE stage_meta SET stage_html=?,ext=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b, new_ext)); c.commit()
             log_event(name, "stage_written", {"len": len(b), "ext": new_ext})
             return await send_r(send, 200, json.dumps({"version": c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"], "ext": new_ext, "type": new_ext}))
-        if action == "append":
+        # ── POST: append or internal op ──
+        if method == "POST":
+            c = conn(name)
+            try: body_bytes = await recv(receive)
+            except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
+            b = body_bytes.decode("utf-8", "replace")
+            if iop == "sync":
+                c.execute("UPDATE stage_meta SET stage_html=?,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
+                return await send_r(send, 200, '{"ok":true}')
+            if iop == "pending":
+                c.execute("UPDATE stage_meta SET pending_js=?,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
+                return await send_r(send, 200, '{"ok":true}')
+            if iop == "result":
+                c.execute("UPDATE stage_meta SET js_result=?,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
+                return await send_r(send, 200, '{"ok":true}')
+            if iop == "clear":
+                c.execute("UPDATE stage_meta SET pending_js='',js_result='',updated_at=datetime('now') WHERE id=1"); c.commit()
+                return await send_r(send, 200, '{"ok":true}')
+            # Append
+            req_ext = params.get("ext")
+            if req_ext and req_ext in _BINARY_EXT:
+                b = body_bytes
+            else:
+                b = _extract(b, "append")
+            cur = c.execute("SELECT ext FROM stage_meta WHERE id=1").fetchone()
+            cur_ext = (cur["ext"] if cur else "plain") or "plain"
+            if (cur_ext == "html") and _check_auth(scope) != "approve":
+                return await send_r(send, 403, '{"error":"html write requires approve"}')
             c.execute("UPDATE stage_meta SET stage_html=stage_html||?,version=version+1,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
             log_event(name, "stage_appended", {"len": len(b)})
             return await send_r(send, 200, json.dumps({"version": c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]}))
-        if action == "sync":
-            c.execute("UPDATE stage_meta SET stage_html=?,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
-            return await send_r(send, 200, '{"ok":true}')
-        if action == "pending":
-            c.execute("UPDATE stage_meta SET pending_js=?,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
-            return await send_r(send, 200, '{"ok":true}')
-        if action == "result":
-            c.execute("UPDATE stage_meta SET js_result=?,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
-            return await send_r(send, 200, '{"ok":true}')
-        if action == "clear":
-            c.execute("UPDATE stage_meta SET pending_js='',js_result='',updated_at=datetime('now') WHERE id=1"); c.commit()
-            return await send_r(send, 200, '{"ok":true}')
 
     if method == "GET": return await send_r(send, 200, INDEX, "text/html", csp=True)
     await send_r(send, 404, '{"error":"not found"}')

@@ -36,17 +36,21 @@ Every path is a world. Writing to a new path creates it. FHS layout:
 ## API
 
 ```
-GET    /home/{name}/read     read content + version
-GET    /home/{name}/raw      raw bytes with correct Content-Type
-POST   /home/{name}/write    overwrite content (version++)
-POST   /home/{name}/append   append to content (version++)
-DELETE /home/{name}          delete world (approve token required)
-GET    /proc/worlds          list all worlds
+GET    /home/{name}           read content + version (JSON)
+GET    /home/{name}?raw       raw bytes with correct Content-Type
+PUT    /home/{name}           overwrite content (version++)
+POST   /home/{name}           append to content (version++)
+DELETE /home/{name}           delete world (approve token required)
+GET    /proc/worlds           list all worlds
 ```
 
-Polling: `GET /home/{name}/read?v=3` → returns 304 if version unchanged.
+HTTP method IS the action. No `/read` `/write` suffixes.
 
-Binary: `POST /home/{name}/write?ext=png` with raw bytes. `GET /home/{name}/raw` serves it back as `image/png`.
+Polling: `GET /home/{name}?v=3` → returns 304 if version unchanged.
+
+Binary: `PUT /home/{name}?ext=png` with raw bytes. `GET /home/{name}?raw` serves it back as `image/png`.
+
+Content negotiation: browser (`Accept: text/html`) gets the app. curl gets JSON.
 
 ## Auth
 
@@ -148,7 +152,7 @@ Different keys. Not "shouldn't." **Can't.**
 ## Connect AI
 
 ```bash
-curl -X POST http://localhost:3005/home/work/write \
+curl -X PUT http://localhost:3005/home/work \
   -H "Authorization: Bearer $TOKEN" \
   -d '<h1>hello world</h1>'
 ```

@@ -60,15 +60,15 @@ def main():
             sys.exit(1)
         return body_out
 
-    # Reset
-    request("POST", f"/home/{world}/write?ext={ext}", b"")
+    # Reset (PUT = overwrite)
+    request("PUT", f"/home/{world}?ext={ext}", b"")
     print(f"[reset] world '{world}' cleared")
 
     sent = 0
     t0 = time.time()
     for i in range(0, len(data), args.chunk):
         chunk = data[i:i + args.chunk]
-        request("POST", f"/home/{world}/append?ext={ext}", chunk)
+        request("POST", f"/home/{world}?ext={ext}", chunk)  # POST = append
         sent += len(chunk)
         pct = sent * 100 / len(data)
         # Flush stdout so progress shows as it happens

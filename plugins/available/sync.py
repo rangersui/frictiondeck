@@ -55,13 +55,13 @@ def _read_config():
     return peers, whitelist
 
 
-def _http(url, token=None, data=None, timeout=3):
-    """Zero-dep HTTP. GET if data is None, POST otherwise."""
+def _http(url, token=None, data=None, timeout=3, method=None):
+    """Zero-dep HTTP. GET if data is None, else method (default POST)."""
     headers = {"Content-Type": "text/plain"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
     body = data.encode("utf-8") if data else None
-    req = urllib.request.Request(url, data=body, headers=headers)
+    req = urllib.request.Request(url, data=body, headers=headers, method=method or ("GET" if body is None else "POST"))
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.loads(r.read())
 
@@ -81,7 +81,7 @@ def _do_sync():
             continue
         pr = {"status": "ok", "pulled": [], "pushed": [], "skipped": 0}
         try:
-            remote_stages = _http(f"{url}/stages", token)
+            remote_stages = _http(f"{url}/proc/worlds", token)
             remote_versions = {s["name"]: s["version"] for s in remote_stages}
 
             for world in whitelist:
@@ -93,7 +93,7 @@ def _do_sync():
 
                 if remote_v > local_v:
                     # Pull: remote is newer
-                    remote_data = _http(f"{url}/{world}/read", token)
+                    remote_data = _http(f"{url}/home/{world}", token)
                     content = remote_data.get("stage_html", "")
                     local.execute(
                         "UPDATE stage_meta SET stage_html=?,version=?,updated_at=datetime('now') WHERE id=1",
@@ -104,7 +104,7 @@ def _do_sync():
                 elif local_v > remote_v:
                     # Push: local is newer
                     content = local_row["stage_html"]
-                    _http(f"{url}/{world}/write", token, data=content)
+                    _http(f"{url}/home/{world}", token, data=content, method="PUT")
                     log_event(world, "sync_pushed", {"to": peer_name, "version": local_v})
                     pr["pushed"].append(world)
                 else:
