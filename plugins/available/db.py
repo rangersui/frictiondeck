@@ -25,6 +25,45 @@ def _disk_name(name):
     return name.replace("/", "%2F")
 
 
+def _resolve_mnt(file_path):
+    """Resolve a file path like 'brave/History' against fstab mounts.
+    Returns absolute Path if allowed, None if not under any mount."""
+    # Read etc/fstab for mount definitions
+    fstab_db = _DATA / "etc%2Ffstab" / "universe.db"
+    if not fstab_db.exists():
+        return None
+    try:
+        c = sqlite3.connect(str(fstab_db))
+        c.row_factory = sqlite3.Row
+        raw = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
+        c.close()
+    except Exception:
+        return None
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    # Parse fstab: local_path  /mnt/name  mode
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.rsplit(None, 2)
+        if len(parts) < 3:
+            continue
+        local_path, mount_point, _ = parts
+        name = mount_point.replace("/mnt/", "").strip("/")
+        if not name:
+            continue
+        # Check if file_path starts with this mount name
+        if file_path.startswith(name + "/") or file_path == name:
+            rest = file_path[len(name):].lstrip("/")
+            full = os.path.normpath(os.path.join(local_path, rest))
+            # Traversal check
+            if not full.startswith(os.path.normpath(local_path)):
+                return None
+            return Path(full)
+    return None
+
+
 async def handle_db(method, body, params):
     """/dev/db — SELECT-only SQL. Read-only connection. Bounded."""
     sql = (body if isinstance(body, str) else body.decode("utf-8", "replace")).strip()
@@ -38,21 +77,24 @@ async def handle_db(method, body, params):
 
     # Which database?
     world = params.get("world", "")
-    if world:
+    file_path = params.get("file", "")  # for /mnt/ paths
+    if file_path:
+        # External file — must be under a fstab mount (read etc/fstab)
+        db_path = _resolve_mnt(file_path)
+        if not db_path:
+            return {"error": "file not under any fstab mount", "_status": 403}
+        if not db_path.exists():
+            return {"error": f"file not found: {file_path}", "_status": 404}
+    elif world:
         db_path = _DATA / _disk_name(world) / "universe.db"
         if not db_path.exists():
             return {"error": f"world not found: {world}", "_status": 404}
     else:
-        # No world specified — list what's available
-        return {"error": "specify ?world=name. Available: " +
-                ", ".join(sorted(d.name.replace("%2F", "/")
-                         for d in _DATA.iterdir()
-                         if d.is_dir() and (d / "universe.db").exists())[:20]),
-                "_status": 400}
+        return {"error": "specify ?world=name or ?file=mount/path/to.db", "_status": 400}
 
     # Suspenders: read-only connection
     try:
-        c = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
+        c = sqlite3.connect(f"file:{db_path}?mode=ro&immutable=1", uri=True, timeout=2.0)
         c.row_factory = sqlite3.Row
         rows = c.execute(sql).fetchmany(1000)
         result = [dict(r) for r in rows]
