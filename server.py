@@ -1,6 +1,8 @@
 """elastik — the protocol. Core routes only; everything else is a plugin."""
-import asyncio, base64, hashlib, hmac as _hmac, json, os, re, shutil, sqlite3, sys
+import asyncio, base64, hashlib, hmac as _hmac, json, os, re, shutil, sqlite3, sys, time
 from pathlib import Path
+VERSION = "4"
+_BOOT = time.time()
 if __name__ == "__main__": sys.modules["server"] = sys.modules[__name__]
 
 DATA = Path("data")
@@ -393,6 +395,17 @@ async def app(scope, receive, send):
                     r = conn(name).execute("SELECT version,updated_at FROM stage_meta WHERE id=1").fetchone()
                     stages.append({"name": name, "version": r["version"], "updated_at": r["updated_at"]})
         return await send_r(send, 200, json.dumps(stages))
+    # /proc/uptime, /proc/version, /proc/status — Unix-style introspection
+    if method == "GET" and path == "/proc/uptime":
+        return await send_r(send, 200, f"{int(time.time() - _BOOT)}\n", "text/plain")
+    if method == "GET" and path == "/proc/version":
+        return await send_r(send, 200, f"{VERSION}\n", "text/plain")
+    if method == "GET" and path == "/proc/status":
+        n = sum(1 for d in DATA.iterdir()
+                if d.is_dir() and (d / "universe.db").exists()) if DATA.exists() else 0
+        return await send_r(send, 200, json.dumps({
+            "pid": os.getpid(), "uptime": int(time.time() - _BOOT),
+            "worlds": n, "plugins": len(_plugin_meta), "version": VERSION}))
 
     # DELETE /home/{name} → approve only → move to .trash
     if method == "DELETE" and len(parts) >= 2 and parts[0] == "home":

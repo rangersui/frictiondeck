@@ -4,6 +4,12 @@ fetch('/grep?q=error').then(r=>r.json())  → grep
   .then(ws=>fetch('/tail?world='+ws[0]+'&n=5')).then(r=>r.text())  → tail
   .then(t=>__elastik.sync(t))  → write back
 
+Text-processing routes (grep/head/tail/wc) duplicate what a DAV mount
+gives you for free: `grep -r NEEDLE /mnt/elastik/home/*.txt`. They're
+kept for curl callers, AI agents, and quick scripts — but the native
+Unix tools on a mounted /dav/ are the better path when you have a
+shell handy.
+
 Not loaded by default. Load with: POST /admin/load  body=devtools
 """
 DESCRIPTION = "Unix pipe primitives + cave primitives (stone/fire+ash/wall/drum/trail/hunt/tomb/bones/river/soil/knot/shadow/amber/eclipse/narcissus) — grep (-l), tail, head, wc (-c), rev, echo, null, full, true, false, yes, cowsay, moaisay, stone, fire, ash, wall, drum, trail, hunt, tomb, bones, river, soil, knot, shadow, amber, eclipse, narcissus, health, db/size, whoami, uuid, verify, delay, bench, config/dump, time"
