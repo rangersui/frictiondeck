@@ -106,7 +106,7 @@ def wait_for_server(port, timeout=10):
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            urllib.request.urlopen(f"http://127.0.0.1:{port}/stages", timeout=1)
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/proc/worlds", timeout=1)
             return True
         except Exception:
             time.sleep(0.3)
@@ -452,7 +452,7 @@ def _run_devtools_tests(port, label, token=""):
     _grep_world = "grep-integration-test"
     _grep_content = "line one alpha\nline two NEEDLE beta\nline three gamma"
     # Write test data
-    st, _ = http_post(port, f"/{_grep_world}/write", _grep_content, token=token)
+    st, _ = http_post(port, f"/home/{_grep_world}/write", _grep_content, token=token)
     if st == 200:
         # grep default mode: line-level matches (world:lineno:content)
         st, body = http_get(port, "/grep?q=NEEDLE")
@@ -509,59 +509,67 @@ def _run_auth_tests(port, label, token, approve):
     """Auth enforcement tests — server.py core write gate."""
 
     # GET always open
-    st, _ = http_get(port, "/stages")
-    test(f"{label} auth: GET /stages open", st == 200, f"status={st}")
+    st, _ = http_get(port, "/proc/worlds")
+    test(f"{label} auth: GET /proc/worlds open", st == 200, f"status={st}")
 
     # Write without token -> 403
-    st, _ = http_post(port, "/authtest/write", "x")
+    st, _ = http_post(port, "/home/authtest/write", "x")
     test(f"{label} auth: write no token -> 403", st == 403, f"status={st}")
 
     # Write with wrong token -> 403
-    st, _ = http_post(port, "/authtest/write", "x", token="wrong-token")
+    st, _ = http_post(port, "/home/authtest/write", "x", token="wrong-token")
     test(f"{label} auth: write wrong token -> 403", st == 403, f"status={st}")
 
     # Write with correct token -> 200
-    st, _ = http_post(port, "/authtest/write", "hello", token=token)
+    st, _ = http_post(port, "/home/authtest/write", "hello", token=token)
     test(f"{label} auth: write correct token -> 200", st == 200, f"status={st}")
 
-    st, body = http_get(port, "/authtest/read")
+    st, body = http_get(port, "/home/authtest/read")
     test(f"{label} auth: read -> data persisted", st == 200 and "hello" in body,
          f"status={st} body={body[:60]}")
 
-    # ── config-* worlds require approve ──
+    # ── /etc/* worlds require approve ──
 
-    st, _ = http_post(port, "/config-test/write", "data", token=token)
-    test(f"{label} auth: config-*/write auth-only -> 403", st == 403, f"status={st}")
+    st, _ = http_post(port, "/etc/test/write", "data", token=token)
+    test(f"{label} auth: etc/*/write auth-only -> 403", st == 403, f"status={st}")
 
-    st, _ = http_post(port, "/config-test/write", "data", approve="wrong")
-    test(f"{label} auth: config-*/write wrong approve -> 403", st == 403, f"status={st}")
+    st, _ = http_post(port, "/etc/test/write", "data", approve="wrong")
+    test(f"{label} auth: etc/*/write wrong approve -> 403", st == 403, f"status={st}")
 
-    st, _ = http_post(port, "/config-test/write", "test-data", approve=approve)
-    test(f"{label} auth: config-*/write approve -> pass", st in (200, 201), f"status={st}")
+    st, _ = http_post(port, "/etc/test/write", "test-data", approve=approve)
+    test(f"{label} auth: etc/*/write approve -> pass", st in (200, 201), f"status={st}")
 
-    st, body = http_get(port, "/config-test/read")
-    test(f"{label} auth: config-*/read -> data persisted",
+    st, body = http_get(port, "/etc/test/read")
+    test(f"{label} auth: etc/*/read -> data persisted",
          st == 200 and "test-data" in body, f"status={st} body={body[:60]}")
+
+    # /etc/shadow is chmod 000 — only approve can read
+    st, _ = http_post(port, "/etc/shadow/write", "alice:deadbeef", approve=approve)
+    st, _ = http_get(port, "/etc/shadow/read")
+    test(f"{label} auth: etc/shadow/read no auth -> 403", st == 403, f"status={st}")
+    st, body = http_method(port, "/etc/shadow/read", basic_auth=approve)
+    test(f"{label} auth: etc/shadow/read approve -> 200",
+         st == 200 and "deadbeef" in body, f"status={st} body={body[:60]}")
 
     # ── CSRF gate: sync/result/clear reject cross-origin ──
 
-    st, _ = http_method(port, "/authtest/sync", method="POST", body="x",
+    st, _ = http_method(port, "/home/authtest/sync", method="POST", body="x",
                         headers={"Origin": "http://evil.com"})
     test(f"{label} csrf: sync cross-origin -> 403", st == 403, f"status={st}")
 
-    st, _ = http_method(port, "/authtest/result", method="POST", body="x",
+    st, _ = http_method(port, "/home/authtest/result", method="POST", body="x",
                         headers={"Origin": "http://evil.com"})
     test(f"{label} csrf: result cross-origin -> 403", st == 403, f"status={st}")
 
-    st, _ = http_method(port, "/authtest/sync", method="POST", body="same-origin",
+    st, _ = http_method(port, "/home/authtest/sync", method="POST", body="same-origin",
                         headers={"Origin": "http://localhost:13007"})
     test(f"{label} csrf: sync same-origin -> 200", st == 200, f"status={st}")
 
-    st, _ = http_method(port, "/authtest/sync", method="POST", body="no-origin")
+    st, _ = http_method(port, "/home/authtest/sync", method="POST", body="no-origin")
     test(f"{label} csrf: sync no origin -> 200", st == 200, f"status={st}")
 
     # GET to mutation actions -> 405 (blocks <img src> CSRF)
-    st, _ = http_get(port, "/authtest/sync")
+    st, _ = http_get(port, "/home/authtest/sync")
     test(f"{label} csrf: GET /sync -> 405", st == 405, f"status={st}")
 
 
@@ -590,7 +598,7 @@ def _run_plugin_auth_tests(port, label, token, approve):
     test(f"{label} plugin-auth: GET /mirror approve -> 200", st == 200, f"status={st}")
 
     # ── View: GET needs approve (+ type gate) ──
-    http_post(port, "/view-test/write?ext=html", "<h1>test</h1>", token=token)
+    http_post(port, "/home/view-test/write?ext=html", "<h1>test</h1>", token=token)
     st, _ = http_get(port, "/view/view-test")
     test(f"{label} plugin-auth: GET /view no auth -> 401", st == 401, f"status={st}")
 
@@ -629,54 +637,54 @@ def _run_blob_ext_tests(port, label, token, approve):
     import hashlib
 
     # ── 304 version comparison ──
-    http_post(port, "/work/write", "hello", token=token)  # ensure world exists
-    st, body = http_get(port, "/work/read")
+    http_post(port, "/home/work/write", "hello", token=token)  # ensure world exists
+    st, body = http_get(port, "/home/work/read")
     test(f"{label} blob: GET /read -> 200", st == 200, f"status={st}")
     v = json.loads(body).get("version", -1)
 
-    st, _ = http_method(port, f"/work/read?v={v}")
+    st, _ = http_method(port, f"/home/work/read?v={v}")
     test(f"{label} blob: GET /read?v=current -> 304", st == 304, f"status={st}")
 
-    st, _ = http_method(port, "/work/read?v=0")
+    st, _ = http_method(port, "/home/work/read?v=0")
     test(f"{label} blob: GET /read?v=0 -> 200", st == 200, f"status={st}")
 
     # ── ext column ──
-    st, body = http_post(port, "/ext-blob-test/write?ext=css", "body{color:red}", token=token)
+    st, body = http_post(port, "/home/ext-blob-test/write?ext=css", "body{color:red}", token=token)
     test(f"{label} blob: write ?ext=css -> 200", st == 200, f"status={st}")
 
-    st, body = http_get(port, "/ext-blob-test/read")
+    st, body = http_get(port, "/home/ext-blob-test/read")
     d = json.loads(body)
     test(f"{label} blob: read ext=css", d.get("ext") == "css", f"ext={d.get('ext')}")
     test(f"{label} blob: read content intact", "color:red" in d.get("stage_html", ""), f"body={d.get('stage_html','')[:30]}")
 
     # ── /raw route ──
-    st, body = http_get(port, "/ext-blob-test/raw")
+    st, body = http_get(port, "/home/ext-blob-test/raw")
     test(f"{label} blob: /raw -> 200", st == 200, f"status={st}")
     test(f"{label} blob: /raw content", "color:red" in body, f"body={body[:30]}")
 
     # ── Binary write via /write?ext=png ──
     png_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "icon.png")
     png_bytes = open(png_path, "rb").read()
-    st, _ = http_method(port, "/blob-bin-test/write?ext=png", method="POST", body=png_bytes, token=token)
+    st, _ = http_method(port, "/home/blob-bin-test/write?ext=png", method="POST", body=png_bytes, token=token)
     test(f"{label} blob: binary write -> 200", st == 200, f"status={st}")
 
-    st, body = http_get(port, "/blob-bin-test/read")
+    st, body = http_get(port, "/home/blob-bin-test/read")
     d = json.loads(body)
     test(f"{label} blob: binary read ext=png", d.get("ext") == "png", f"ext={d.get('ext')}")
     test(f"{label} blob: binary read stage_html empty", d.get("stage_html") == "", f"stage={d.get('stage_html','?')[:20]}")
 
     # ── Fake directories ──
-    st, _ = http_post(port, "/fakedir/child1/write?ext=txt", "hello child1", token=token)
+    st, _ = http_post(port, "/home/fakedir/child1/write?ext=txt", "hello child1", token=token)
     test(f"{label} blob: write fakedir/child1 -> 200", st == 200, f"status={st}")
 
-    st, _ = http_post(port, "/fakedir/child2/write?ext=md", "# child2", token=token)
+    st, _ = http_post(port, "/home/fakedir/child2/write?ext=md", "# child2", token=token)
     test(f"{label} blob: write fakedir/child2 -> 200", st == 200, f"status={st}")
 
-    st, body = http_get(port, "/stages")
+    st, body = http_get(port, "/proc/worlds")
     names = [s["name"] for s in json.loads(body)]
-    test(f"{label} blob: /stages has fakedir/child1", "fakedir/child1" in names, f"names={[n for n in names if 'fakedir' in n]}")
+    test(f"{label} blob: /proc/worlds has fakedir/child1", "fakedir/child1" in names, f"names={[n for n in names if 'fakedir' in n]}")
 
-    st, body = http_get(port, "/fakedir/child1/read")
+    st, body = http_get(port, "/home/fakedir/child1/read")
     d = json.loads(body)
     test(f"{label} blob: fakedir/child1 ext=txt", d.get("ext") == "txt", f"ext={d.get('ext')}")
     test(f"{label} blob: fakedir/child1 content", "hello child1" in d.get("stage_html", ""), f"body={d.get('stage_html','')[:20]}")
@@ -694,7 +702,7 @@ def _run_blob_ext_tests(port, label, token, approve):
     st, _ = http_method(port, "/dav/dav-bin-test.png", method="PUT", body=png_bytes, basic_auth=approve)
     test(f"{label} blob: DAV PUT binary -> 201", st == 201, f"status={st}")
 
-    st, body = http_get(port, "/dav-bin-test/read")
+    st, body = http_get(port, "/home/dav-bin-test/read")
     d = json.loads(body)
     test(f"{label} blob: DAV binary ext=png", d.get("ext") == "png", f"ext={d.get('ext')}")
     test(f"{label} blob: DAV binary stage empty (binary)", d.get("stage_html") == "", f"stage={d.get('stage_html','?')[:20]}")
@@ -715,20 +723,20 @@ def _run_blob_ext_tests(port, label, token, approve):
         for uname, uext, ucontent in unicode_names:
             from urllib.parse import quote
             encoded = quote(uname, safe="/")
-            st, _ = http_post(port, f"/{encoded}/write?ext={uext}", ucontent, token=token)
+            st, _ = http_post(port, f"/home/{encoded}/write?ext={uext}", ucontent, token=token)
             test(f"{label} unicode: write {uname} -> 200", st == 200, f"status={st}")
 
-            st, body = http_get(port, f"/{encoded}/read")
+            st, body = http_get(port, f"/home/{encoded}/read")
             d = json.loads(body)
             test(f"{label} unicode: read {uname} ext={uext}", d.get("ext") == uext, f"ext={d.get('ext')}")
 
-        # Check /stages has Unicode names (normalize for macOS HFS+ NFD)
+        # Check /proc/worlds has Unicode names (normalize for macOS HFS+ NFD)
         import unicodedata
-        st, body = http_get(port, "/stages")
+        st, body = http_get(port, "/proc/worlds")
         names = [unicodedata.normalize("NFC", s["name"]) for s in json.loads(body)]
-        test(f"{label} unicode: /stages has Chinese", any("\u8863" in n for n in names), f"names={[n for n in names if ord(n[0])>127][:5]}")
-        test(f"{label} unicode: /stages has Korean", any("\ud55c" in n for n in names), "")
-        test(f"{label} unicode: /stages has fake dir", any("\u82b1\u6912/" in n for n in names), "")
+        test(f"{label} unicode: /proc/worlds has Chinese", any("\u8863" in n for n in names), f"names={[n for n in names if ord(n[0])>127][:5]}")
+        test(f"{label} unicode: /proc/worlds has Korean", any("\ud55c" in n for n in names), "")
+        test(f"{label} unicode: /proc/worlds has fake dir", any("\u82b1\u6912/" in n for n in names), "")
 
 
 def _run_http_tests(port, label, token=""):
@@ -780,14 +788,14 @@ def _run_http_tests(port, label, token=""):
 
     # GET unknown path -> serves index.html (200).
     # Unknown GET paths are world entry points.
-    st, body = http_get(port, "/stages")
-    test(f"{label}: GET /stages -> 200", st == 200, f"status={st}")
+    st, body = http_get(port, "/proc/worlds")
+    test(f"{label}: GET /proc/worlds -> 200", st == 200, f"status={st}")
     if st == 200:
         try:
             d = json.loads(body)
-            test(f"{label}: /stages returns array", isinstance(d, list))
+            test(f"{label}: /proc/worlds returns array", isinstance(d, list))
         except json.JSONDecodeError:
-            test(f"{label}: /stages returns JSON", False)
+            test(f"{label}: /proc/worlds returns JSON", False)
 
 
 # ── Main ────────────────────────────────────────────────────────────
