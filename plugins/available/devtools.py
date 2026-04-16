@@ -12,7 +12,7 @@ shell handy.
 
 Not loaded by default. Load with: POST /admin/load  body=devtools
 """
-DESCRIPTION = "Unix pipe primitives + cave primitives (stone/fire+ash/wall/drum/trail/hunt/tomb/bones/river/soil/knot/shadow/amber/eclipse/narcissus) — grep (-l), tail, head, wc (-c), rev, echo, null, full, true, false, yes, cowsay, moaisay, stone, fire, ash, wall, drum, trail, hunt, tomb, bones, river, soil, knot, shadow, amber, eclipse, narcissus, health, db/size, whoami, uuid, verify, delay, bench, config/dump, time"
+DESCRIPTION = "Unix pipe primitives + cave primitives (stone/fire+ash/wall/drum/trail/hunt/tomb/bones/river/soil/knot/shadow/amber/eclipse/narcissus) + logic gates (not/and/or/xor/nand) — grep (-l), tail, head, wc (-c), rev, echo, null, full, true, false, yes, cowsay, moaisay, stone, fire, ash, wall, drum, trail, hunt, tomb, bones, river, soil, knot, shadow, amber, eclipse, narcissus, not, and, or, xor, nand, health, db/size, whoami, uuid, verify, delay, bench, config/dump, time"
 
 import sys, json, os, subprocess, time, sqlite3, hashlib, asyncio, random
 from pathlib import Path
@@ -304,6 +304,62 @@ async def handle_yes(method, body, params):
     """yes — returns 'yes' n times. ?n=1. Cap 10000."""
     n = min(int(params.get("n", "1")), 10000)
     return {"_html": "\n".join(["yes"] * n), "_status": 200}
+
+
+# ── Logic gates — the minimum vocabulary ─────────────────────────────
+# From these five the tribe builds every circuit. true/false are the
+# source; not/and/or/xor/nand are the operations. NAND alone suffices
+# (universal gate) — the others are kept because fewer words = more
+# misreadings.
+
+async def handle_not(method, body, params):
+    """/not — negation. true becomes false. false becomes true.
+    POST 'true' → false. POST 'false' → true.
+    POST anything else → nothing.
+    """
+    text = (body if isinstance(body, str) else body.decode()).strip().lower()
+    if text == "true":
+        return {"_html": "false", "_status": 200}
+    if text == "false":
+        return {"_html": "true", "_status": 200}
+    return {"_html": "nothing", "_status": 200}
+
+
+async def handle_and(method, body, params):
+    """/and — both or neither. ?a=true&b=true → true.
+    The tribe speaks only when all voices agree.
+    """
+    a = params.get("a", "false").lower() == "true"
+    b = params.get("b", "false").lower() == "true"
+    return {"_html": str(a and b).lower(), "_status": 200}
+
+
+async def handle_or(method, body, params):
+    """/or — any voice is enough. ?a=false&b=true → true.
+    One ember keeps the fire alive.
+    """
+    a = params.get("a", "false").lower() == "true"
+    b = params.get("b", "false").lower() == "true"
+    return {"_html": str(a or b).lower(), "_status": 200}
+
+
+async def handle_xor(method, body, params):
+    """/xor — only one. never both. never neither. ?a=true&b=true → false.
+    Two fires cancel. Two silences cancel. Only difference survives.
+    """
+    a = params.get("a", "false").lower() == "true"
+    b = params.get("b", "false").lower() == "true"
+    return {"_html": str(a ^ b).lower(), "_status": 200}
+
+
+async def handle_nand(method, body, params):
+    """/nand — the universal gate. everything can be built from this.
+    ?a=true&b=true → false. All other combinations → true.
+    One gate to rule them all.
+    """
+    a = params.get("a", "false").lower() == "true"
+    b = params.get("b", "false").lower() == "true"
+    return {"_html": str(not (a and b)).lower(), "_status": 200}
 
 
 _COW = r"""
@@ -1044,6 +1100,11 @@ ROUTES = {
     "/true": handle_true,
     "/false": handle_false,
     "/yes": handle_yes,
+    "/not": handle_not,
+    "/and": handle_and,
+    "/or": handle_or,
+    "/xor": handle_xor,
+    "/nand": handle_nand,
     "/wc-c": handle_wc_c,
     "/full": handle_full,
     "/time": handle_time,
