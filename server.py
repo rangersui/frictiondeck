@@ -402,6 +402,10 @@ async def app(scope, receive, send):
                         f'{_fields}'
                         f'<button style="margin-top:8px;padding:6px 16px;cursor:pointer">{_method} {route}</button></form></div>')
                 return await send_r(send, 200, _man, "text/html")
+        # If body came from a man-page HTML form, extract the _body field
+        if b.startswith("_body="):
+            from urllib.parse import unquote_plus
+            b = unquote_plus(b[6:])
         params["_scope"] = scope
         params["_body_raw"] = body_raw  # raw bytes for binary plugins (dav PUT)
         params["_send"] = send          # raw send for plugins that stream (SSE)
