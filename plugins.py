@@ -152,10 +152,10 @@ def unload_plugin(name):
 
 
 def _sync_actions_add(name):
-    """Register a plugin's routes in config-actions whitelist."""
+    """Register a plugin's routes in etc/actions whitelist."""
     meta = next((m for m in server._plugin_meta if m["name"] == name), None)
     if not meta or not meta["routes"]: return
-    c = server.conn("config-actions")
+    c = server.conn("etc/actions")
     old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
     existing = set(l.strip() for l in old.splitlines() if l.strip())
     added = [r for r in meta["routes"] if r not in existing]
@@ -166,10 +166,10 @@ def _sync_actions_add(name):
 
 
 def _sync_actions_remove(name, routes):
-    """Remove a plugin's routes from config-actions whitelist."""
+    """Remove a plugin's routes from etc/actions whitelist."""
     if not routes: return
     try:
-        c = server.conn("config-actions")
+        c = server.conn("etc/actions")
         old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
         remove = set(routes)
         lines = [l for l in old.splitlines() if l.strip() and l.strip() not in remove]

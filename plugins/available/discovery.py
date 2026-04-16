@@ -182,7 +182,7 @@ async def handle_peers(method, body, params):
 
 
 async def handle_trust(method, body, params):
-    """Add a discovered peer to config-endpoints."""
+    """Add a discovered peer to etc/endpoints."""
     try:
         req = json.loads(body) if body else {}
     except (json.JSONDecodeError, TypeError):
@@ -195,7 +195,7 @@ async def handle_trust(method, body, params):
         return {"error": "ip required"}
     url = f"http://{ip}:{port}"
     # Read current endpoints
-    c = conn("config-endpoints")
+    c = conn("etc/endpoints")
     row = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
     try:
         endpoints = json.loads(row["stage_html"]) if row and row["stage_html"] else {}

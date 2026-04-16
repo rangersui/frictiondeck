@@ -30,8 +30,9 @@ ICON192 = _icon192_path.read_bytes() if _icon192_path.exists() else None
 def _csp():
     cdn = "https:"
     try:
-        if (DATA / "config-cdn").exists():
-            c = conn("config-cdn")
+        etc_cdn_disk = DATA / "etc%2Fcdn"
+        if etc_cdn_disk.exists():
+            c = conn("etc/cdn")
             r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
             s = r["stage_html"] if r else None
             if isinstance(s, bytes): s = s.decode("utf-8", "replace")
@@ -363,21 +364,27 @@ async def app(scope, receive, send):
         (DATA / _disk_name(name)).rename(trash)
         return await send_r(send, 200, json.dumps({"deleted": name}))
 
-    # /home/{name}/{action} — the main world routes
-    # URL has /home/ prefix; disk storage stays at DATA/{name}/ (no migration).
+    # World routes. /home/ and /etc/ are both namespaces of worlds:
+    #   /home/foo/read  →  world "foo"       →  data/foo/            (user world)
+    #   /etc/cdn/read   →  world "etc/cdn"   →  data/etc%2Fcdn/      (config world)
+    # /home/ strips its prefix (user worlds stay flat on disk, back compat).
+    # /etc/ keeps its prefix in the world name (config worlds namespaced on disk).
     _ACTIONS = {"read","raw","write","append","pending","result","clear","sync"}
-    if len(parts) >= 3 and parts[0] == "home" and parts[-1] in _ACTIONS:
+    if len(parts) >= 3 and parts[0] in ("home", "etc") and parts[-1] in _ACTIONS:
         action = parts[-1]
-        name = "/".join(parts[1:-1])  # strip "home" prefix and action
+        if parts[0] == "home":
+            name = "/".join(parts[1:-1])
+        else:
+            name = "etc/" + "/".join(parts[1:-1])
         if not _valid_name(name): return await send_r(send, 400, '{"error":"invalid world name"}')
         # All mutations require POST
         if action not in ("read", "raw") and method != "POST":
             return await send_r(send, 405, '{"error":"method not allowed"}')
-        # Write auth: token for mutations, approve for config-* worlds
+        # Write auth: token for mutations, approve for etc/* config worlds
         if action in ("write", "append", "pending"):
-            if name.startswith("config-"):
+            if name.startswith("etc/"):
                 if _check_auth(scope) != "approve":
-                    return await send_r(send, 403, '{"error":"config write requires approve"}')
+                    return await send_r(send, 403, '{"error":"etc write requires approve"}')
             elif AUTH_TOKEN and _check_auth(scope) is None:
                 return await send_r(send, 403, '{"error":"unauthorized"}')
         # CSRF gate: browser-only actions check Origin (physics, not policy)

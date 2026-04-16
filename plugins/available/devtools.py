@@ -550,12 +550,12 @@ async def handle_trail(method, body, params):
     return {"_html": "\n".join(steps) + "\n" if steps else "(no trail yet)\n", "_status": 200}
 
 
-_HUNT_SKIP_PREFIXES = ("renderer-", "skills-", "config-", "sys-", "plugin-", ".")
+_HUNT_SKIP_PREFIXES = ("renderer-", "skills-", "etc/", "sys-", "plugin-", ".")
 
 async def handle_hunt(method, body, params):
     """/hunt — random encounter. You don't browse. You stumble in.
     302 redirect to a random world. System worlds (renderer-*, skills-*,
-    config-*, sys-*, plugin-*) are excluded — this is about wildlife,
+    etc/*, sys-*, plugin-*) are excluded — this is about wildlife,
     not organs.
     """
     names = [n for n in _world_names()

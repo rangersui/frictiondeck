@@ -19,12 +19,13 @@ async def handle_info(method, body, params):
     if DATA.exists():
         for d in sorted(DATA.iterdir()):
             if d.is_dir() and (d / "universe.db").exists():
-                if d.name.startswith("renderer-"): renderers.append(d.name)
-                elif not d.name.startswith("config-"): worlds.append(d.name)
+                logical = d.name.replace("%2F", "/")
+                if logical.startswith("renderer-"): renderers.append(logical)
+                elif not logical.startswith("etc/"): worlds.append(logical)
     cdn_raw = ""
     try:
-        if (DATA / "config-cdn").exists():
-            r = conn("config-cdn").execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+        if (DATA / "etc%2Fcdn").exists():
+            r = conn("etc/cdn").execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
             if r: cdn_raw = r["stage_html"]
     except Exception as e: print(f"  warn: CDN config read failed: {e}")
     cdn = [d.strip() for d in cdn_raw.splitlines() if d.strip()] if cdn_raw.strip() else ["* (all HTTPS)"]

@@ -4,8 +4,8 @@ POST /proxy/sync/run     → run sync immediately
 GET  /proxy/sync/status  → last sync result (from sync-log world)
 
 Setup:
-  1. Write config-endpoints world: {"peer": {"url": "http://...", "token": "..."}}
-  2. Write config-sync world: one world name per line (whitelist)
+  1. Write etc/endpoints world: {"peer": {"url": "http://...", "token": "..."}}
+  2. Write etc/sync world: one world name per line (whitelist)
   3. Empty whitelist = nothing syncs. Safe default.
 
 Conflict resolution: high version wins. Last writer wins.
@@ -21,9 +21,9 @@ POST /proxy/sync/run   → run sync immediately
 GET  /proxy/sync/status → last sync result
 
 Setup:
-1. Write peer list to config-endpoints world (JSON):
+1. Write peer list to etc/endpoints world (JSON):
    {"peer-name": {"url": "http://...", "token": "auth-token"}}
-2. Write whitelist to config-sync world (one world name per line)
+2. Write whitelist to etc/sync world (one world name per line)
 3. Only whitelisted worlds sync. Empty whitelist = nothing syncs.
 
 Conflict: high version wins. Last writer wins.
@@ -36,10 +36,10 @@ CRON = 300
 
 
 def _read_config():
-    """Read peers from config-endpoints and whitelist from config-sync."""
+    """Read peers from etc/endpoints and whitelist from etc/sync."""
     peers = {}
     try:
-        raw = conn("config-endpoints").execute(
+        raw = conn("etc/endpoints").execute(
             "SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
         if raw.strip():
             peers = json.loads(raw)
@@ -47,7 +47,7 @@ def _read_config():
         pass
     whitelist = set()
     try:
-        raw = conn("config-sync").execute(
+        raw = conn("etc/sync").execute(
             "SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
         whitelist = {l.strip() for l in raw.splitlines() if l.strip()}
     except Exception:
