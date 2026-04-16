@@ -29,7 +29,7 @@ echo "→ delay:  ${DELAY}s between"
 echo ""
 
 # Reset
-curl -s -X POST "http://$HOST/$WORLD/write?ext=$EXT" \
+curl -s -X POST "http://$HOST/home/$WORLD/write?ext=$EXT" \
   -H "Authorization: Bearer $TOKEN" \
   --data-binary "" > /dev/null
 echo "[reset] world '$WORLD' cleared"
@@ -38,7 +38,7 @@ echo "[reset] world '$WORLD' cleared"
 t0=$(date +%s.%N)
 for i in $(seq 0 $((BLOCKS - 1))); do
   dd if="$FILE" bs=$CHUNK skip=$i count=1 2>/dev/null | \
-    curl -s -X POST "http://$HOST/$WORLD/append?ext=$EXT" \
+    curl -s -X POST "http://$HOST/home/$WORLD/append?ext=$EXT" \
       -H "Authorization: Bearer $TOKEN" \
       --data-binary @- > /dev/null
   sent=$(( (i + 1) * CHUNK ))

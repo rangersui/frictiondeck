@@ -15,6 +15,9 @@ Write:  curl -X POST :3006/foo/write -d hi
 Read:   curl :3006/foo/read
 List:   curl :3006/stages
 
+Bare protocol — no FHS namespace (/home/, /etc/). The full server
+adds that layer on top. This is the kernel, not the distro.
+
 No dependencies. Python 3.8+ stdlib only.
 """
 import asyncio, hashlib, hmac, json, os, tempfile
