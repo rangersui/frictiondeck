@@ -429,7 +429,7 @@ async def app(scope, receive, send):
     # /etc/ and /usr/ keep their prefixes in the world name (system worlds
     # namespaced on disk).
     _ACTIONS = {"read","raw","write","append","pending","result","clear","sync"}
-    if len(parts) >= 3 and parts[0] in ("home", "etc", "usr") and parts[-1] in _ACTIONS:
+    if len(parts) >= 3 and parts[0] in ("home", "etc", "usr", "var") and parts[-1] in _ACTIONS:
         action = parts[-1]
         if parts[0] == "home":
             name = "/".join(parts[1:-1])
@@ -441,7 +441,7 @@ async def app(scope, receive, send):
             return await send_r(send, 405, '{"error":"method not allowed"}')
         # Write auth: token for mutations, approve for system worlds (/etc/, /usr/)
         if action in ("write", "append", "pending"):
-            if name.startswith(("etc/", "usr/")):
+            if name.startswith(("etc/", "usr/", "var/")):
                 if _check_auth(scope) != "approve":
                     return await send_r(send, 403, '{"error":"system write requires approve"}')
             elif AUTH_TOKEN and _check_auth(scope) is None:

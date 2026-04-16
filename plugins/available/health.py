@@ -1,7 +1,7 @@
 """Health plugin — system task manager with heartbeat.
 
-CRON = 60. Every minute, collects system state and writes to /sys-health world.
-Any AI can GET /sys-health/read to know the empire's health.
+CRON = 60. Every minute, collects system state and writes to /var/log/health world.
+Any AI can GET /var/log/health/read to know the empire's health.
 
 """
 
@@ -92,7 +92,7 @@ def _get_disk():
 # ── cron handler ───────────────────────────────────────────────────────
 
 async def _heartbeat():
-    """Collect all health data and write to sys-health world."""
+    """Collect all health data and write to var/log/health world."""
     # Cache stats via service binding
     cache_stats = {"entries": 0, "hits": 0, "misses": 0}
     try:
@@ -114,15 +114,15 @@ async def _heartbeat():
         "disk_free_gb": _get_disk(),
     }
 
-    # Write JSON to sys-health world (data only, renderer paints)
+    # Write JSON to var/log/health world (data only, renderer paints)
     try:
-        c = conn("sys-health")
+        c = conn("var/log/health")
         payload = "<!--use:usr/lib/renderer/health-->\n" + json.dumps(health)
         c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1",
                   (payload,))
         c.commit()
         # Heartbeat in HMAC chain — gaps = downtime
-        log_event("sys-health", "heartbeat", {"uptime": health["uptime_seconds"]})
+        log_event("var/log/health", "heartbeat", {"uptime": health["uptime_seconds"]})
     except Exception as e:
         print(f"  health: write failed: {e}")
 
@@ -132,9 +132,9 @@ CRON_HANDLER = _heartbeat
 # ── manual route ───────────────────────────────────────────────────────
 
 async def handle_health(method, body, params):
-    """GET /sys-health/status — trigger immediate health check and return."""
+    """GET /var/log/health/status — trigger immediate health check and return."""
     await _heartbeat()
-    c = conn("sys-health")
+    c = conn("var/log/health")
     row = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
     if not row or not row["stage_html"]:
         return {"error": "no data yet"}
@@ -144,10 +144,10 @@ async def handle_health(method, body, params):
         raw = raw.split("\n", 1)[-1]
     return json.loads(raw)
 
-ROUTES["/sys-health/status"] = handle_health
+ROUTES["/var/log/health/status"] = handle_health
 
 PARAMS_SCHEMA = {
-    "/sys-health/status": {
+    "/var/log/health/status": {
         "method": "GET",
         "params": {},
         "returns": {"timestamp": "string", "ollama": "object", "worlds": "object",

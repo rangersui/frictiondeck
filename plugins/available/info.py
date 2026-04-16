@@ -21,7 +21,7 @@ async def handle_info(method, body, params):
             if d.is_dir() and (d / "universe.db").exists():
                 logical = d.name.replace("%2F", "/")
                 if logical.startswith("usr/lib/renderer/"): renderers.append(logical)
-                elif not logical.startswith(("etc/", "usr/")): worlds.append(logical)
+                elif not logical.startswith(("etc/", "usr/", "var/")): worlds.append(logical)
     cdn_raw = ""
     try:
         if (DATA / "etc%2Fcdn").exists():

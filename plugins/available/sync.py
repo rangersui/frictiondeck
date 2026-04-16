@@ -1,7 +1,7 @@
 """Sync — P2P world synchronization. High version wins.
 
 POST /proxy/sync/run     → run sync immediately
-GET  /proxy/sync/status  → last sync result (from sync-log world)
+GET  /proxy/sync/status  → last sync result (from var/log/sync world)
 
 Setup:
   1. Write etc/endpoints world: {"peer": {"url": "http://...", "token": "..."}}
@@ -28,8 +28,8 @@ Setup:
 
 Conflict: high version wins. Last writer wins.
 Cron: auto-syncs every 5 minutes.
-Results stored in sync-log world (JSON).
-View at /home/sync-log with usr/lib/renderer/sync installed.
+Results stored in var/log/sync world (JSON).
+View at /home/var/log/sync with usr/lib/renderer/sync installed.
 """
 ROUTES = {}
 CRON = 300
@@ -117,8 +117,8 @@ def _do_sync():
 
         result["peers"][peer_name] = pr
 
-    # Write result to sync-log
-    c = conn("sync-log")
+    # Write result to var/log/sync
+    c = conn("var/log/sync")
     c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1",
               (json.dumps(result, ensure_ascii=False),))
     c.commit()
@@ -135,7 +135,7 @@ async def handle_run(method, body, params):
 
 async def handle_status(method, body, params):
     try:
-        raw = conn("sync-log").execute(
+        raw = conn("var/log/sync").execute(
             "SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
         if raw.strip():
             return json.loads(raw)
