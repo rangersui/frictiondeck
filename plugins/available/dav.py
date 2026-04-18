@@ -10,23 +10,55 @@ import server
 # and gets stripped on the wire (world "foo" is displayed at /dav/home/foo).
 _SYS_PREFIXES = ("etc/", "usr/", "var/", "boot/", "tmp/", "mnt/")
 
-def _ext(typ):
-    if typ == "html": return ".html.txt"  # file:// has no sandbox
-    if typ and typ != "plain" and typ != "dir": return "." + typ
-    return ".txt"
-
 def _check_write_auth(scope):
     """Write ops need Bearer or Basic auth. Read is open."""
     return server._check_auth(scope) is not None
 
+def _suffix(rest, ext):
+    """Render-time ext decoration for PROPFIND hrefs.
+
+      already has a dot      → ""
+      dir or empty           → ""
+      html                   → ".html.txt"  — file:// has no sandbox,
+                                              append .txt so local open
+                                              uses text viewer not browser
+      plain                  → ".txt"
+      anything else          → ".{ext}"
+    """
+    last = rest.rsplit("/", 1)[-1]
+    if "." in last: return ""
+    if not ext or ext == "dir": return ""
+    if ext == "html": return ".html.txt"
+    if ext == "plain": return ".txt"
+    return f".{ext}"
+
 def _world_name(path):
-    """/dav/home/foo.png → 'foo'; /dav/etc/cdn → 'etc/cdn'; /dav/foo → 'foo' (legacy)."""
+    """DAV URL → world name. Identity first, strip-and-retry fallback.
+
+    Fast path: strip /dav and home/ URL sugar, return the rest verbatim.
+    Fallback: iteratively strip the last segment's last dot (up to twice,
+    since html worlds are decorated as .html.txt) and retry the disk
+    lookup. Lets DAV access legacy worlds created with dotless names via
+    PROPFIND-decorated hrefs.
+
+    Writes (PUT/MKCOL) hit the identity path — a brand-new world name
+    matches no existing world, so we return it as-is for creation.
+    """
     rest = path[4:].lstrip("/").rstrip("/")  # strip /dav + trailing slash
-    if rest.startswith("home/"): rest = rest[5:]  # home/ is URL-only sugar
-    elif rest == "home": rest = ""                # /dav/home/ itself is the user root
+    if rest.startswith("home/"): rest = rest[5:]
+    elif rest == "home": rest = ""
     if not rest: return ""
-    dot = rest.find(".")  # first dot — world names have no dots
-    return rest[:dot] if dot > 0 else rest
+    candidate = rest
+    for _ in range(3):  # original + up to 2 strips (covers .html.txt double-ext)
+        if (server.DATA / server._disk_name(candidate) / "universe.db").exists():
+            return candidate
+        segs = candidate.split("/")
+        last = segs[-1]
+        dot = last.rfind(".")
+        if dot <= 0:
+            break
+        candidate = "/".join(segs[:-1] + [last[:dot]])
+    return rest
 
 def _read(name):
     c = server.conn(name)
@@ -52,7 +84,7 @@ async def handle(method, body, params):
 
     if method == "OPTIONS":
         return {"_body":"", "_ct":"text/plain",
-                "_headers":[["dav","1"],["allow","OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND"]]}
+                "_headers":[["dav","1"],["allow","OPTIONS, GET, HEAD, PUT, DELETE, MOVE, COPY, PROPFIND, MKCOL"]]}
 
     # Strip /dav from path, normalise into a "DAV-level prefix" that mirrors
     # the FHS: "" (root), "home", "home/sub", "etc", "usr/lib", etc.
@@ -74,13 +106,24 @@ async def handle(method, body, params):
         # Single real world (not a prefix) → describe it as a file or collection
         world = _world_name(path)
         if world and world.endswith("/"): world = world[:-1]
-        if world and any(w == world for w in all_worlds):
+        is_world = world and any(w == world for w in all_worlds)
+        has_children = bool(world) and any(w.startswith(world + "/") for w in all_worlds)
+        # Top-level FHS namespaces always render as collections even when empty,
+        # so clients can discover them. Everything else: if the path doesn't
+        # match a world AND has no children, it's a 404. Without this, a
+        # PROPFIND on /dav/home/foo-that-doesnt-exist returned "collection",
+        # which caused WinSCP to drop files INTO the phantom "folder" →
+        # nested paths like /home/code/foo/foo.
+        is_top_ns = (dav_prefix in ("", "home") or dav_prefix in (p.rstrip("/") for p in _SYS_PREFIXES))
+        if world and not is_world and not has_children and not is_top_ns:
+            return {"error":"not found", "_status":404}
+        if is_world:
             raw, ext = _read(world)
-            is_dir = ext == "dir" or any(w.startswith(world + "/") for w in all_worlds)
+            is_dir = ext == "dir" or has_children
             if not is_dir:
                 dav_href = f"/dav/home/{world}" if not world.startswith(_SYS_PREFIXES) else f"/dav/{world}"
                 xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
-                       + _prop(f"{dav_href}{_ext(ext)}", "", "text/plain", len(raw), now)
+                       + _prop(f"{dav_href}{_suffix(world, ext)}", "", server._ext_to_ct(ext), len(raw), now)
                        + '</D:multistatus>')
                 return {"_body":xml, "_ct":"application/xml; charset=utf-8", "_status":207}
         # Collection listing — root, /home/, /etc/, virtual dir inside a namespace.
@@ -124,9 +167,11 @@ async def handle(method, body, params):
                     else:
                         raw, ext = _read(w)
                         if ext == "dir":
-                            xml += _prop(f"{children_href}{rest}/", "collection", "", 0, now)
+                            if rest not in seen_dirs:
+                                seen_dirs.add(rest)
+                                xml += _prop(f"{children_href}{rest}/", "collection", "", 0, now)
                         else:
-                            xml += _prop(f"{children_href}{rest}{_ext(ext)}", "", "text/plain", len(raw), now)
+                            xml += _prop(f"{children_href}{rest}{_suffix(rest, ext)}", "", server._ext_to_ct(ext), len(raw), now)
         xml += '</D:multistatus>'
         return {"_body":xml, "_ct":"application/xml; charset=utf-8", "_status":207}
 
@@ -171,17 +216,17 @@ async def handle(method, body, params):
                                 listing += f'<li><a href="{href_base}{first}/">{first}/</a></li>'
                         else:
                             _, ext = _read(w)
-                            listing += f'<li><a href="{href_base}{rest}{_ext(ext)}">{rest}</a> <em>({ext})</em></li>'
+                            listing += f'<li><a href="{href_base}{rest}{_suffix(rest, ext)}">{rest}</a> <em>({ext})</em></li>'
             listing += "</ul>"
             return {"_html": listing}
         if not server._valid_name(name) or not (server.DATA / server._disk_name(name) / "universe.db").exists():
             return {"error":"not found", "_status":404}
         if (name == "etc/shadow" or name.startswith("boot/")) and server._check_auth(scope) != "approve":
             return {"error":"read requires approve", "_status":403}
-        raw, _ = _read(name)
-        return {"_body":raw, "_ct":"text/plain"}
+        raw, ext = _read(name)
+        return {"_body":raw, "_ct":server._ext_to_ct(ext)}
 
-    if method in ("PUT", "DELETE") and not _check_write_auth(scope):
+    if method in ("PUT", "DELETE", "MOVE", "COPY", "MKCOL") and not _check_write_auth(scope):
         return {"error":"authentication required", "_status":401,
                 "_headers":[["www-authenticate",'Basic realm="elastik"']]}
 
@@ -191,9 +236,27 @@ async def handle(method, body, params):
         if not server._valid_name(name): return {"error":"invalid world name", "_status":400}
         # Use raw bytes from params (plugin dispatch preserves them)
         raw = params.get("_body_raw", body.encode("utf-8") if isinstance(body, str) else body or b"")
-        # Ext from filename: /dav/photo.png → ext=png
-        dot = path.rfind(".")
-        ext = path[dot+1:].lower().strip() if dot > 0 else "plain"
+        # ext comes from (priority): ?ext= query > Content-Type header >
+        # URL path's last-segment extension. URL extension is a DAV-native
+        # hint — clients name files with ext as a MIME signal.
+        ext = params.get("ext")
+        if not ext:
+            ct = ""
+            for k, v in scope.get("headers", []):
+                if k == b"content-type":
+                    ct = v.decode("utf-8", "replace").split(";")[0].strip().lower()
+                    break
+            # Reverse the server._CT table so we can go content-type → ext.
+            ct_to_ext = {v: k for k, v in server._CT.items()}
+            ext = ct_to_ext.get(ct, "")
+        if not ext:
+            # Fall back to URL path's last-segment extension, if it's known.
+            last_seg = path.rstrip("/").rsplit("/", 1)[-1]
+            dot = last_seg.rfind(".")
+            if dot > 0:
+                maybe_ext = last_seg[dot+1:].lower()
+                if maybe_ext in server._CT:
+                    ext = maybe_ext
         if not ext: ext = "plain"
         if ext == "html" and server._check_auth(scope) != "approve":
             return {"error": "html write requires approve", "_status": 403}
@@ -206,17 +269,141 @@ async def handle(method, body, params):
 
     if method == "DELETE":
         name = _world_name(path)
-        if not name: return {"error":"DELETE on collection not supported", "_status":405}
-        if not server._valid_name(name) or not (server.DATA / server._disk_name(name) / "universe.db").exists():
+        if not name: return {"error":"DELETE requires a name", "_status":405}
+        if not server._valid_name(name): return {"error":"invalid world name", "_status":400}
+        # Collect targets: the world itself (if exists) + any worlds under name/.
+        # Matches HTTP DELETE: "rm -rf prefix/" semantics.
+        targets = []
+        if (server.DATA / server._disk_name(name) / "universe.db").exists():
+            targets.append(name)
+        if server.DATA.exists():
+            for d in sorted(server.DATA.iterdir()):
+                if d.is_dir() and (d / "universe.db").exists():
+                    w = server._logical_name(d.name)
+                    if w.startswith(name + "/"):
+                        targets.append(w)
+        if not targets:
             return {"error":"not found", "_status":404}
-        if server._check_auth(scope) != "approve":
-            return {"error": "delete requires approve", "_status": 403}
-        if name in server._db: server._db.pop(name).close()
-        import shutil
-        trash = server.DATA / ".trash" / server._disk_name(name)
-        trash.parent.mkdir(parents=True, exist_ok=True)
-        if trash.exists(): shutil.rmtree(trash)
-        (server.DATA / server._disk_name(name)).rename(trash)
+        # Tiered auth mirrors PUT: system paths → T3, user paths → T2.
+        needs_approve = any(t.startswith(_SYS_PREFIXES) for t in targets)
+        if needs_approve and server._check_auth(scope) != "approve":
+            return {"error":"system delete requires approve", "_status":403}
+        for w in targets:
+            server._release_world(w)
+            server._move_to_trash(w)
+        return {"_status":204, "_body":"", "_ct":"text/plain"}
+
+    if method == "MOVE":
+        # Rename / move a world. WinSCP: rename file, drag file to new folder.
+        src_name = _world_name(path)
+        if not src_name:
+            return {"error":"MOVE requires a source name", "_status":405}
+        if not server._valid_name(src_name):
+            return {"error":"invalid source name", "_status":400}
+        src_disk = server.DATA / server._disk_name(src_name)
+        if not (src_disk / "universe.db").exists():
+            return {"error":"source not found", "_status":404}
+        # Destination + Overwrite headers (RFC 4918 §9.9).
+        dest_raw, overwrite = "", True
+        for k, v in scope.get("headers", []):
+            if k == b"destination": dest_raw = v.decode("utf-8", "replace")
+            elif k == b"overwrite": overwrite = v.decode().strip().upper() == "T"
+        if not dest_raw:
+            return {"error":"Destination header required", "_status":400}
+        from urllib.parse import urlparse, unquote
+        dest_path = unquote(urlparse(dest_raw).path or dest_raw)
+        dst_name = _world_name(dest_path)
+        if not dst_name or not server._valid_name(dst_name):
+            return {"error":"invalid destination", "_status":400}
+        # Tiered auth: T3 if either endpoint touches a system prefix.
+        if (src_name.startswith(_SYS_PREFIXES) or dst_name.startswith(_SYS_PREFIXES)) \
+           and server._check_auth(scope) != "approve":
+            return {"error":"system move requires approve", "_status":403}
+        dst_disk = server.DATA / server._disk_name(dst_name)
+        if dst_disk.exists():
+            if not overwrite:
+                return {"error":"destination exists", "_status":412}
+            import shutil
+            shutil.rmtree(dst_disk)
+        # Release any cached sqlite handles before renaming (Windows quirk).
+        server._release_world(src_name)
+        server._release_world(dst_name)
+        dst_disk.parent.mkdir(parents=True, exist_ok=True)
+        import shutil, time
+        for attempt in range(5):
+            try:
+                src_disk.rename(dst_disk)
+                break
+            except PermissionError:
+                time.sleep(0.02 * (attempt + 1))
+        else:
+            shutil.move(str(src_disk), str(dst_disk))
+        server.log_event(dst_name, "stage_moved", {"from": src_name})
+        # 201 if dst didn't exist before; 204 if it did (and overwrite was OK).
+        return {"_status":204, "_body":"", "_ct":"text/plain"}
+
+    if method == "COPY":
+        # Duplicate a world (or prefix subtree) to a new path. RFC 4918 §9.8.
+        # Depth: infinity by default — a collection copy takes all children.
+        src_name = _world_name(path)
+        if not src_name:
+            return {"error":"COPY requires a source name", "_status":405}
+        if not server._valid_name(src_name):
+            return {"error":"invalid source name", "_status":400}
+        src_disk = server.DATA / server._disk_name(src_name)
+        src_is_world = (src_disk / "universe.db").exists()
+        # Destination + Overwrite headers.
+        dest_raw, overwrite = "", True
+        for k, v in scope.get("headers", []):
+            if k == b"destination": dest_raw = v.decode("utf-8", "replace")
+            elif k == b"overwrite": overwrite = v.decode().strip().upper() == "T"
+        if not dest_raw:
+            return {"error":"Destination header required", "_status":400}
+        from urllib.parse import urlparse, unquote
+        dest_path = unquote(urlparse(dest_raw).path or dest_raw)
+        dst_name = _world_name(dest_path)
+        if not dst_name or not server._valid_name(dst_name):
+            return {"error":"invalid destination", "_status":400}
+        # Build the (src, dst) pairs to copy. Includes src itself if it's a
+        # world, plus any descendants under src_name/. Empty = 404.
+        pairs = []
+        if src_is_world:
+            pairs.append((src_name, dst_name))
+        if server.DATA.exists():
+            for d in sorted(server.DATA.iterdir()):
+                if d.is_dir() and (d / "universe.db").exists():
+                    w = server._logical_name(d.name)
+                    if w.startswith(src_name + "/"):
+                        pairs.append((w, dst_name + w[len(src_name):]))
+        if not pairs:
+            return {"error":"source not found", "_status":404}
+        # Tiered auth: T3 if either any src or any dst touches a system prefix.
+        touches_sys = any(s.startswith(_SYS_PREFIXES) or d.startswith(_SYS_PREFIXES) for s, d in pairs)
+        if touches_sys and server._check_auth(scope) != "approve":
+            return {"error":"system copy requires approve", "_status":403}
+        # Precheck: fail fast if any destination exists and Overwrite: F.
+        if not overwrite:
+            for _, dw in pairs:
+                if (server.DATA / server._disk_name(dw) / "universe.db").exists():
+                    return {"error":"destination exists", "_status":412}
+        import shutil, sqlite3
+        for sw, dw in pairs:
+            src_db = server.DATA / server._disk_name(sw) / "universe.db"
+            dst_dir = server.DATA / server._disk_name(dw)
+            dst_db = dst_dir / "universe.db"
+            # Checkpoint src so its WAL is merged into universe.db. File-level
+            # copy of universe.db then captures a consistent state. Without
+            # this, copying a world with uncheckpointed writes would lose data
+            # (the same class of bug that ate /etc/ before the WAL fix).
+            if sw in server._db:
+                try: server._db[sw].execute("PRAGMA wal_checkpoint(TRUNCATE)"); server._db[sw].commit()
+                except Exception: pass
+            if dst_dir.exists():
+                if dw in server._db: server._db.pop(dw).close()
+                shutil.rmtree(dst_dir)
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_db, dst_db)
+            server.log_event(dw, "stage_copied", {"from": sw})
         return {"_status":204, "_body":"", "_ct":"text/plain"}
 
     if method == "MKCOL":

@@ -166,7 +166,23 @@ def _get_markdown_lib():
 # --- Route handler ---
 
 async def handle_translate(method, body, params):
-    data = body if isinstance(body, dict) else json.loads(body if isinstance(body, str) else body.decode("utf-8"))
+    """POST /translate — HTML ↔ Markdown conversion. File ingest via ?path=.
+
+    body (JSON), one of:
+      {"html": "<h1>hi</h1>", "to": "markdown"}
+      {"markdown": "# hi\\n**bold**", "to": "html"}
+      {"path": "/path/to/file.docx", "to": "markdown"}
+
+    Engines: markitdown (if installed) > markdown lib > fallback.
+    """
+    if isinstance(body, dict):
+        data = body
+    else:
+        raw = body if isinstance(body, str) else body.decode("utf-8", "replace")
+        try:
+            data = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            return {"error": "body must be JSON", "_status": 400}
     target = data.get("to", "markdown")
     html_in = data.get("html", "")
     md_in = data.get("markdown", "")

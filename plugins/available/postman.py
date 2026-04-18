@@ -1,6 +1,6 @@
 """Postman — curl proxy. CORS bypass for browser fetch.
 
-fetch('/proxy/postman', {method:'POST', body: JSON.stringify({url:'https://api.github.com/repos/x/y'})})
+fetch('/postman', {method:'POST', body: JSON.stringify({url:'https://api.github.com/repos/x/y'})})
 
 Requires approve token. Because this is curl with your server's IP.
 """
@@ -11,8 +11,17 @@ ROUTES = {}
 
 
 async def handle_postman(method, body, params):
+    """POST /postman — curl proxy. CORS bypass from the browser.
+
+    body (JSON):
+      {"url": "https://api.github.com/x", "method": "GET",
+       "headers": {}, "body": ""}
+
+    Returns the response body verbatim. Requires approve token —
+    this is curl with your server's IP.
+    """
     try:
-        b = json.loads(body) if body else {}
+        b = json.loads(body) if body and body.strip() else {}
     except (json.JSONDecodeError, TypeError):
         return {"error": "invalid JSON body", "_status": 400}
     url = b.get("url", "")
@@ -28,7 +37,7 @@ async def handle_postman(method, body, params):
     return {"_html": r.stdout.decode("utf-8", "replace"), "_status": 200}
 
 
-ROUTES["/proxy/postman"] = handle_postman
+ROUTES["/postman"] = handle_postman
 
 if __name__ == "__main__":
     import sys

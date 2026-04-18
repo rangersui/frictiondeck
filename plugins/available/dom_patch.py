@@ -1,6 +1,6 @@
 """DOM Patch — CSS-selector-based HTML mutations. Zero dependencies.
 
-POST /proxy/dom-patch  body: {"world": "sensors", "ops": [...]}
+POST /dom-patch  body: {"world": "sensors", "ops": [...]}
 
 Supported ops:
   replace   {"op":"replace", "selector":"#temp-value", "html":"48.1°C"}
@@ -22,7 +22,7 @@ DESCRIPTION = "DOM-aware HTML patch with CSS selectors (zero deps)"
 SKILL = """\
 # Writing Strategy — DOM Patch
 
-POST /proxy/dom-patch body:
+POST /dom-patch body:
 {
   "world": "status-page",
   "ops": [
@@ -48,7 +48,7 @@ Use renderer + JSON data separation when possible (see /usr/lib/skills/data).
 ROUTES = {}
 
 PARAMS_SCHEMA = {
-    "/proxy/dom-patch": {
+    "/dom-patch": {
         "method": "POST",
         "params": {
             "world": {"type": "string", "required": True, "description": "Target world name"},
@@ -265,11 +265,26 @@ def _apply_ops(html, ops):
 # --- Plugin route handler ---
 
 async def handle_dom_patch(method, body, params):
-    data = body if isinstance(body, dict) else json.loads(body if isinstance(body, str) else body.decode("utf-8"))
+    """POST /dom-patch — CSS-selector DOM mutations on a world's HTML.
+
+    body (JSON):
+      {"world": "status", "ops": [{"op": "text", "selector": "#count", "text": "42"}]}
+
+    Ops: replace, append, prepend, remove, attr, text. Atomic — all
+    succeed or none applied. Selectors: tag, #id, .class, tag#id, .a.b.
+    """
+    if isinstance(body, dict):
+        data = body
+    else:
+        raw = body if isinstance(body, str) else body.decode("utf-8", "replace")
+        try:
+            data = json.loads(raw) if raw.strip() else {}
+        except json.JSONDecodeError:
+            return {"error": "body must be JSON", "_status": 400}
     world = data.get("world", "default")
     ops = data.get("ops", [])
     if not ops:
-        return {"error": "no ops provided"}
+        return {"error": "no ops provided", "_status": 400}
 
     c = conn(world)
     old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
@@ -290,4 +305,4 @@ async def handle_dom_patch(method, body, params):
     return {"version": v, "applied": applied, "length": len(new_html)}
 
 
-ROUTES["/proxy/dom-patch"] = handle_dom_patch
+ROUTES["/dom-patch"] = handle_dom_patch

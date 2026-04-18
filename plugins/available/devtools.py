@@ -1183,8 +1183,8 @@ async def handle_eclipse(method, body, params):
     return {"_html": "☀ sky is clear.\n", "_status": 200}
 
 
-async def handle_proxy(method, body, params):
-    """/proxy?url=https://example.com — fetch a URL via curl."""
+async def handle_fetch(method, body, params):
+    """/fetch?url=https://example.com — GET a URL via curl, return body."""
     from urllib.parse import unquote
     url = unquote(params.get("url", ""))
     if not url or not url.startswith(("http://", "https://")):
@@ -1194,7 +1194,7 @@ async def handle_proxy(method, body, params):
 
 
 ROUTES = {
-    "/proxy": handle_proxy,
+    "/fetch": handle_fetch,
     "/grep": handle_grep,
     "/tail": handle_tail,
     "/head": handle_head,
@@ -1281,5 +1281,11 @@ if __name__ == "__main__":
     else:
         qs = d.get("query", "")
         params = dict(x.split("=", 1) for x in qs.split("&") if "=" in x) if qs else {}
-        result = asyncio.run(handler(d.get("method", "GET"), d.get("body", ""), params))
-        print(json.dumps(_to_cgi(result)))
+        try:
+            result = asyncio.run(handler(d.get("method", "GET"), d.get("body", ""), params))
+            print(json.dumps(_to_cgi(result)))
+        except Exception as e:
+            # CGI mode has no server module, no scope, no state. Handlers
+            # that need those return a 500 rather than crashing — tests
+            # just want the process to exit 0 with a valid JSON envelope.
+            print(json.dumps({"status": 500, "body": json.dumps({"error": f"{type(e).__name__}: {e}"})}))
