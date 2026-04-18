@@ -250,7 +250,7 @@ def test_python():
     # Ensure gpu + devtools plugins are installed for testing
     import shutil
     _installed = []
-    for pname in ["gpu.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py"]:
+    for pname in ["gpu.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py", "fanout.py"]:
         src = os.path.join(ROOT, "plugins", "available", pname)
         dst = os.path.join(ROOT, "plugins", pname)
         if os.path.exists(src) and not os.path.exists(dst):
@@ -751,6 +751,93 @@ def _run_http_tests(port, label, token="", approve=""):
     # 503 (no conf) or 502 (conf set but backend unreachable in CI). Both acceptable.
     test(f"{label}: POST /dev/gpu (no conf) -> 503 or 502",
          st3 in (502, 503), f"status={st3} body={body3[:80]}")
+
+    # /dev/fanout — tee-style broadcast.
+    # No conf → 503.
+    http_method(port, "/etc/fanout.conf", method="DELETE", token=approve)
+    st, _ = http_post(port, "/dev/fanout", "hi", token=token)
+    test(f"{label}: fanout no conf -> 503", st == 503, f"status={st}")
+
+    # No auth → 401.
+    st, _ = http_post(port, "/dev/fanout", "hi", token="")
+    test(f"{label}: fanout no auth -> 401", st == 401, f"status={st}")
+
+    # Browser GET → man page.
+    st_gui, body_gui = http_method(port, "/dev/fanout", method="GET",
+                                    headers={"Accept": "text/html"})
+    test(f"{label}: fanout browser GET -> 200 man page",
+         st_gui == 200 and "<form" in body_gui.lower(), f"status={st_gui}")
+
+    # Write conf with 3 targets (T3 needed for /etc/* writes).
+    conf = "home/fanout-a\nhome/fanout-b\n# comment\n\n/home/fanout-c\n"
+    st, _ = http_method(port, "/etc/fanout.conf", method="PUT", body=conf, token=approve)
+    test(f"{label}: fanout conf write -> 200", st == 200, f"status={st}")
+
+    # POST /dev/fanout → append to all three. All should receive.
+    st, body = http_post(port, "/dev/fanout", "ping-1", token=token)
+    test(f"{label}: fanout POST -> 200", st == 200, f"status={st}")
+    d = json.loads(body)
+    test(f"{label}: fanout wrote 3 targets",
+         sorted(d.get("written", [])) == ["fanout-a", "fanout-b", "fanout-c"],
+         f"written={d.get('written')}")
+    test(f"{label}: fanout no failures", d.get("failed") == [], f"failed={d.get('failed')}")
+
+    # Each target has the message.
+    for tgt in ("fanout-a", "fanout-b", "fanout-c"):
+        st_t, body_t = http_get(port, f"/home/{tgt}")
+        dt = json.loads(body_t)
+        test(f"{label}: fanout target {tgt} got msg",
+             "ping-1" in dt.get("stage_html", ""), f"stage={dt.get('stage_html','')[:30]}")
+
+    # Second POST appends — target accumulates.
+    http_post(port, "/dev/fanout", "ping-2", token=token)
+    st_t, body_t = http_get(port, "/home/fanout-a")
+    dt = json.loads(body_t)
+    test(f"{label}: fanout POST appends",
+         "ping-1" in dt.get("stage_html", "") and "ping-2" in dt.get("stage_html", ""),
+         f"stage={dt.get('stage_html','')[:40]}")
+
+    # PUT overwrites — target content replaced.
+    http_method(port, "/dev/fanout", method="PUT", body="fresh", token=token)
+    st_t, body_t = http_get(port, "/home/fanout-a")
+    dt = json.loads(body_t)
+    test(f"{label}: fanout PUT overwrites",
+         dt.get("stage_html", "").strip() == "fresh",
+         f"stage={dt.get('stage_html','')[:40]}")
+
+    # System target in conf + T2 caller → that one fails, others still succeed.
+    conf_sys = "home/fanout-a\netc/fanout-sys-target\n"
+    http_method(port, "/etc/fanout.conf", method="PUT", body=conf_sys, token=approve)
+    st, body = http_post(port, "/dev/fanout", "t2-tries", token=token)
+    d = json.loads(body)
+    test(f"{label}: fanout T2 → home/* written",
+         "fanout-a" in d.get("written", []), f"written={d.get('written')}")
+    test(f"{label}: fanout T2 → etc/* refused",
+         any(f.get("target") == "etc/fanout-sys-target" for f in d.get("failed", [])),
+         f"failed={d.get('failed')}")
+
+    # T3 can hit system targets in fanout.
+    st, body = http_post(port, "/dev/fanout", "t3-can", token=approve)
+    d = json.loads(body)
+    test(f"{label}: fanout T3 → etc/* written too",
+         "etc/fanout-sys-target" in d.get("written", []),
+         f"written={d.get('written')}")
+
+    # Cap token — even mode=rw for /dev/fanout → still refused (broad vs narrow).
+    mint_body = http_method(port, "/auth/mint?prefix=/dev/fanout&ttl=600&mode=rw",
+                            method="POST", token=approve)
+    try:
+        cap = json.loads(mint_body[1]).get("token", "")
+    except Exception:
+        cap = ""
+    if cap:
+        st, _ = http_post(port, "/dev/fanout", "cap-tries", token=cap)
+        test(f"{label}: fanout rejects cap token -> 401", st == 401, f"status={st}")
+
+    # Cleanup — remove the test worlds and conf.
+    http_method(port, "/etc/fanout.conf", method="DELETE", token=approve)
+    for tgt in ("home/fanout-a", "home/fanout-b", "home/fanout-c", "etc/fanout-sys-target"):
+        http_method(port, "/" + tgt, method="DELETE", token=approve)
 
     # Query-string URL-decoding regression: browsers URL-encode / as %2F
     # when a form field value contains a slash. Before the fix, server.py
