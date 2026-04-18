@@ -10,56 +10,32 @@ import server
 # and gets stripped on the wire (world "foo" is displayed at /dav/home/foo).
 _SYS_PREFIXES = ("etc/", "usr/", "var/", "boot/", "tmp/", "mnt/")
 
-def _ext(typ):
-    if typ == "html": return ".html.txt"  # file:// has no sandbox
-    if typ and typ != "plain" and typ != "dir": return "." + typ
-    return ".txt"
-
-def _suffix(rest, ext):
-    """Extension suffix for a DAV href. Empty string when the last path
-    segment already contains a dot — meaning the world was HTTP-created
-    with a dotted name (e.g. `etc/gpu.conf`) and DAV must not re-append
-    a second extension. For DAV-created worlds (dotless names), returns
-    the usual `.txt` / `.html.txt` / `.{ext}`."""
-    last = rest.rsplit("/", 1)[-1]
-    return "" if "." in last else _ext(ext)
-
 def _check_write_auth(scope):
     """Write ops need Bearer or Basic auth. Read is open."""
     return server._check_auth(scope) is not None
 
 def _world_name(path):
-    """DAV URL → world name.
+    """DAV URL → world name. Identity. Path IS name.
 
-      /dav/home/foo.png                   → 'foo'
-      /dav/home/docs/v2.0/notes.md        → 'docs/v2.0/notes'
-      /dav/home/foo.txt/bar.txt           → 'foo.txt/bar'
-      /dav/etc/gpu.conf                   → 'etc/gpu'
+      /dav/home/foo.png                   → 'foo.png'
+      /dav/home/docs/v2.0/notes.md        → 'docs/v2.0/notes.md'
+      /dav/home/foo.txt/bar.txt           → 'foo.txt/bar.txt'
+      /dav/etc/gpu.conf                   → 'etc/gpu.conf'
       /dav/foo                            → 'foo' (legacy)
 
-    Only the LAST segment's last dot is stripped — it's the extension hint.
-    Intermediate segments keep their dots so DAV paths map bijectively to
-    the same world whether or not the path has dotted ancestors. (Previous
-    'strip at first dot' rule made every path under /dav/home/foo.txt/...
-    collapse to the same world, which broke MKCOL+PUT and file/folder
-    disambiguation in clients like WinSCP.)
+    No dot stripping. No extension inference. Paths go through unchanged
+    after the /dav and home/ URL-prefix sugar is removed. This matches
+    HTTP: PUT /home/foo.txt creates world 'foo.txt', PUT /dav/home/foo.txt
+    also creates world 'foo.txt'. Same namespace. No divergence.
 
-    Worlds with dots in their final segment (created by HTTP PUT, like
-    `etc/gpu.conf`) cannot be created via DAV PUT — DAV's trailing-dot
-    strip guarantees dotless last segments. But PROPFIND lists them,
-    and GET/DELETE/MOVE work as long as the caller uses the exact path
-    it learned from PROPFIND.
+    Every prior "smart" strip rule (first-dot, last-dot, per-segment)
+    produced its own class of collision or MKCOL/PUT inconsistency. The
+    blind-pipe reading is: the pipe does not parse, and path is path.
     """
     rest = path[4:].lstrip("/").rstrip("/")  # strip /dav + trailing slash
     if rest.startswith("home/"): rest = rest[5:]  # home/ is URL-only sugar
     elif rest == "home": rest = ""                # /dav/home/ itself is the user root
-    if not rest: return ""
-    segs = rest.split("/")
-    last = segs[-1]
-    dot = last.rfind(".")
-    if dot > 0:  # require at least one char before dot so ".hidden" survives
-        segs[-1] = last[:dot]
-    return "/".join(segs)
+    return rest
 
 def _read(name):
     c = server.conn(name)
@@ -113,7 +89,7 @@ async def handle(method, body, params):
             if not is_dir:
                 dav_href = f"/dav/home/{world}" if not world.startswith(_SYS_PREFIXES) else f"/dav/{world}"
                 xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
-                       + _prop(f"{dav_href}{_suffix(world, ext)}", "", "text/plain", len(raw), now)
+                       + _prop(dav_href, "", server._ext_to_ct(ext), len(raw), now)
                        + '</D:multistatus>')
                 return {"_body":xml, "_ct":"application/xml; charset=utf-8", "_status":207}
         # Collection listing — root, /home/, /etc/, virtual dir inside a namespace.
@@ -157,9 +133,11 @@ async def handle(method, body, params):
                     else:
                         raw, ext = _read(w)
                         if ext == "dir":
-                            xml += _prop(f"{children_href}{rest}/", "collection", "", 0, now)
+                            if rest not in seen_dirs:
+                                seen_dirs.add(rest)
+                                xml += _prop(f"{children_href}{rest}/", "collection", "", 0, now)
                         else:
-                            xml += _prop(f"{children_href}{rest}{_suffix(rest, ext)}", "", "text/plain", len(raw), now)
+                            xml += _prop(f"{children_href}{rest}", "", server._ext_to_ct(ext), len(raw), now)
         xml += '</D:multistatus>'
         return {"_body":xml, "_ct":"application/xml; charset=utf-8", "_status":207}
 
@@ -204,15 +182,15 @@ async def handle(method, body, params):
                                 listing += f'<li><a href="{href_base}{first}/">{first}/</a></li>'
                         else:
                             _, ext = _read(w)
-                            listing += f'<li><a href="{href_base}{rest}{_suffix(rest, ext)}">{rest}</a> <em>({ext})</em></li>'
+                            listing += f'<li><a href="{href_base}{rest}">{rest}</a> <em>({ext})</em></li>'
             listing += "</ul>"
             return {"_html": listing}
         if not server._valid_name(name) or not (server.DATA / server._disk_name(name) / "universe.db").exists():
             return {"error":"not found", "_status":404}
         if (name == "etc/shadow" or name.startswith("boot/")) and server._check_auth(scope) != "approve":
             return {"error":"read requires approve", "_status":403}
-        raw, _ = _read(name)
-        return {"_body":raw, "_ct":"text/plain"}
+        raw, ext = _read(name)
+        return {"_body":raw, "_ct":server._ext_to_ct(ext)}
 
     if method in ("PUT", "DELETE", "MOVE", "COPY") and not _check_write_auth(scope):
         return {"error":"authentication required", "_status":401,
@@ -224,10 +202,19 @@ async def handle(method, body, params):
         if not server._valid_name(name): return {"error":"invalid world name", "_status":400}
         # Use raw bytes from params (plugin dispatch preserves them)
         raw = params.get("_body_raw", body.encode("utf-8") if isinstance(body, str) else body or b"")
-        # Ext from filename: /dav/photo.png → ext=png
-        dot = path.rfind(".")
-        ext = path[dot+1:].lower().strip() if dot > 0 else "plain"
-        if not ext: ext = "plain"
+        # ext comes from ?ext= query (explicit) or Content-Type header (client's
+        # own MIME hint). No parsing of URL path — the path is the name, dots
+        # are just bytes in the name. Default "plain".
+        ext = params.get("ext")
+        if not ext:
+            ct = ""
+            for k, v in scope.get("headers", []):
+                if k == b"content-type":
+                    ct = v.decode("utf-8", "replace").split(";")[0].strip().lower()
+                    break
+            # Reverse the server._CT table so we can go content-type → ext.
+            ct_to_ext = {v: k for k, v in server._CT.items()}
+            ext = ct_to_ext.get(ct, "plain")
         if ext == "html" and server._check_auth(scope) != "approve":
             return {"error": "html write requires approve", "_status": 403}
         if name.startswith(_SYS_PREFIXES) and server._check_auth(scope) != "approve":
