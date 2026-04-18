@@ -14,27 +14,40 @@ def _check_write_auth(scope):
     """Write ops need Bearer or Basic auth. Read is open."""
     return server._check_auth(scope) is not None
 
+def _suffix(rest, ext):
+    """Render-time ext decoration for PROPFIND hrefs. Dotless last segment +
+    ext not in (html, dir, plain none) → append .{ext}. 'plain' → '.txt'."""
+    last = rest.rsplit("/", 1)[-1]
+    if "." in last: return ""
+    if not ext or ext in ("dir", "html"): return ""
+    if ext == "plain": return ".txt"
+    return f".{ext}"
+
 def _world_name(path):
-    """DAV URL → world name. Identity. Path IS name.
+    """DAV URL → world name. Identity first, strip-and-retry fallback.
 
-      /dav/home/foo.png                   → 'foo.png'
-      /dav/home/docs/v2.0/notes.md        → 'docs/v2.0/notes.md'
-      /dav/home/foo.txt/bar.txt           → 'foo.txt/bar.txt'
-      /dav/etc/gpu.conf                   → 'etc/gpu.conf'
-      /dav/foo                            → 'foo' (legacy)
+    Fast path: strip /dav and home/ URL sugar, return the rest verbatim.
+    Fallback: if no world exists at that name, strip the last segment's
+    last dot and retry. This lets DAV access legacy worlds created with
+    dotless names (e.g. 'meeting-0412') via PROPFIND-decorated hrefs
+    (e.g. '/dav/home/meeting-0412.txt').
 
-    No dot stripping. No extension inference. Paths go through unchanged
-    after the /dav and home/ URL-prefix sugar is removed. This matches
-    HTTP: PUT /home/foo.txt creates world 'foo.txt', PUT /dav/home/foo.txt
-    also creates world 'foo.txt'. Same namespace. No divergence.
-
-    Every prior "smart" strip rule (first-dot, last-dot, per-segment)
-    produced its own class of collision or MKCOL/PUT inconsistency. The
-    blind-pipe reading is: the pipe does not parse, and path is path.
+    Writes (PUT/MKCOL) hit the identity path — a brand-new world name
+    matches no existing world, so we return it as-is for creation.
     """
     rest = path[4:].lstrip("/").rstrip("/")  # strip /dav + trailing slash
-    if rest.startswith("home/"): rest = rest[5:]  # home/ is URL-only sugar
-    elif rest == "home": rest = ""                # /dav/home/ itself is the user root
+    if rest.startswith("home/"): rest = rest[5:]
+    elif rest == "home": rest = ""
+    if not rest: return ""
+    if (server.DATA / server._disk_name(rest) / "universe.db").exists():
+        return rest
+    segs = rest.split("/")
+    last = segs[-1]
+    dot = last.rfind(".")
+    if dot > 0:
+        stripped = "/".join(segs[:-1] + [last[:dot]])
+        if (server.DATA / server._disk_name(stripped) / "universe.db").exists():
+            return stripped
     return rest
 
 def _read(name):
@@ -100,7 +113,7 @@ async def handle(method, body, params):
             if not is_dir:
                 dav_href = f"/dav/home/{world}" if not world.startswith(_SYS_PREFIXES) else f"/dav/{world}"
                 xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
-                       + _prop(dav_href, "", server._ext_to_ct(ext), len(raw), now)
+                       + _prop(f"{dav_href}{_suffix(world, ext)}", "", server._ext_to_ct(ext), len(raw), now)
                        + '</D:multistatus>')
                 return {"_body":xml, "_ct":"application/xml; charset=utf-8", "_status":207}
         # Collection listing — root, /home/, /etc/, virtual dir inside a namespace.
@@ -148,7 +161,7 @@ async def handle(method, body, params):
                                 seen_dirs.add(rest)
                                 xml += _prop(f"{children_href}{rest}/", "collection", "", 0, now)
                         else:
-                            xml += _prop(f"{children_href}{rest}", "", server._ext_to_ct(ext), len(raw), now)
+                            xml += _prop(f"{children_href}{rest}{_suffix(rest, ext)}", "", server._ext_to_ct(ext), len(raw), now)
         xml += '</D:multistatus>'
         return {"_body":xml, "_ct":"application/xml; charset=utf-8", "_status":207}
 
@@ -193,7 +206,7 @@ async def handle(method, body, params):
                                 listing += f'<li><a href="{href_base}{first}/">{first}/</a></li>'
                         else:
                             _, ext = _read(w)
-                            listing += f'<li><a href="{href_base}{rest}">{rest}</a> <em>({ext})</em></li>'
+                            listing += f'<li><a href="{href_base}{rest}{_suffix(rest, ext)}">{rest}</a> <em>({ext})</em></li>'
             listing += "</ul>"
             return {"_html": listing}
         if not server._valid_name(name) or not (server.DATA / server._disk_name(name) / "universe.db").exists():
