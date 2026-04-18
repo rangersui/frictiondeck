@@ -725,8 +725,21 @@ def _run_http_tests(port, label, token=""):
              "hello from test" in body, f"body={body[:80]}")
 
     # /dev/gpu — pluggable AI device.
-    # GET /dev/gpu -> 405 (POST only; plugin AUTH=auth so actually 401 if no token,
-    # but with a valid token we should see 405).
+    # Plugin AUTH="none" so man page (browser GET) works without auth.
+    # Handler gates POST inline — anon POST must 401 (API-bill protection).
+    st_anon, _ = http_post(port, "/dev/gpu", "hi", token="")
+    test(f"{label}: POST /dev/gpu no auth -> 401", st_anon == 401, f"status={st_anon}")
+
+    # Browser GET (Accept: text/html) → man page form. 200 HTML, not 405.
+    st_gui, body_gui = http_method(port, "/dev/gpu", method="GET",
+                                    headers={"Accept": "text/html"})
+    test(f"{label}: GET /dev/gpu browser -> 200 man page",
+         st_gui == 200 and "<form" in body_gui.lower(), f"status={st_gui}")
+
+    # curl GET (no Accept) → 405 (POST-only endpoint).
+    st_curl_get, _ = http_get(port, "/dev/gpu")
+    test(f"{label}: GET /dev/gpu curl -> 405", st_curl_get == 405, f"status={st_curl_get}")
+
     st2, _ = http_post(port, "/dev/gpu", "", token=token)
     test(f"{label}: POST /dev/gpu empty -> 400", st2 == 400, f"status={st2}")
 

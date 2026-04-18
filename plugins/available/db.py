@@ -12,11 +12,12 @@ through its own HTTP through its own plugin. The query gets logged.
 The log can be queried. The observer observes itself observing.
 """
 DESCRIPTION = "/dev/db — read-only SQL on world databases"
-AUTH = "auth"  # T2 can query. T3 not needed — it's read-only.
+AUTH = "none"  # GET renders man page (browser) / 405 (curl). POST checks auth inline.
 ROUTES = {}
 
 import json, os, sqlite3
 from pathlib import Path
+import server
 
 _DATA = Path(os.environ.get("ELASTIK_DATA", "data")).resolve()
 
@@ -69,6 +70,16 @@ def _resolve_mnt(file_path):
 
 async def handle_db(method, body, params):
     """/dev/db — SELECT-only SQL. Read-only connection. Bounded."""
+    if method != "POST":
+        return {"error": "POST only — body=SQL, response=JSON/text",
+                "_status": 405}
+    # Query is read-only, but anon reads of browser history would still leak.
+    # Gate inline so browser GET can render man page (plugin AUTH="none").
+    scope = params.get("_scope", {})
+    if not server._check_auth(scope):
+        return {"error": "auth required — T2 token or cap token scoped to /dev/db",
+                "_status": 401,
+                "_headers": [["www-authenticate", 'Basic realm="elastik"']]}
     sql = (body if isinstance(body, str) else body.decode("utf-8", "replace")).strip()
     if not sql:
         return {"error": "POST body = SQL query", "_status": 400}

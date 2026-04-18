@@ -58,7 +58,7 @@ else per-scheme default.
   curl /home/article?raw | curl -X POST /dev/gpu -d @-
 """
 
-AUTH = "auth"  # T2 — don't let anon rack up API bills.
+AUTH = "none"  # GET renders man page (browser) / 405 (curl). POST checks auth inline.
 
 
 # ── HTTP helper ──────────────────────────────────────────────
@@ -171,6 +171,13 @@ async def handle(method, body, params):
     if method != "POST":
         return {"error": "POST only — body=prompt, response=text/plain",
                 "_status": 405}
+    # POST is the mutating action — costs API $. Gate inline so browser GET
+    # can still render the man page (plugin AUTH="none").
+    scope = params.get("_scope", {})
+    if not server._check_auth(scope):
+        return {"error": "auth required — T2 token or cap token scoped to /dev/gpu",
+                "_status": 401,
+                "_headers": [["www-authenticate", 'Basic realm="elastik"']]}
     prompt = body if isinstance(body, str) else body.decode("utf-8", "replace")
     prompt = prompt.strip()
     if not prompt:
