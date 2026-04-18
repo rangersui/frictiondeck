@@ -43,7 +43,7 @@ const el={
   stages:()=>fetch('/proc/worlds').then(r=>r.json()),
   grep:(q,w)=>fetch('/grep?q='+encodeURIComponent(q)+(w?'&world='+w:'')).then(r=>r.text()),
   post:(url,body,headers)=>fetch('/postman',{method:'POST',body:JSON.stringify({url,method:'POST',body,headers:headers||{}})}).then(r=>r.text()),
-  get:(url)=>fetch('/proxy?url='+encodeURIComponent(url)).then(r=>r.text()),
+  get:(url)=>fetch('/fetch?url='+encodeURIComponent(url)).then(r=>r.text()),
   exec:(cmd)=>fetch('/exec',{method:'POST',body:cmd}).then(r=>r.text()),
 };
 
@@ -202,7 +202,7 @@ function parseCommand(input){
   if(c==='curl'){
     const url=parts[1]||'';
     if(!url)return{v:'usage: curl <url>'};
-    return{p:fetch('/proxy?url='+encodeURIComponent(url)).then(r=>r.text())};
+    return{p:fetch('/fetch?url='+encodeURIComponent(url)).then(r=>r.text())};
   }
 
   return undefined;

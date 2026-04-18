@@ -1183,8 +1183,8 @@ async def handle_eclipse(method, body, params):
     return {"_html": "☀ sky is clear.\n", "_status": 200}
 
 
-async def handle_proxy(method, body, params):
-    """/proxy?url=https://example.com — fetch a URL via curl."""
+async def handle_fetch(method, body, params):
+    """/fetch?url=https://example.com — GET a URL via curl, return body."""
     from urllib.parse import unquote
     url = unquote(params.get("url", ""))
     if not url or not url.startswith(("http://", "https://")):
@@ -1194,7 +1194,7 @@ async def handle_proxy(method, body, params):
 
 
 ROUTES = {
-    "/proxy": handle_proxy,
+    "/fetch": handle_fetch,
     "/grep": handle_grep,
     "/tail": handle_tail,
     "/head": handle_head,
