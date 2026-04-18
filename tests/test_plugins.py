@@ -279,7 +279,7 @@ def test_python():
         _run_auth_tests(py_port, "python", py_token, py_approve)
         _run_plugin_auth_tests(py_port, "python", py_token, py_approve)
         _run_blob_ext_tests(py_port, "python", py_token, py_approve)
-        _run_http_tests(py_port, "python", token=py_token)
+        _run_http_tests(py_port, "python", token=py_token, approve=py_approve)
         _run_devtools_tests(py_port, "python", token=py_token)
         _run_flush_sse_test(py_port, "python", py_token)
     finally:
@@ -714,7 +714,7 @@ def _run_blob_ext_tests(port, label, token, approve):
         test(f"{label} unicode: /proc/worlds has fake dir", any("\u82b1\u6912/" in n for n in names), "")
 
 
-def _run_http_tests(port, label, token=""):
+def _run_http_tests(port, label, token="", approve=""):
     """HTTP integration tests."""
 
     # Echo
@@ -743,10 +743,11 @@ def _run_http_tests(port, label, token=""):
     st2, _ = http_post(port, "/dev/gpu", "", token=token)
     test(f"{label}: POST /dev/gpu empty -> 400", st2 == 400, f"status={st2}")
 
-    # No /etc/gpu.conf configured -> 503.
-    # Whitespace-only body still counts as empty (handler strips), so use real body.
+    # Wipe etc/gpu.conf first so the "no conf -> 503" check is deterministic.
+    # Left-over conf from prior runs could make the backend answer 200.
+    http_method(port, "/etc/gpu.conf", method="DELETE", token=approve)
     st3, body3 = http_post(port, "/dev/gpu", "ping", token=token)
-    # Either 503 (no conf) or 502 (conf set but backend unreachable in CI). Both acceptable.
+    # 503 (no conf) or 502 (conf set but backend unreachable in CI). Both acceptable.
     test(f"{label}: POST /dev/gpu (no conf) -> 503 or 502",
          st3 in (502, 503), f"status={st3} body={body3[:80]}")
 

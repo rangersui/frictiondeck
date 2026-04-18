@@ -500,10 +500,21 @@ async def app(scope, receive, send):
                 _is_post = "POST " in doc or "body" in doc.lower()[:200]
                 # Build form fields
                 if _is_post:
-                    _fields = (f'<textarea name="_body" rows="4" placeholder="body..." '
-                               f'style="font:14px monospace;padding:6px;width:95%;display:block;margin:4px 0"></textarea>')
+                    seen = set()
+                    _fields = ""
+                    # Query-param inputs first (e.g. ?file=, ?world=, ?ext=)
+                    for p in _params or []:
+                        if p not in seen and p != "_body":
+                            seen.add(p)
+                            _fields += (f'<div style="margin:4px 0"><label style="display:inline-block;width:80px;font-weight:bold">{p}</label>'
+                                        f'<input name="{p}" placeholder="{p}..." style="font:14px monospace;padding:4px;width:60%"></div>')
+                    # Then the body textarea
+                    _fields += (f'<textarea name="_body" rows="4" placeholder="body..." '
+                                f'style="font:14px monospace;padding:6px;width:95%;display:block;margin:4px 0"></textarea>')
                     _method = "POST"
-                    _curl = f'curl -X POST localhost:3005{route} -d "..."'
+                    _qex = "&".join(f"{p}=..." for p in _params) if _params else ""
+                    _curl = (f'curl -X POST "localhost:3005{route}?{_qex}" -d "..."' if _qex
+                             else f'curl -X POST localhost:3005{route} -d "..."')
                 else:
                     seen = set()
                     _fields = ""
@@ -525,6 +536,10 @@ async def app(scope, receive, send):
                     'const q=new URLSearchParams();for(const[k,v]of fd)if(v)q.set(k,v);'
                     'if([...q].length)url+="?"+q;'
                     '}else{'
+                    # POST: non-_body fields become query-string params, _body is the body
+                    'const q=new URLSearchParams();'
+                    'for(const[k,v]of fd)if(k!=="_body"&&v)q.set(k,v);'
+                    'if([...q].length)url+="?"+q;'
                     'opts.body=fd.get("_body")||"";'
                     'opts.headers={"Content-Type":"text/plain"};'
                     '}'

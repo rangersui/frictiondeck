@@ -69,7 +69,23 @@ def _resolve_mnt(file_path):
 
 
 async def handle_db(method, body, params):
-    """/dev/db — SELECT-only SQL. Read-only connection. Bounded."""
+    """POST /dev/db — SELECT-only SQL over a world or fstab-mounted file.
+
+    body: the query. SELECT / PRAGMA / WITH / EXPLAIN only.
+    query: ?world=name  → that world's universe.db
+           ?file=mnt/path.db → an fstab-mounted sqlite file
+
+    Examples:
+      curl -X POST "localhost:3005/dev/db?file=brave/History" \\
+        -d "SELECT url, title FROM urls ORDER BY visit_count DESC LIMIT 10"
+      curl -X POST "localhost:3005/dev/db?world=toilet" \\
+        -d "SELECT * FROM stage_meta"
+
+    Connection is ro + immutable=1 — safe to read DBs that other
+    processes currently hold open (e.g. Brave History while browser runs).
+    Returns JSON pretty-printed as text by default; Accept: application/json
+    gets raw JSON. Hard cap: 1000 rows.
+    """
     if method != "POST":
         return {"error": "POST only — body=SQL, response=JSON/text",
                 "_status": 405}
