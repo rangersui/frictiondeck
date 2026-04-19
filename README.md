@@ -193,6 +193,18 @@ tar xzf elastik.tar.gz && tar xzf data.tar.gz && python server.py
 
 Two curls. One clone. The clone can clone itself.
 
+## Supply chain
+
+Zero runtime deps. `_mini_serve` makes uvicorn optional.
+
+`uvicorn[standard]` installs `httptools`, which Uvicorn uses by default
+for HTTP/1.1. We reported an upstream `parse_url()` truncation bug as
+[MagicStack/httptools#142](https://github.com/MagicStack/httptools/issues/142).
+
+elastik on `_mini_serve` avoids that code path entirely. Under uvicorn,
+elastik still keeps conservative path handling and an 8 KB URL cap for
+ordinary oversized requests.
+
 ---
 
 elastik is storage-agnostic, transport-agnostic, and interface-relative.
