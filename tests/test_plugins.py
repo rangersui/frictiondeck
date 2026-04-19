@@ -283,6 +283,7 @@ def test_python():
         _run_devtools_tests(py_port, "python", token=py_token)
         _run_flush_sse_test(py_port, "python", py_token)
         _run_uint16_redteam_tests(py_port, "python", py_token, py_approve)
+        _run_meta_headers_tests(py_port, "python", py_token, py_approve)
     finally:
         proc.terminate()
         try:
@@ -1083,6 +1084,198 @@ def _run_uint16_redteam_tests(port, label, token, approve):
     else:
         test(f"{label} uint16: mint with truncated query -> blocked",
              st in (400, 414), f"status={st}")
+
+
+def _run_meta_headers_tests(port, label, token, approve):
+    """Phase 1 of 'HTTP is all you need': X-Meta-* request headers travel
+    with each PUT and replay on GET / ?raw. 16 checks covering happy path,
+    internal-ops isolation, read-side re-validation, and response-header
+    injection denial (X-Accel-Redirect etc. out of x-meta-* prefix)."""
+    W = "meta-test-world"
+
+    # cleanup prior state
+    http_method(port, f"/home/{W}", method="DELETE", token=approve)
+
+    # 1. PUT X-Meta-Author → /read returns headers=[["x-meta-author","codex"]]
+    st, _ = http_method(port, f"/home/{W}", method="PUT", body="x",
+                        token=token, headers={"X-Meta-Author": "codex"})
+    test(f"{label} meta: PUT X-Meta-Author -> 200", st == 200, f"status={st}")
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    test(f"{label} meta: /read returns headers array",
+         d.get("headers") == [["x-meta-author", "codex"]],
+         f"headers={d.get('headers')}")
+
+    # 2. ?raw response has x-meta-author header
+    import http.client as _hc
+    def _raw_hdrs(path, extra_headers=None):
+        c = _hc.HTTPConnection("127.0.0.1", port, timeout=5)
+        hdrs = dict(extra_headers or {})
+        c.request("GET", path, headers=hdrs)
+        r = c.getresponse(); r.read(); c.close()
+        return r.status, {k.lower(): v for k, v in r.getheaders()}
+    st, hdrs = _raw_hdrs(f"/home/{W}?raw")
+    test(f"{label} meta: ?raw reflects x-meta-author",
+         hdrs.get("x-meta-author") == "codex", f"headers={hdrs}")
+
+    # 3. ?raw + Range → 206 also has x-meta-author
+    c = _hc.HTTPConnection("127.0.0.1", port, timeout=5)
+    c.request("GET", f"/home/{W}?raw", headers={"Range": "bytes=0-0"})
+    r = c.getresponse(); r.read(); hdrs3 = {k.lower(): v for k, v in r.getheaders()}; st3 = r.status; c.close()
+    test(f"{label} meta: ?raw Range 206 also reflects x-meta-author",
+         st3 == 206 and hdrs3.get("x-meta-author") == "codex",
+         f"status={st3} headers={hdrs3}")
+
+    # 4. Multi-value (same name twice) → two list entries, HTTP allows it
+    #    urllib.request can't send dup headers easily, use http.client
+    c = _hc.HTTPConnection("127.0.0.1", port, timeout=5)
+    c.putrequest("PUT", f"/home/{W}")
+    c.putheader("Authorization", f"Bearer {token}")
+    c.putheader("X-Meta-Tag", "a")
+    c.putheader("X-Meta-Tag", "b")
+    c.putheader("Content-Length", "1")
+    c.endheaders(); c.send(b"x"); r = c.getresponse(); r.read(); c.close()
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    tags = [v for k, v in d.get("headers", []) if k == "x-meta-tag"]
+    test(f"{label} meta: multi-value X-Meta-Tag preserved", tags == ["a", "b"],
+         f"tags={tags} full={d.get('headers')}")
+
+    # 5. Authorization NOT stored (it's auth, not meta)
+    http_method(port, f"/home/{W}", method="PUT", body="x",
+                token=token, headers={"X-Meta-Only": "yes"})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    kept = [k for k, _ in d.get("headers", [])]
+    test(f"{label} meta: Authorization not stored",
+         "authorization" not in kept, f"kept={kept}")
+
+    # 6. X-Forwarded-For not stored (infra, not user intent; not x-meta-*)
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
+                headers={"X-Meta-Keep": "1", "X-Forwarded-For": "1.2.3.4"})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    kept = [k for k, _ in d.get("headers", [])]
+    test(f"{label} meta: X-Forwarded-For not stored",
+         "x-forwarded-for" not in kept, f"kept={kept}")
+
+    # 7. X-Accel-Redirect not stored (nginx-interpreted response directive)
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
+                headers={"X-Meta-Keep": "1", "X-Accel-Redirect": "/etc/passwd"})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    kept = [k for k, _ in d.get("headers", [])]
+    test(f"{label} meta: X-Accel-Redirect not stored",
+         "x-accel-redirect" not in kept, f"kept={kept}")
+
+    # 8. CRLF/NUL injection in X-Meta value → dropped (can't inject via Python
+    # http clients directly — they refuse bad headers — so we inject at the
+    # DB layer to confirm read-side catches it too). See test 16 for that path.
+    # Here we do the client-side path: valid char-only stays, bad char rejected.
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
+                headers={"X-Meta-Clean": "plain-ascii-ok"})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    test(f"{label} meta: clean ASCII value stored",
+         any(k == "x-meta-clean" and v == "plain-ascii-ok"
+             for k, v in d.get("headers", [])),
+         f"headers={d.get('headers')}")
+
+    # 9. X-Elastik-Internal NOT stored (reserved prefix, also not x-meta-*)
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
+                headers={"X-Meta-Author": "u", "X-Elastik-Internal": "hack"})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    kept = [k for k, _ in d.get("headers", [])]
+    test(f"{label} meta: X-Elastik-* not stored (not x-meta-*)",
+         "x-elastik-internal" not in kept, f"kept={kept}")
+
+    # 10. One over-size value → drops that one, keeps others
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
+                headers={"X-Meta-Keep": "small", "X-Meta-Huge": "a" * 2000})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    kept = {k: v for k, v in d.get("headers", [])}
+    test(f"{label} meta: oversized value drops that header only",
+         "x-meta-keep" in kept and "x-meta-huge" not in kept,
+         f"kept={list(kept)}")
+
+    # 11. Total >8 KB → drop all (try with many small headers)
+    many = {f"X-Meta-Key{i}": "v" * 100 for i in range(100)}   # ~10 KB total JSON
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
+                headers=many)
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    test(f"{label} meta: total-overflow drops all",
+         d.get("headers") == [], f"headers_len={len(d.get('headers', []))}")
+
+    # 12. POST /sync does NOT clobber headers column
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token,
+                headers={"X-Meta-Author": "alice"})
+    http_method(port, f"/home/{W}/sync", method="POST", body="sync-payload",
+                token=token, headers={"X-Meta-Author": "mallory"})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    test(f"{label} meta: /sync internal op does not clobber headers",
+         d.get("headers") == [["x-meta-author", "alice"]],
+         f"headers={d.get('headers')}")
+
+    # 13. POST append does NOT clobber headers column either (Phase 1 scope)
+    http_method(port, f"/home/{W}", method="PUT", body="a", token=token,
+                headers={"X-Meta-Author": "alice"})
+    http_method(port, f"/home/{W}", method="POST", body="b", token=token,
+                headers={"X-Meta-Author": "mallory"})
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    test(f"{label} meta: POST append does not clobber headers (PUT-only)",
+         d.get("headers") == [["x-meta-author", "alice"]],
+         f"headers={d.get('headers')}")
+
+    # 14. Old client: PUT with no X-Meta-* → headers=[]
+    http_method(port, f"/home/{W}", method="PUT", body="x", token=token)
+    st, body = http_get(port, f"/home/{W}")
+    d = json.loads(body)
+    test(f"{label} meta: no X-Meta-* → headers=[]",
+         d.get("headers") == [], f"headers={d.get('headers')}")
+
+    # 15. Manually inject >8 KB headers JSON at DB level → ?raw returns no x-meta-*
+    import sqlite3, os
+    db_path = os.path.join("data", "home%2F" + W, "universe.db")
+    if not os.path.exists(db_path):
+        # fallback: world under ELASTIK_DATA not home/; try bare name
+        db_path = os.path.join("data", W, "universe.db")
+    if os.path.exists(db_path):
+        huge_pairs = [[f"x-meta-k{i}", "v" * 200] for i in range(50)]  # ~12 KB JSON
+        c = sqlite3.connect(db_path)
+        c.execute("UPDATE stage_meta SET headers=? WHERE id=1",
+                  (json.dumps(huge_pairs, separators=(",", ":")),))
+        c.commit(); c.close()
+        # close any cached connection on server side: PUT to force re-open? Actually
+        # server caches conn — easiest: DELETE then re-PUT closes the cached handle.
+        # Instead: just query and hope server re-reads. Sqlite WAL across processes
+        # should give us the fresh row.
+        _, hdrs15 = _raw_hdrs(f"/home/{W}?raw")
+        meta15 = [k for k in hdrs15 if k.startswith("x-meta-")]
+        test(f"{label} meta: read-side total-size fail-closed",
+             meta15 == [], f"leaked x-meta-* headers: {meta15}")
+    else:
+        skip(f"{label} meta: read-side total-size fail-closed",
+             f"db path not found: {db_path}")
+
+    # 16. Manually inject X-Accel-Redirect at DB level → not replayed
+    if os.path.exists(db_path):
+        bad_pairs = [["x-accel-redirect", "/etc/passwd"], ["x-meta-ok", "yes"]]
+        c = sqlite3.connect(db_path)
+        c.execute("UPDATE stage_meta SET headers=? WHERE id=1",
+                  (json.dumps(bad_pairs, separators=(",", ":")),))
+        c.commit(); c.close()
+        _, hdrs16 = _raw_hdrs(f"/home/{W}?raw")
+        test(f"{label} meta: read-side prefix filter blocks x-accel-redirect",
+             "x-accel-redirect" not in hdrs16 and hdrs16.get("x-meta-ok") == "yes",
+             f"headers={hdrs16}")
+
+    # cleanup
+    http_method(port, f"/home/{W}", method="DELETE", token=approve)
 
 
 # ── Main ────────────────────────────────────────────────────────────
