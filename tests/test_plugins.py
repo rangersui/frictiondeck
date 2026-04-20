@@ -265,6 +265,11 @@ def test_python():
     env["ELASTIK_HOST"] = "127.0.0.1"
     env["ELASTIK_TOKEN"] = py_token
     env["ELASTIK_APPROVE_TOKEN"] = py_approve
+    # Let public_gate tests impersonate a non-localhost client by sending
+    # X-Forwarded-For (regression for the cloudflared-tunnel white-screen
+    # bug — app shell resources fetched anonymously by the browser).
+    env["ELASTIK_TRUST_PROXY_HEADER"] = "x-forwarded-for"
+    env["ELASTIK_TRUST_PROXY_FROM"] = "127.0.0.0/8"
     proc = subprocess.Popen(
         [sys.executable, "server.py"], env=env, cwd=ROOT,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -282,6 +287,7 @@ def test_python():
         _run_http_tests(py_port, "python", token=py_token, approve=py_approve)
         _run_devtools_tests(py_port, "python", token=py_token)
         _run_flush_sse_test(py_port, "python", py_token)
+        _run_public_gate_shell_tests(py_port, "python", py_token, py_approve)
         _run_uint16_redteam_tests(py_port, "python", py_token, py_approve)
     finally:
         proc.terminate()
@@ -1083,6 +1089,77 @@ def _run_uint16_redteam_tests(port, label, token, approve):
     else:
         test(f"{label} uint16: mint with truncated query -> blocked",
              st in (400, 414), f"status={st}")
+
+
+def _run_public_gate_shell_tests(port, label, token, approve):
+    """Regression for the cloudflared-tunnel white-screen bug (2026-04-20).
+
+    When elastik is behind a reverse proxy (Cloudflare tunnel, nginx,
+    etc.), public_gate auth-gates requests from non-localhost clients.
+    But browsers fetch app shell resources (manifest.json, sw.js,
+    favicon, opensearch) *anonymously* — no cookie, no Basic auth —
+    by HTML spec. Gating them returns 401 on every page load, which
+    breaks PWA install, Service Worker registration, and leaves the
+    iframe stuck at about:blank. public_gate must let these specific
+    paths through even without auth.
+
+    Why this isn't caught by the default test run: test subprocess
+    runs against 127.0.0.1 → public_gate passes through for free,
+    regardless of auth. The env now sets ELASTIK_TRUST_PROXY_HEADER +
+    ELASTIK_TRUST_PROXY_FROM so tests can send X-Forwarded-For to
+    impersonate a non-localhost client and actually exercise the gate.
+    """
+    # Impersonate a non-localhost client. 127.0.0.0/8 is in TRUST_FROM
+    # (set in test_python env), so public_gate honours the X-F-F header.
+    non_local = {"X-Forwarded-For": "203.0.113.1"}
+
+    # Sanity: non-localhost without auth → content is gated
+    st, body = http_method(port, "/home/some-world", method="GET",
+                           headers=non_local)
+    test(f"{label} public_gate: /home/* non-local no auth -> 401",
+         st == 401, f"status={st}")
+    test(f"{label} public_gate: 401 body is pastebin disguise",
+         "pastebin" in body, f"body={body[:40]}")
+
+    # App shell resources must pass through even without auth
+    for res in ("/manifest.json", "/sw.js", "/opensearch.xml"):
+        st, _ = http_method(port, res, method="GET", headers=non_local)
+        test(f"{label} public_gate: {res} non-local no auth -> 200",
+             st == 200, f"status={st}")
+
+    # /icon.png and /icon-192.png only exist if the icon file ships.
+    # They're on the whitelist anyway; verify they don't hard-401.
+    for res in ("/favicon.ico", "/icon.png", "/icon-192.png"):
+        st, _ = http_method(port, res, method="GET", headers=non_local)
+        test(f"{label} public_gate: {res} non-local no auth -> 200 or 404",
+             st in (200, 404), f"status={st}")
+
+    # APPROVE bearer lets content through from non-local (Ranger's actual
+    # demo flow: Cloudflare tunnel + Bearer token in header).
+    h_approve = dict(non_local); h_approve["Authorization"] = f"Bearer {approve}"
+    st, _ = http_method(port, "/proc/status", method="GET", headers=h_approve)
+    test(f"{label} public_gate: /proc/status non-local + APPROVE -> 200",
+         st == 200, f"status={st}")
+
+    # Basic auth also passes. Token is the bearer value, user field unused.
+    import base64 as _b64
+    basic = _b64.b64encode(f":{approve}".encode()).decode()
+    h_basic = dict(non_local); h_basic["Authorization"] = f"Basic {basic}"
+    st, _ = http_method(port, "/proc/status", method="GET", headers=h_basic)
+    test(f"{label} public_gate: /proc/status non-local + Basic -> 200",
+         st == 200, f"status={st}")
+
+    # 401 must advertise Basic realm so browsers show the native dialog
+    # (this is what lets humans type the approve token without a /gate page).
+    import http.client as _hc
+    c = _hc.HTTPConnection("127.0.0.1", port, timeout=5)
+    c.request("GET", "/home/some-world",
+              headers={"X-Forwarded-For": "203.0.113.1"})
+    r = c.getresponse(); r.read()
+    wa = r.getheader("www-authenticate") or ""
+    c.close()
+    test(f"{label} public_gate: 401 includes WWW-Authenticate: Basic",
+         "Basic" in wa and "realm" in wa.lower(), f"wa={wa!r}")
 
 
 # ── Main ────────────────────────────────────────────────────────────

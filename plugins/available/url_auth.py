@@ -3,13 +3,14 @@
 Separate plugin because URL tokens leak to logs, referer, browser history.
 Not installed = ?k= does nothing anywhere. Zero attack surface by default.
 
-When installed, registers server._check_url_auth for other plugins to call.
-Used by: /gate (QR/NFC), /mcp (MCP remote config).
+When installed, registers server._check_url_auth for other plugins that
+want QR/NFC-style share links (e.g. MCP remote config). No core route
+consumes it — this is an opt-in hook for future plugins.
 """
 import hmac as _hmac, os
 import server
 
-DESCRIPTION = "URL token auth (?k=) for QR/NFC/MCP"
+DESCRIPTION = "URL token auth (?k=) for QR/NFC share links"
 ROUTES = {}
 
 _APPROVE = os.getenv("ELASTIK_APPROVE_TOKEN", "")
