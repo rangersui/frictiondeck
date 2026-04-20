@@ -257,7 +257,7 @@ def test_python():
     # slip past the gate → 404 instead of 401.
     import shutil
     _installed = []
-    for pname in ["gpu.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py", "fanout.py", "public_gate.py"]:
+    for pname in ["gpu.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py", "fanout.py", "public_gate.py", "sse.py"]:
         src = os.path.join(ROOT, "plugins", "available", pname)
         dst = os.path.join(ROOT, "plugins", pname)
         if os.path.exists(src) and not os.path.exists(dst):
@@ -929,7 +929,25 @@ def _run_flush_sse_test(port, label, token):
     """
     import threading
 
-    # 1. Open SSE listener in background
+    # 1. Pre-seed /home/toilet so the SSE listener can't race
+    # /flush's world-creation. Without this, the listener connects
+    # before /flush has had a chance to create the world's DB; sse.py
+    # returns 404 ("world not found"); the listener thread dies
+    # silently; events[] stays empty. On local repeat runs a prior
+    # run's leftover world would hide the race — CI + fresh local
+    # alike always lost. Pre-seeding fixes both environments, so the
+    # CI skip that used to paper over this can go.
+    #
+    # DELETE first to nuke any leftover state from a prior /flush run:
+    # devtools._write_stage creates the DB with `ext DEFAULT 'html'`,
+    # which would then block our T2-auth PUT (the html-write-requires-
+    # approve gate). A DELETE (move-to-trash) makes the next PUT
+    # create a fresh DB with the core's `ext DEFAULT 'plain'`.
+    http_method(port, "/home/toilet", method="DELETE", token=token)
+    http_method(port, "/home/toilet", method="PUT", body="\U0001f4a9",
+                token=token)
+
+    # 2. Open SSE listener in background
     events = []
     def sse_listen():
         try:
@@ -955,42 +973,32 @@ def _run_flush_sse_test(port, label, token):
     t.start()
     time.sleep(0.5)
 
-    # 2. Flush
+    # 3. Flush
     st, body = http_post(port, "/flush", "", token=token)
     test(f"{label} flush: POST /flush -> 200", st == 200, f"status={st}")
     test(f"{label} flush: returns sparkle", "\u2728" in body, f"body={body[:20]}")
 
-    # 3. Wait for SSE events to arrive
+    # 4. Wait for SSE events to arrive
     time.sleep(1.5)
 
-    # 4. Verify SSE captured the show.
-    # Skip on CI — the SSE listener races /flush's world-creation: if
-    # /home/toilet doesn't exist yet when the listener opens /stream/,
-    # the stream 404s and the thread dies silently. On local repeat
-    # runs the world survives from the previous run so the race hides.
-    # CI always has clean data → always loses. Not worth retrofitting
-    # the test just to work around that ordering.
-    if os.environ.get("CI"):
-        skip(f"{label} flush: SSE events (skipped on CI)",
-             "listener-vs-world-creation race; local-only")
+    # 5. Verify SSE captured the show.
+    test(f"{label} flush: SSE got events", len(events) >= 3,
+         f"got {len(events)} events")
+    # Must start with 💩 and end with ✨
+    if events:
+        test(f"{label} flush: first event has seed",
+             "\U0001f4a9" in events[0] or "\U0001f4a9" in "".join(events[:2]),
+             f"first={events[0][:10]}")
+        test(f"{label} flush: last event is clean",
+             "\u2728" in events[-1],
+             f"last={events[-1][:10]}")
+        # Middle should have water
+        middle = "".join(events[1:-1])
+        test(f"{label} flush: middle has water",
+             "\U0001f4a7" in middle,
+             f"middle_sample={middle[:30]}")
     else:
-        test(f"{label} flush: SSE got events", len(events) >= 3,
-             f"got {len(events)} events")
-        # Must start with 💩 and end with ✨
-        if events:
-            test(f"{label} flush: first event has seed",
-                 "\U0001f4a9" in events[0] or "\U0001f4a9" in "".join(events[:2]),
-                 f"first={events[0][:10]}")
-            test(f"{label} flush: last event is clean",
-                 "\u2728" in events[-1],
-                 f"last={events[-1][:10]}")
-            # Middle should have water
-            middle = "".join(events[1:-1])
-            test(f"{label} flush: middle has water",
-                 "\U0001f4a7" in middle,
-                 f"middle_sample={middle[:30]}")
-        else:
-            test(f"{label} flush: SSE events exist", False, "no events captured")
+        test(f"{label} flush: SSE events exist", False, "no events captured")
 
     # 5. Verify world is clean
     st, body = http_get(port, "/home/toilet")
