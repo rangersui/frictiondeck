@@ -306,6 +306,7 @@ def test_python():
         _run_uint16_redteam_tests(py_port, "python", py_token, py_approve)
         _run_meta_headers_tests(py_port, "python", py_token, py_approve)
         _run_audit_binding_tests(py_port, "python", py_token, py_approve)
+        _run_head_tests(py_port, "python", py_token, py_approve)
     finally:
         proc.terminate()
         try:
@@ -1523,6 +1524,138 @@ def _run_audit_binding_tests(port, label, token, approve):
     # cleanup
     http_method(port, f"/home/{W}", method="DELETE", token=approve)
     http_method(port, f"/home/{DW}", method="DELETE", token=approve)
+
+
+def _run_head_tests(port, label, token, approve):
+    """HEAD = stat() for world read paths.
+
+    Contract: HEAD ≡ corresponding GET minus body bytes. Same status,
+    same headers (Content-Length reflects what the GET body would be,
+    Content-Type, Accept-Ranges, Content-Range on 206, X-Meta-* on the
+    ?raw path), body is always empty.
+
+    Deliberately: plain HEAD /world only mirrors the JSON read surface
+    and does NOT expose X-Meta-* in response headers; that lives on
+    ?raw, same as GET's existing contract. AI that wants metadata
+    should use HEAD /world?raw.
+    """
+    import http.client as _hc
+    W = "head-test-world"
+
+    # cleanup prior state
+    http_method(port, f"/home/{W}", method="DELETE", token=approve)
+
+    # seed a world with X-Meta-Author header so ?raw has metadata to reflect
+    body = "hello head test"
+    http_method(port, f"/home/{W}", method="PUT", body=body, token=token,
+                headers={"X-Meta-Author": "ranger"})
+
+    def _head(path, extra_headers=None):
+        c = _hc.HTTPConnection("127.0.0.1", port, timeout=5)
+        hdrs = dict(extra_headers or {})
+        c.request("HEAD", path, headers=hdrs)
+        r = c.getresponse()
+        payload = r.read()
+        c.close()
+        return r.status, {k.lower(): v for k, v in r.getheaders()}, payload
+
+    def _get(path, extra_headers=None):
+        c = _hc.HTTPConnection("127.0.0.1", port, timeout=5)
+        hdrs = dict(extra_headers or {})
+        c.request("GET", path, headers=hdrs)
+        r = c.getresponse()
+        payload = r.read()
+        c.close()
+        return r.status, {k.lower(): v for k, v in r.getheaders()}, payload
+
+    # 1. HEAD /home/<w> — JSON read surface, body empty, headers == GET JSON
+    gst, ghdrs, gbody = _get(f"/home/{W}")
+    hst, hhdrs, hbody = _head(f"/home/{W}")
+    test(f"{label} head: JSON read status matches GET",
+         hst == gst == 200, f"head={hst} get={gst}")
+    test(f"{label} head: JSON read Content-Type matches GET",
+         hhdrs.get("content-type") == ghdrs.get("content-type"),
+         f"head={hhdrs.get('content-type')} get={ghdrs.get('content-type')}")
+    test(f"{label} head: JSON read Content-Length matches GET body size",
+         hhdrs.get("content-length") == str(len(gbody)),
+         f"head={hhdrs.get('content-length')} get_body_len={len(gbody)}")
+    test(f"{label} head: JSON read body is empty", len(hbody) == 0, f"len={len(hbody)}")
+    test(f"{label} head: JSON read does NOT expose x-meta-* (same as GET JSON)",
+         "x-meta-author" not in hhdrs, f"headers={hhdrs}")
+
+    # 2. HEAD /home/<w>?raw — X-Meta-* replayed, body empty
+    gst, ghdrs, gbody = _get(f"/home/{W}?raw")
+    hst, hhdrs, hbody = _head(f"/home/{W}?raw")
+    test(f"{label} head: ?raw status matches GET", hst == gst == 200, f"head={hst} get={gst}")
+    test(f"{label} head: ?raw Content-Type matches GET",
+         hhdrs.get("content-type") == ghdrs.get("content-type"),
+         f"head={hhdrs.get('content-type')} get={ghdrs.get('content-type')}")
+    test(f"{label} head: ?raw Content-Length matches raw body size",
+         hhdrs.get("content-length") == str(len(body.encode())),
+         f"head={hhdrs.get('content-length')} body_len={len(body.encode())}")
+    test(f"{label} head: ?raw reflects x-meta-author",
+         hhdrs.get("x-meta-author") == "ranger", f"headers={hhdrs}")
+    test(f"{label} head: ?raw body is empty", len(hbody) == 0, f"len={len(hbody)}")
+
+    # 3. HEAD /home/<w>?raw + Range — 206, Content-Range, body empty
+    hst, hhdrs, hbody = _head(f"/home/{W}?raw", {"Range": "bytes=0-4"})
+    test(f"{label} head: ?raw+Range -> 206", hst == 206, f"status={hst}")
+    test(f"{label} head: ?raw+Range Content-Range set",
+         hhdrs.get("content-range") == f"bytes 0-4/{len(body.encode())}",
+         f"range={hhdrs.get('content-range')}")
+    test(f"{label} head: ?raw+Range Content-Length matches slice",
+         hhdrs.get("content-length") == "5", f"len={hhdrs.get('content-length')}")
+    test(f"{label} head: ?raw+Range body is empty", len(hbody) == 0, f"len={len(hbody)}")
+
+    # 4. HEAD /home/<w>?v=<current> — 304, body empty
+    gst, ghdrs, gbody = _get(f"/home/{W}")
+    import json as _json
+    ver = _json.loads(gbody.decode()).get("version")
+    hst, hhdrs, hbody = _head(f"/home/{W}?v={ver}")
+    test(f"{label} head: ?v=current -> 304", hst == 304, f"status={hst}")
+    test(f"{label} head: 304 body is empty", len(hbody) == 0, f"len={len(hbody)}")
+
+    # 5. HEAD /home/ — directory listing stat, body empty
+    gst, ghdrs, gbody = _get("/home/")
+    hst, hhdrs, hbody = _head("/home/")
+    test(f"{label} head: /home/ trailing-slash status matches GET",
+         hst == gst == 200, f"head={hst} get={gst}")
+    test(f"{label} head: /home/ Content-Type matches GET",
+         hhdrs.get("content-type") == ghdrs.get("content-type"),
+         f"head={hhdrs.get('content-type')} get={ghdrs.get('content-type')}")
+    test(f"{label} head: /home/ body is empty", len(hbody) == 0, f"len={len(hbody)}")
+
+    # 6. HEAD /home/<w>/sync — internal op, 405, body empty
+    hst, hhdrs, hbody = _head(f"/home/{W}/sync")
+    test(f"{label} head: internal op -> 405", hst == 405, f"status={hst}")
+    test(f"{label} head: 405 body is empty", len(hbody) == 0, f"len={len(hbody)}")
+
+    # 7. HEAD /home/<nonexistent-but-has-children> — 302 redirect to ls
+    # Seed a child so /home/head-redirect-prefix has existing children
+    http_method(port, f"/home/head-redirect-prefix/child", method="PUT",
+                body="c", token=token)
+    hst, hhdrs, hbody = _head("/home/head-redirect-prefix")
+    test(f"{label} head: missing world w/ children -> 302",
+         hst == 302, f"status={hst}")
+    test(f"{label} head: 302 has Location header",
+         hhdrs.get("location") == "/home/head-redirect-prefix/",
+         f"location={hhdrs.get('location')}")
+    test(f"{label} head: 302 body is empty", len(hbody) == 0, f"len={len(hbody)}")
+
+    # 8. HEAD /home/<truly-missing> — 404, body empty
+    hst, hhdrs, hbody = _head("/home/this-world-definitely-does-not-exist-xyzzy")
+    test(f"{label} head: missing world -> 404", hst == 404, f"status={hst}")
+    test(f"{label} head: 404 body is empty", len(hbody) == 0, f"len={len(hbody)}")
+
+    # 9. HEAD /etc/shadow without approve — 403, body empty
+    hst, hhdrs, hbody = _head("/etc/shadow")
+    test(f"{label} head: sensitive read w/o approve -> 403",
+         hst == 403, f"status={hst}")
+    test(f"{label} head: 403 body is empty", len(hbody) == 0, f"len={len(hbody)}")
+
+    # cleanup
+    http_method(port, f"/home/{W}", method="DELETE", token=approve)
+    http_method(port, f"/home/head-redirect-prefix/child", method="DELETE", token=approve)
 
 
 # ── Main ────────────────────────────────────────────────────────────

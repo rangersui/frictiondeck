@@ -443,14 +443,16 @@ async def recv(receive):
         if len(b) > MAX_BODY: raise ValueError("body too large")
         if not m.get("more_body"): return b
 
-async def send_r(send, status, data, ct="application/json", csp=False, extra_headers=None):
+async def send_r(send, status, data, ct="application/json", csp=False, extra_headers=None, head_only=False):
     body = data.encode("utf-8") if isinstance(data, str) else data
     _ct = ct if "charset" in ct or ct.startswith(("image/", "audio/", "video/", "application/octet")) else (ct + "; charset=utf-8" if "/" in ct else ct)
     h = [[b"content-type", _ct.encode()], [b"content-length", str(len(body)).encode()]]
     if csp: h.append([b"content-security-policy", _csp().encode()])
     if extra_headers: h.extend(extra_headers)
     await send({"type": "http.response.start", "status": status, "headers": h})
-    await send({"type": "http.response.body", "body": body})
+    # HEAD: Content-Length still reflects what GET would return; body bytes
+    # are empty. Caller passes head_only=True when method == "HEAD".
+    await send({"type": "http.response.body", "body": b"" if head_only else body})
 
 def _check_basic_auth(scope):
     """Legacy compat — returns True if auth level is approve. Used by plugin dispatch."""
@@ -818,8 +820,9 @@ async def app(scope, receive, send):
     # GET /home/       → ls all user worlds
     # GET /etc/        → ls config worlds
     # GET /home/photos/→ ls worlds under photos/
-    if method == "GET" and len(parts) >= 1 and parts[0] in _FHS and trailing_slash:
+    if method in ("GET", "HEAD") and len(parts) >= 1 and parts[0] in _FHS and trailing_slash:
         # Determine world-name prefix for ls
+        ho = (method == "HEAD")
         if parts[0] == "home":
             ls_prefix = "/".join(parts[1:])  # "home" → "", "home/photos" → "photos"
             # Only show non-system worlds
@@ -832,12 +835,12 @@ async def app(scope, receive, send):
         for k, v in scope.get("headers", []):
             if k == b"accept": accept = v.decode(); break
         if accept.startswith("text/html"):
-            return await send_r(send, 200, INDEX, "text/html", csp=True)
+            return await send_r(send, 200, INDEX, "text/html", csp=True, head_only=ho)
         if "json" in accept:
-            return await send_r(send, 200, json.dumps([{"name": n, "dir": d} for n, d in entries]))
+            return await send_r(send, 200, json.dumps([{"name": n, "dir": d} for n, d in entries]), head_only=ho)
         # plain text — one per line. dirs get trailing /
         lines = [(n + "/" if d else n) for n, d in entries]
-        return await send_r(send, 200, "\n".join(lines) + "\n" if lines else "", "text/plain")
+        return await send_r(send, 200, "\n".join(lines) + "\n" if lines else "", "text/plain", head_only=ho)
 
     # World routes — HTTP method IS the action.
     #   GET    /home/foo       → read content (no trailing slash)
@@ -886,28 +889,36 @@ async def app(scope, receive, send):
         # Sensitive-read gate moved into the GET handler below (after
         # browser detection). Browser navigations always get index.html;
         # the iframe's own fetch hits the gate separately.
-        # ── GET on internal ops → 405 ──
-        if method == "GET" and iop:
-            return await send_r(send, 405, '{"error":"method not allowed"}')
-        # ── GET: read / raw / browser ──
-        if method == "GET":
+        # ── GET/HEAD on internal ops → 405 ──
+        if method in ("GET", "HEAD") and iop:
+            return await send_r(send, 405, '{"error":"method not allowed"}',
+                                head_only=(method == "HEAD"))
+        # ── GET/HEAD: read / raw / browser ──
+        # HEAD ≡ GET minus body. Status, headers (Content-Length, Content-Type,
+        # X-Meta-* replay on ?raw, Accept-Ranges, Content-Range on 206) all
+        # identical; body bytes are empty. AI uses HEAD /world?raw as stat().
+        # Plain HEAD /world still only mirrors the JSON read surface and does
+        # NOT expose X-Meta-* as response headers — that's on ?raw only, same
+        # as GET's existing contract.
+        if method in ("GET", "HEAD"):
+            ho = (method == "HEAD")
             # Content negotiation: browser gets index.html, API gets JSON
             accept = ""
             for k, v in scope.get("headers", []):
                 if k == b"accept": accept = v.decode(); break
             is_browser = accept.startswith("text/html")
             # Browser always gets the app shell — auth errors show inside iframe
-            if is_browser: return await send_r(send, 200, INDEX, "text/html", csp=True)
+            if is_browser: return await send_r(send, 200, INDEX, "text/html", csp=True, head_only=ho)
             # Sensitive-read gate (API only — browser handled above)
             if name == "etc/shadow" or name.startswith("boot/"):
                 if _check_auth(scope) != "approve":
-                    return await send_r(send, 403, '{"error":"read requires approve"}')
+                    return await send_r(send, 403, '{"error":"read requires approve"}', head_only=ho)
             if not (DATA / _disk_name(name) / "universe.db").exists():
                 # World doesn't exist — check if it's a prefix with children → 302 to ls
                 children = _ls(name if parts[0] != "home" else "/".join(parts[1:]))
                 if children:
-                    return await send_r(send, 302, "", extra_headers=[[b"location", (path + "/").encode()]])
-                return await send_r(send, 404, '{"error":"world not found"}')
+                    return await send_r(send, 302, "", extra_headers=[[b"location", (path + "/").encode()]], head_only=ho)
+                return await send_r(send, 404, '{"error":"world not found"}', head_only=ho)
             # ?raw → raw bytes with correct Content-Type
             if "raw" in params or "raw" in qs.split("&"):
                 c = conn(name)
@@ -935,22 +946,22 @@ async def app(scope, receive, send):
                         [b"content-range", f"bytes {start}-{end}/{total}".encode()],
                         [b"content-length", str(len(chunk)).encode()],
                         [b"accept-ranges", b"bytes"]] + extra_hdrs})
-                    await send({"type":"http.response.body","body":chunk})
+                    await send({"type":"http.response.body","body": b"" if ho else chunk})
                 else:
                     await send({"type":"http.response.start","status":200,"headers":[
                         [b"content-type", ct.encode()],
                         [b"content-length", str(total).encode()],
                         [b"accept-ranges", b"bytes"]] + extra_hdrs})
-                    await send({"type":"http.response.body","body":body})
+                    await send({"type":"http.response.body","body": b"" if ho else body})
                 return
-            if is_browser: return await send_r(send, 200, INDEX, "text/html", csp=True)
+            if is_browser: return await send_r(send, 200, INDEX, "text/html", csp=True, head_only=ho)
             # JSON read
             c = conn(name)
             r = c.execute("SELECT stage_html,pending_js,js_result,version,ext,headers FROM stage_meta WHERE id=1").fetchone()
             cv = params.get("v")
             if cv:
                 try:
-                    if int(cv) == r["version"]: return await send_r(send, 304, "")
+                    if int(cv) == r["version"]: return await send_r(send, 304, "", head_only=ho)
                 except ValueError: pass
             raw = r["stage_html"] or ""
             if isinstance(raw, bytes):
@@ -961,7 +972,7 @@ async def app(scope, receive, send):
             return await send_r(send, 200, json.dumps({
                 "stage_html": raw, "pending_js": r["pending_js"] or "",
                 "js_result": r["js_result"] or "", "version": r["version"],
-                "ext": ext, "type": ext, "headers": safe_pairs}))
+                "ext": ext, "type": ext, "headers": safe_pairs}), head_only=ho)
         # ── PUT: overwrite ──
         if method == "PUT":
             c = conn(name)
