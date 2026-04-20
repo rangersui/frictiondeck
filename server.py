@@ -737,6 +737,28 @@ async def app(scope, receive, send):
         c.execute("UPDATE stage_meta SET stage_html=stage_html||?,version=version+1,updated_at=datetime('now') WHERE id=1",(entry,)); c.commit()
         # Redirect to /shared so user sees what they shared
         return await send_r(send, 302, "", extra_headers=[[b"location", b"/shared"]])
+    # /dev — ls the device plugins. `_plugins` is populated at plugin load,
+    # filter by /dev/* prefix. Unlike /proc, entries are dynamic — reflects
+    # whichever plugins are currently loaded. Browser shell already filters
+    # /bin for /dev/* routes, so this endpoint is mostly for `curl /dev/`
+    # to work symmetrically with /proc/ and /home/.
+    if method in ("GET", "HEAD") and path == "/dev":
+        _dev_routes = sorted(r for r in _plugins.keys() if r.startswith("/dev/"))
+        _ho = method == "HEAD"
+        _acc = ""
+        for k, v in scope.get("headers", []):
+            if k == b"accept": _acc = v.decode(); break
+        if "json" in _acc:
+            _entries = []
+            for route in _dev_routes:
+                h = _plugins.get(route)
+                doc = ""
+                if callable(h) and h.__doc__:
+                    doc = h.__doc__.strip().split("\n")[0].strip()
+                _entries.append({"name": route[5:], "route": route, "description": doc})
+            return await send_r(send, 200, json.dumps(_entries), head_only=_ho)
+        return await send_r(send, 200, "\n".join(r[5:] for r in _dev_routes) + "\n",
+                            "text/plain", head_only=_ho)
     # /proc — ls the pseudo-filesystem. Like `ls /proc` on Linux: lists the
     # introspection endpoints, doesn't expose them as on-disk worlds. Static
     # list because /proc/* entries are hand-written, not world-backed.

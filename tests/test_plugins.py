@@ -935,6 +935,26 @@ def _run_http_tests(port, label, token="", approve=""):
     except json.JSONDecodeError:
         test(f"{label}: /proc/ JSON parses", False, f"body={body[:80]}")
 
+    # /dev/ — ls the device plugins. Dynamic; depends on which plugins are
+    # loaded. In the test env, devtools / gpu / fanout / etc. register /dev/*
+    # routes, so we expect a non-empty list.
+    st, body = http_get(port, "/dev/")
+    test(f"{label}: GET /dev/ -> 200", st == 200, f"status={st}")
+    test(f"{label}: /dev/ is non-empty", len(body.strip()) > 0,
+         f"body={body[:80]}")
+    st, body = http_method(port, "/dev/", method="GET",
+                           headers={"Accept": "application/json"})
+    try:
+        d = json.loads(body)
+        test(f"{label}: /dev/ JSON is a list", isinstance(d, list),
+             f"type={type(d).__name__}")
+        test(f"{label}: /dev/ JSON entries have name+route+description",
+             all(isinstance(e, dict) and "name" in e and "route" in e
+                 and "description" in e for e in d) if d else True,
+             f"d={d[:2] if d else d}")
+    except json.JSONDecodeError:
+        test(f"{label}: /dev/ JSON parses", False, f"body={body[:80]}")
+
 
 def _run_flush_sse_test(port, label, token):
     """Integration test: /flush + SSE. The toilet is the test.
