@@ -247,17 +247,14 @@ def test_cgi():
 def test_python():
     print("\n=== Layer 2: Python HTTP Integration ===")
 
-    # Ensure gpu + devtools plugins are installed for testing. public_gate
-    # tags along: it's normally auto-installed as a default, but load_plugins()
-    # only triggers that branch when plugins/ is empty — the pre-install of
-    # these test fixtures makes plugins/ non-empty before the subprocess
-    # boots, so on a fresh CI checkout the defaults (admin/info/public_gate)
-    # never get installed at all. Without public_gate loaded, server._auth
-    # stays None and the non-local probes in _run_public_gate_shell_tests
-    # slip past the gate → 404 instead of 401.
+    # Ensure gpu + devtools + friends are installed as disk plugins for
+    # testing. public_gate is NOT in this list anymore — it was inlined
+    # into server.py in the microkernel cut, so the gate is active
+    # whenever ELASTIK_APPROVE_TOKEN is set regardless of disk plugin
+    # state.
     import shutil
     _installed = []
-    for pname in ["gpu.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py", "fanout.py", "public_gate.py", "sse.py", "db.py"]:
+    for pname in ["gpu.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py", "fanout.py", "sse.py", "db.py"]:
         src = os.path.join(ROOT, "plugins", "available", pname)
         dst = os.path.join(ROOT, "plugins", pname)
         if os.path.exists(src) and not os.path.exists(dst):

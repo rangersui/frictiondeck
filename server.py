@@ -1,5 +1,5 @@
 """elastik — the protocol. Core routes only; everything else is a plugin."""
-import asyncio, base64, hashlib, hmac as _hmac, json, os, re, shutil, sqlite3, sys, time
+import asyncio, base64, hashlib, hmac as _hmac, ipaddress as _ipa, json, os, re, shutil, sqlite3, sys, time
 from pathlib import Path
 VERSION = "4"
 _BOOT = time.time()
@@ -100,6 +100,39 @@ _BINARY_EXT = {"png","jpg","jpeg","gif","webp","ico","pdf","zip","mp3","mp4",
 # DELETE (line <710) can read them before the GET-ls branch would assign.
 _FHS = {"home", "etc", "usr", "var", "boot", "lib"}
 _INTERNAL = {"sync", "pending", "result", "clear"}
+
+# ── Public gate (inline; formerly plugins/available/public_gate.py) ──
+# Header-only HTTP auth for non-localhost traffic. Inlined from the
+# Tier 0 plugin in v4.5.0's microkernel cut. No cookies. No URL
+# tokens. Authorization header is the only authenticated surface.
+# App shell resources pass through anonymously (PWA needs that).
+_PUBLIC_SHELL = {
+    "/manifest.json", "/sw.js", "/opensearch.xml",
+    "/favicon.ico", "/icon.png", "/icon-192.png",
+}
+_TRUST_HEADER = os.getenv("ELASTIK_TRUST_PROXY_HEADER", "").lower()
+_TRUST_FROM = []
+for _c in os.getenv("ELASTIK_TRUST_PROXY_FROM", "").split(","):
+    _c = _c.strip()
+    if _c:
+        try: _TRUST_FROM.append(_ipa.ip_network(_c, strict=False))
+        except ValueError: pass
+if APPROVE_TOKEN and _TRUST_HEADER and not _TRUST_FROM:
+    print("  public_gate: refusing — ELASTIK_TRUST_PROXY_HEADER set "
+          "but ELASTIK_TRUST_PROXY_FROM is empty", file=sys.stderr)
+    sys.exit(1)
+
+def _real_ip(scope):
+    """Resolve the real client IP, honouring X-Forwarded-For only when
+    the immediate hop is in ELASTIK_TRUST_PROXY_FROM."""
+    ip = (scope.get("client") or ["127.0.0.1"])[0]
+    if _TRUST_HEADER and _TRUST_FROM:
+        try: addr = _ipa.ip_address(ip)
+        except ValueError: return ip
+        if any(addr in n for n in _TRUST_FROM):
+            v = dict(scope.get("headers", [])).get(_TRUST_HEADER.encode(), b"").decode()
+            if v: return v.split(",")[0].strip()
+    return ip
 
 # ── X-Meta-* metadata headers (Phase 1: X-Meta-* only, PUT only) ────
 # Blind propagation: PUT request X-Meta-* headers are stored with the
@@ -306,6 +339,38 @@ def _check_auth(scope):
 
     # _check_url_auth — injected by url_auth plugin if installed.
     # Not here. No plugin = no URL auth = no attack surface.
+
+
+async def _public_gate(scope, receive, send, path, method):
+    """Inline public-access gate. Returns True if it sent a 401
+    response (caller should stop processing), None to let the request
+    continue.
+
+    Active when ELASTIK_APPROVE_TOKEN is set. App shell resources
+    (_PUBLIC_SHELL) pass through anonymously. Localhost (127.* / ::1)
+    passes through. Anything else needs an Authorization header —
+    Basic, Bearer, or cap token.
+
+    Behind a reverse proxy, set ELASTIK_TRUST_PROXY_HEADER and
+    ELASTIK_TRUST_PROXY_FROM so _real_ip() resolves X-Forwarded-For
+    correctly; without those, the proxy's own IP is what the gate
+    sees and traffic either always-passes or always-fails depending
+    on the proxy's network position.
+    """
+    if not APPROVE_TOKEN: return None
+    if path in _PUBLIC_SHELL: return None
+    ip = _real_ip(scope)
+    if ip.startswith("127.") or ip == "::1": return None
+    if _check_auth(scope): return None
+    body = b"pastebin\nPOST to create, GET /<key> to fetch.\n"
+    await send({"type": "http.response.start", "status": 401, "headers": [
+        [b"www-authenticate", b'Basic realm="pastebin"'],
+        [b"content-type", b"text/plain; charset=utf-8"],
+        [b"content-length", str(len(body)).encode()],
+        [b"server", b"pastebin"]]})
+    await send({"type": "http.response.body", "body": body})
+    return True
+
 
 _db = {}
 
@@ -555,8 +620,15 @@ async def app(scope, receive, send):
     raw_len = len(scope.get("raw_path", b"")) or len(_raw_path)
     if raw_len > MAX_URL:
         return await send_r(send, 414, '{"error":"URI too long"}')
-    # Auth gate — if a plugin sets _auth, it can intercept any request.
-    # Return truthy = "I sent a response" (e.g. pastebin). Falsy = proceed.
+    # Public gate — inline (v4.5.0 microkernel cut; formerly a Tier 0
+    # plugin at plugins/available/public_gate.py). Runs on every
+    # request when ELASTIK_APPROVE_TOKEN is set. Returns True if it
+    # sent a 401; None to proceed.
+    if await _public_gate(scope, receive, send, path, method):
+        return
+    # Legacy plugin-registered middleware (kept so a user-written
+    # Tier 1 plugin could in principle still set server._auth). Runs
+    # after the inline gate so a plugin can ADD stricter auth on top.
     if _auth:
         if await _auth(scope, receive, send, path, method):
             return
