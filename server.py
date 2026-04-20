@@ -64,6 +64,24 @@ def _disk_name(name):
 def _logical_name(disk):
     """Filesystem dir name → world name. %2F → /."""
     return disk.replace("%2F", "/")
+def _find_lib_disk_collisions(root):
+    """Return sorted list of plugin names that exist BOTH as plugins/<n>.py
+    AND as data/lib%2F<n>/ worlds. Used by boot to refuse start on
+    ambiguous migration state — see main block for the exit logic."""
+    disk_names = set()
+    plugins_dir = Path(root) / "plugins"
+    if plugins_dir.exists():
+        for f in plugins_dir.glob("*.py"):
+            if not f.name.startswith("_"):
+                disk_names.add(f.stem)
+    lib_names = set()
+    data_dir = Path(root) / "data"
+    if data_dir.exists():
+        for d in data_dir.iterdir():
+            if d.is_dir() and (d / "universe.db").exists():
+                if d.name.startswith("lib%2F"):
+                    lib_names.add(d.name[len("lib%2F"):])
+    return sorted(disk_names & lib_names)
 _CT = {"html":"text/html","htm":"text/html","txt":"text/plain","plain":"text/plain",
        "css":"text/css","js":"text/javascript","json":"application/json",
        "png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg","gif":"image/gif",
@@ -906,17 +924,27 @@ async def app(scope, receive, send):
         r = c.execute("SELECT state,version FROM stage_meta WHERE id=1").fetchone()
         prev_state = (r["state"] if r else "pending") or "pending"
         ver = r["version"] if r else 0
+        import plugins as _p
+        # Idempotent EXCEPT for the retry case: state is already 'active'
+        # but the plugin is not currently loaded (e.g. boot-time exec
+        # failed, operator fixed the problem, now wants to retry).
+        # Per PLAN guardrail D, boot failures preserve state='active'
+        # as operator intent; that only remains useful if PUT state=active
+        # can trigger a reload without demanding a disable→active dance.
+        is_loaded = any(m["name"] == f"lib:{plugin}" for m in _plugin_meta)
         if prev_state == target_state:
-            # Idempotent: no-op, no event, no version bump.
-            return await send_r(send, 200, json.dumps({
-                "state": target_state, "version": ver, "changed": False}))
+            if target_state == "active" and not is_loaded:
+                # Retry activation. Fall through to the exec path below.
+                pass
+            else:
+                return await send_r(send, 200, json.dumps({
+                    "state": target_state, "version": ver, "changed": False}))
         # Phase 1: wire state transitions to actual route registration.
         # - activate: exec source + register ROUTES atomically. If exec
         #   fails, refuse the transition; state stays at prev (no UPDATE,
         #   no event) and the plugin remains not-loaded.
         # - disable: unregister routes. Idempotent — safe even if routes
         #   weren't registered (silent no-op inside deactivate_lib_world).
-        import plugins as _p
         if target_state == "active":
             ok, err = _p.activate_lib_world(plugin)
             if not ok:
@@ -925,17 +953,27 @@ async def app(scope, receive, send):
                     "state": prev_state}))
         elif target_state == "disabled":
             _p.deactivate_lib_world(plugin)
-        c.execute("UPDATE stage_meta SET state=?,updated_at=datetime('now') WHERE id=1",
-                  (target_state,))
-        c.commit()
-        # Audit: state_transition is its own event type, separate from
-        # stage_written. "Who wrote source" and "who activated it" are
-        # separately queryable on the HMAC chain.
-        log_event(world_name, "state_transition", {
-            "from": prev_state, "to": target_state, "version": ver})
+        if prev_state != target_state:
+            c.execute("UPDATE stage_meta SET state=?,updated_at=datetime('now') WHERE id=1",
+                      (target_state,))
+            c.commit()
+            # Audit: state_transition is its own event type, separate
+            # from stage_written. "Who wrote source" and "who activated
+            # it" are independently queryable on the HMAC chain.
+            log_event(world_name, "state_transition", {
+                "from": prev_state, "to": target_state, "version": ver})
+            return await send_r(send, 200, json.dumps({
+                "state": target_state, "version": ver, "changed": True,
+                "from": prev_state}))
+        # Retry case: state column didn't change, but plugin got loaded.
+        # Emit a separate event type so the chain shows "reload happened"
+        # distinct from a fresh state transition.
+        log_event(world_name, "plugin_reloaded", {
+            "state": target_state, "version": ver,
+            "reason": "active→active retry after boot/load failure"})
         return await send_r(send, 200, json.dumps({
-            "state": target_state, "version": ver, "changed": True,
-            "from": prev_state}))
+            "state": target_state, "version": ver, "changed": False,
+            "reloaded": True}))
 
     # World routes — HTTP method IS the action.
     #   GET    /home/foo       → read content (no trailing slash)
@@ -1333,6 +1371,30 @@ if __name__ == "__main__":
     except ImportError:
         plugins = None
     if plugins:
+        # Plugin-as-world boot safety: refuse to start if any plugin
+        # name has both a disk copy (plugins/<name>.py) AND a /lib/<name>
+        # world. That's the split-brain the design is trying to prevent
+        # — disk would load first, then /lib load would fail on route
+        # collision, leaving the stale disk copy silently serving
+        # traffic. Per PLAN §8.2.1–8.2.2: /lib wins on collision, and
+        # when both unexpectedly exist, the operator has to resolve.
+        _collisions = _find_lib_disk_collisions(_root)
+        if _collisions:
+            print("\n  ! elastik boot refused — plugin name collisions",
+                  file=sys.stderr)
+            print("    These names exist both on disk AND as /lib/* worlds:",
+                  file=sys.stderr)
+            for _n in _collisions:
+                print(f"      - {_n}  (plugins/{_n}.py AND /lib/{_n})",
+                      file=sys.stderr)
+            print("    Resolve by deleting one source per name:",
+                  file=sys.stderr)
+            print("      disk wins:  rm data/lib%2F<name>/ (or DELETE /lib/<name>)",
+                  file=sys.stderr)
+            print("      world wins: rm plugins/<name>.py  (migration complete)",
+                  file=sys.stderr)
+            sys.exit(1)
+
         plugins.load_plugins()
         plugins.register_plugin_routes()
         _sync_dir("skills", "*.md", lambda f: f"usr/lib/skills/{f.stem}", "skills")

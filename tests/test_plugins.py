@@ -308,6 +308,7 @@ def test_python():
         _run_audit_binding_tests(py_port, "python", py_token, py_approve)
         _run_head_tests(py_port, "python", py_token, py_approve)
         _run_lib_tests(py_port, "python", py_token, py_approve)
+        _run_lib_boot_collision_test(py_token, py_approve)
     finally:
         proc.terminate()
         try:
@@ -2058,6 +2059,141 @@ def _run_lib_tests(port, label, token, approve):
     test(f"{label} lib: explicit ?ext= overrides the 'py' default",
          d.get("ext") == "plain", f"ext={d.get('ext')!r}")
     http_method(port, f"/lib/{W6}", method="DELETE", token=approve)
+
+    # 22. P2 retry fix: active → active is a no-op while the plugin is
+    # loaded, but a retry path when the plugin was active on disk (state
+    # column) yet failed to load at runtime. Simulate by force-unloading
+    # a live plugin through /admin/unload, then PUT state=active and
+    # expect the routes to come back.
+    W7 = "lib-retry-test"
+    http_method(port, f"/lib/{W7}", method="DELETE", token=approve)
+    retry_src = (
+        "ROUTES = ['/lib-retry-test']\n"
+        "AUTH = 'none'\n"
+        "async def handle(m,b,p): return {'retry': 'ok'}\n"
+    )
+    http_method(port, f"/lib/{W7}", method="PUT", body=retry_src, token=token)
+    http_method(port, f"/lib/{W7}/state", method="PUT", body="active",
+                basic_auth=approve)
+    test(f"{label} lib: retry — route live pre-unload",
+         _route_in_bin("/lib-retry-test"),
+         "route not registered before retry test")
+    # Admin-unload by the lib:<name> meta name to simulate "state says
+    # active but plugin isn't loaded" (equivalent to a boot-time exec
+    # failure where guardrail D kept state='active'). admin.handle_unload
+    # reads name from the query string, not the body.
+    st, _ = http_method(port, f"/admin/unload?name=lib:{W7}",
+                       method="POST", body="", basic_auth=approve)
+    # Sanity: unload succeeded and route is gone (but state=active stays)
+    test(f"{label} lib: retry — route removed by simulated unload",
+         not _route_in_bin("/lib-retry-test"), "unload did not take effect")
+    _, body = http_get(port, f"/lib/{W7}")
+    test(f"{label} lib: retry — state stays 'active' after runtime unload",
+         json.loads(body).get("state") == "active",
+         f"state={json.loads(body).get('state')!r}")
+    # Now: active → active should RETRY (not noop), register routes,
+    # and respond with reloaded:true.
+    st, body = http_method(port, f"/lib/{W7}/state", method="PUT",
+                           body="active", basic_auth=approve)
+    test(f"{label} lib: retry — active→active on unloaded plugin -> 200",
+         st == 200, f"status={st}")
+    d = json.loads(body) if st == 200 else {}
+    test(f"{label} lib: retry — response flags reloaded:true",
+         d.get("reloaded") is True, f"resp={d}")
+    test(f"{label} lib: retry — route re-registered",
+         _route_in_bin("/lib-retry-test"),
+         "route did not come back after retry")
+    # Plain active→active on a loaded plugin still no-op
+    st, body = http_method(port, f"/lib/{W7}/state", method="PUT",
+                           body="active", basic_auth=approve)
+    d = json.loads(body) if st == 200 else {}
+    test(f"{label} lib: retry — active→active when loaded is still noop",
+         d.get("changed") is False and d.get("reloaded") is not True,
+         f"resp={d}")
+    http_method(port, f"/lib/{W7}", method="DELETE", token=approve)
+
+
+def _run_lib_boot_collision_test(token, approve):
+    """P2.1 fix: boot must refuse to start when a plugin name exists
+    BOTH as plugins/<name>.py on disk AND as a /lib/<name> world. Avoids
+    the split-brain where disk loads first, /lib load fails on route
+    collision, and the stale disk copy silently serves traffic.
+
+    Separate subprocess-based test because it exercises startup
+    behaviour (sys.exit before uvicorn binds), not live server behaviour.
+    """
+    import sqlite3 as _sq, shutil as _sh, tempfile as _tf, os as _os
+    import subprocess as _sp, socket as _so
+
+    # Work in an isolated temp root so we never touch the dev tree.
+    with _tf.TemporaryDirectory(prefix="elastik-boot-test-") as _tmp:
+        tmp_root = _os.path.abspath(_tmp)
+
+        # Copy the minimum files server.py needs to start.
+        for rel in ("server.py", "plugins.py", "plugins.lock",
+                    "index.html", "sw.js", "manifest.json"):
+            src = _os.path.join(ROOT, rel)
+            if _os.path.exists(src):
+                _sh.copy2(src, _os.path.join(tmp_root, rel))
+        # Copy the plugins/available/ tree so Tier 0 defaults can install.
+        av_src = _os.path.join(ROOT, "plugins", "available")
+        av_dst = _os.path.join(tmp_root, "plugins", "available")
+        if _os.path.exists(av_src):
+            _sh.copytree(av_src, av_dst)
+
+        # Create the collision: one plugin name that exists BOTH as
+        # plugins/<name>.py AND as data/lib%2F<name>/universe.db.
+        conflict_name = "boot-collision-test-name"
+        # Disk side
+        plugin_path = _os.path.join(tmp_root, "plugins",
+                                     f"{conflict_name}.py")
+        with open(plugin_path, "w", encoding="utf-8") as _f:
+            _f.write("ROUTES = {}\nasync def handle(m,b,p): return {}\n")
+        # World side — need the sqlite file with stage_meta table
+        world_disk = _os.path.join(tmp_root, "data",
+                                    "lib%2F" + conflict_name)
+        _os.makedirs(world_disk, exist_ok=True)
+        db_path = _os.path.join(world_disk, "universe.db")
+        c = _sq.connect(db_path)
+        c.execute("CREATE TABLE stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),"
+                  "stage_html BLOB DEFAULT '', pending_js TEXT DEFAULT '',"
+                  "js_result TEXT DEFAULT '', version INTEGER DEFAULT 0,"
+                  "updated_at TEXT DEFAULT '', ext TEXT DEFAULT 'py',"
+                  "headers TEXT DEFAULT '[]', state TEXT DEFAULT 'active')")
+        c.execute("INSERT INTO stage_meta(id,stage_html,state,updated_at) "
+                  "VALUES(1,?,'active',datetime('now'))",
+                  ("# stub",))
+        c.commit(); c.close()
+
+        # Free port + spawn, capture stderr to prove the refuse message
+        s = _so.socket(); s.bind(("", 0)); port = s.getsockname()[1]; s.close()
+        env = _os.environ.copy()
+        env.update({
+            "ELASTIK_PORT": str(port), "ELASTIK_HOST": "127.0.0.1",
+            "ELASTIK_TOKEN": token, "ELASTIK_APPROVE_TOKEN": approve,
+            # No TRUST_PROXY set — not needed for this test
+        })
+        proc = _sp.Popen([sys.executable, "server.py"],
+                         env=env, cwd=tmp_root,
+                         stdout=_sp.PIPE, stderr=_sp.PIPE)
+        try:
+            stdout, stderr = proc.communicate(timeout=8)
+        except _sp.TimeoutExpired:
+            proc.kill()
+            stdout, stderr = proc.communicate()
+            test("python lib: boot with disk+world collision → refuses to start",
+                 False, "server did not exit within 8s")
+            return
+
+        test("python lib: boot with disk+world collision → non-zero exit",
+             proc.returncode != 0, f"returncode={proc.returncode}")
+        combined = (stdout + stderr).decode("utf-8", "replace")
+        test("python lib: boot refuse message names the colliding plugin",
+             conflict_name in combined and "collision" in combined.lower(),
+             f"stderr_head={combined[:200]!r}")
+        test("python lib: boot refuse message lists resolution steps",
+             "rm plugins/" in combined or "DELETE /lib/" in combined,
+             f"stderr_head={combined[:200]!r}")
 
 
 # ── Main ────────────────────────────────────────────────────────────
