@@ -1,5 +1,6 @@
 """elastik — the protocol. Core routes only; everything else is a plugin."""
 import asyncio, base64, hashlib, hmac as _hmac, ipaddress as _ipa, json, os, re, shutil, sqlite3, sys, time
+from email.utils import formatdate
 from pathlib import Path
 VERSION = "4"
 _BOOT = time.time()
@@ -1883,13 +1884,379 @@ async def _core_sse_handle(method, body, params):
     return None
 
 
+# ── Core route: /dav (WebDAV) — inlined v4.5.0, formerly Tier 0 plugin.
+# FHS tree over worlds. Mount it, cd home. PROPFIND/GET/PUT/DELETE/
+# MOVE/COPY/MKCOL. Reads are public (like core routes); writes require
+# auth; system prefix writes require approve.
+_DAV_SYS_PREFIXES = ("etc/", "usr/", "var/", "boot/", "tmp/", "mnt/")
+
+def _dav_suffix(rest, ext):
+    """Render-time ext decoration for PROPFIND hrefs.
+    Dotted or dir/empty → ''. html → '.html.txt' (file:// safety).
+    plain → '.txt'. Everything else → '.{ext}'.
+    """
+    last = rest.rsplit("/", 1)[-1]
+    if "." in last: return ""
+    if not ext or ext == "dir": return ""
+    if ext == "html": return ".html.txt"
+    if ext == "plain": return ".txt"
+    return f".{ext}"
+
+def _dav_world_name(path):
+    """DAV URL → world name. Identity first, strip-and-retry fallback.
+    Strip-retry handles PROPFIND-decorated hrefs (.html.txt etc.)."""
+    rest = path[4:].lstrip("/").rstrip("/")
+    if rest.startswith("home/"): rest = rest[5:]
+    elif rest == "home": rest = ""
+    if not rest: return ""
+    candidate = rest
+    for _ in range(3):
+        if (DATA / _disk_name(candidate) / "universe.db").exists():
+            return candidate
+        segs = candidate.split("/")
+        last = segs[-1]
+        dot = last.rfind(".")
+        if dot <= 0:
+            break
+        candidate = "/".join(segs[:-1] + [last[:dot]])
+    return rest
+
+def _dav_read(name):
+    c = conn(name)
+    r = c.execute("SELECT stage_html,ext FROM stage_meta WHERE id=1").fetchone()
+    raw = r["stage_html"] if r and r["stage_html"] else b""
+    if isinstance(raw, str): raw = raw.encode("utf-8")
+    ext = (r["ext"] if r else "html") or "html"
+    return raw, ext
+
+def _dav_prop(href, restype, ct, size, mod):
+    rt = "<D:resourcetype><D:collection/></D:resourcetype>" if restype == "collection" else "<D:resourcetype/>"
+    ctl = f"<D:getcontenttype>{ct}</D:getcontenttype>" if ct else ""
+    return (f"<D:response><D:href>{href}</D:href><D:propstat><D:prop>"
+            f"{rt}<D:getcontentlength>{size}</D:getcontentlength>"
+            f"<D:getlastmodified>{mod}</D:getlastmodified>"
+            f"{ctl}</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>")
+
+
+async def _core_dav_handle(method, body, params):
+    """/dav/ → FHS WebDAV surface. PROPFIND/GET/PUT/DELETE over worlds."""
+    scope = params.get("_scope", {})
+    path = scope.get("path", "/dav")
+    now = formatdate(usegmt=True)
+
+    if method == "OPTIONS":
+        return {"_body":"", "_ct":"text/plain",
+                "_headers":[["dav","1"],["allow","OPTIONS, GET, HEAD, PUT, DELETE, MOVE, COPY, PROPFIND, MKCOL"]]}
+
+    raw_rest = path[4:].strip("/")
+    if raw_rest == "home": dav_prefix = "home"
+    elif raw_rest.startswith("home/"): dav_prefix = raw_rest
+    else: dav_prefix = raw_rest
+
+    def _write_auth_ok():
+        return _check_auth(scope) is not None
+
+    if method == "PROPFIND":
+        depth = "1"
+        for k, v in scope.get("headers", []):
+            if k == b"depth": depth = v.decode(); break
+        all_worlds = []
+        if DATA.exists():
+            for d in sorted(DATA.iterdir()):
+                if d.is_dir() and (d / "universe.db").exists():
+                    all_worlds.append(_logical_name(d.name))
+        world = _dav_world_name(path)
+        if world and world.endswith("/"): world = world[:-1]
+        is_world = world and any(w == world for w in all_worlds)
+        has_children = bool(world) and any(w.startswith(world + "/") for w in all_worlds)
+        is_top_ns = (dav_prefix in ("", "home") or dav_prefix in (p.rstrip("/") for p in _DAV_SYS_PREFIXES))
+        if world and not is_world and not has_children and not is_top_ns:
+            return {"error":"not found", "_status":404}
+        if is_world:
+            raw, ext = _dav_read(world)
+            is_dir = ext == "dir" or has_children
+            if not is_dir:
+                dav_href = f"/dav/home/{world}" if not world.startswith(_DAV_SYS_PREFIXES) else f"/dav/{world}"
+                xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
+                       + _dav_prop(f"{dav_href}{_dav_suffix(world, ext)}", "", _ext_to_ct(ext), len(raw), now)
+                       + '</D:multistatus>')
+                return {"_body":xml, "_ct":"application/xml; charset=utf-8", "_status":207}
+        href = f"/dav/{dav_prefix}/" if dav_prefix else "/dav/"
+        xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
+               + _dav_prop(href, "collection", "", 0, now))
+        if depth == "1":
+            if dav_prefix == "":
+                has_user = any(not w.startswith(_DAV_SYS_PREFIXES) for w in all_worlds)
+                if has_user:
+                    xml += _dav_prop("/dav/home/", "collection", "", 0, now)
+                for pref in _DAV_SYS_PREFIXES:
+                    if any(w.startswith(pref) for w in all_worlds):
+                        xml += _dav_prop(f"/dav/{pref}", "collection", "", 0, now)
+            else:
+                if dav_prefix == "home":
+                    world_prefix = ""
+                    children_href = "/dav/home/"
+                    candidates = [w for w in all_worlds if not w.startswith(_DAV_SYS_PREFIXES)]
+                elif dav_prefix.startswith("home/"):
+                    world_prefix = dav_prefix[5:] + "/"
+                    children_href = f"/dav/{dav_prefix}/"
+                    candidates = [w for w in all_worlds
+                                  if not w.startswith(_DAV_SYS_PREFIXES) and w.startswith(world_prefix)]
+                else:
+                    world_prefix = dav_prefix + "/"
+                    children_href = f"/dav/{dav_prefix}/"
+                    candidates = [w for w in all_worlds if w.startswith(world_prefix)]
+                seen_dirs = set()
+                for w in candidates:
+                    rest = w[len(world_prefix):] if world_prefix else w
+                    if "/" in rest:
+                        subdir = rest.split("/")[0]
+                        if subdir not in seen_dirs:
+                            seen_dirs.add(subdir)
+                            xml += _dav_prop(f"{children_href}{subdir}/", "collection", "", 0, now)
+                    else:
+                        raw, ext = _dav_read(w)
+                        if ext == "dir":
+                            if rest not in seen_dirs:
+                                seen_dirs.add(rest)
+                                xml += _dav_prop(f"{children_href}{rest}/", "collection", "", 0, now)
+                        else:
+                            xml += _dav_prop(f"{children_href}{rest}{_dav_suffix(rest, ext)}", "", _ext_to_ct(ext), len(raw), now)
+        xml += '</D:multistatus>'
+        return {"_body":xml, "_ct":"application/xml; charset=utf-8", "_status":207}
+
+    if method in ("GET", "HEAD"):
+        name = _dav_world_name(path)
+        if not name:
+            listing = (f'<h1>elastik WebDAV — /{dav_prefix or ""}</h1>'
+                    '<p style="background:#fee;padding:.5em;border:1px solid #c00">'
+                    'AI-generated content -- treat all links as hostile.</p><ul>')
+            if DATA.exists():
+                all_worlds = [_logical_name(d.name) for d in sorted(DATA.iterdir())
+                              if d.is_dir() and (d / "universe.db").exists()]
+                if dav_prefix == "":
+                    if any(not w.startswith(_DAV_SYS_PREFIXES) for w in all_worlds):
+                        listing += '<li><a href="/dav/home/">home/</a></li>'
+                    for pref in _DAV_SYS_PREFIXES:
+                        if any(w.startswith(pref) for w in all_worlds):
+                            listing += f'<li><a href="/dav/{pref}">{pref}</a></li>'
+                else:
+                    if dav_prefix == "home":
+                        world_prefix = ""
+                        href_base = "/dav/home/"
+                        cands = [w for w in all_worlds if not w.startswith(_DAV_SYS_PREFIXES)]
+                    elif dav_prefix.startswith("home/"):
+                        world_prefix = dav_prefix[5:] + "/"
+                        href_base = f"/dav/{dav_prefix}/"
+                        cands = [w for w in all_worlds
+                                 if not w.startswith(_DAV_SYS_PREFIXES) and w.startswith(world_prefix)]
+                    else:
+                        world_prefix = dav_prefix + "/"
+                        href_base = f"/dav/{dav_prefix}/"
+                        cands = [w for w in all_worlds if w.startswith(world_prefix)]
+                    seen = set()
+                    for w in cands:
+                        rest = w[len(world_prefix):] if world_prefix else w
+                        if "/" in rest:
+                            first = rest.split("/")[0]
+                            if first not in seen:
+                                seen.add(first)
+                                listing += f'<li><a href="{href_base}{first}/">{first}/</a></li>'
+                        else:
+                            _, ext = _dav_read(w)
+                            listing += f'<li><a href="{href_base}{rest}{_dav_suffix(rest, ext)}">{rest}</a> <em>({ext})</em></li>'
+            listing += "</ul>"
+            return {"_html": listing}
+        if not _valid_name(name) or not (DATA / _disk_name(name) / "universe.db").exists():
+            return {"error":"not found", "_status":404}
+        if (name == "etc/shadow" or name.startswith("boot/")) and _check_auth(scope) != "approve":
+            return {"error":"read requires approve", "_status":403}
+        raw, ext = _dav_read(name)
+        return {"_body":raw, "_ct":_ext_to_ct(ext)}
+
+    if method in ("PUT", "DELETE", "MOVE", "COPY", "MKCOL") and not _write_auth_ok():
+        return {"error":"authentication required", "_status":401,
+                "_headers":[["www-authenticate",'Basic realm="elastik"']]}
+
+    if method == "PUT":
+        name = _dav_world_name(path)
+        if not name: return {"error":"PUT on collection not supported", "_status":405}
+        if not _valid_name(name): return {"error":"invalid world name", "_status":400}
+        raw = params.get("_body_raw", body.encode("utf-8") if isinstance(body, str) else body or b"")
+        ext = params.get("ext")
+        if not ext:
+            ct = ""
+            for k, v in scope.get("headers", []):
+                if k == b"content-type":
+                    ct = v.decode("utf-8", "replace").split(";")[0].strip().lower()
+                    break
+            ct_to_ext = {v: k for k, v in _CT.items()}
+            ext = ct_to_ext.get(ct, "")
+        if not ext:
+            last_seg = path.rstrip("/").rsplit("/", 1)[-1]
+            dot = last_seg.rfind(".")
+            if dot > 0:
+                maybe_ext = last_seg[dot+1:].lower()
+                if maybe_ext in _CT:
+                    ext = maybe_ext
+        if not ext: ext = "plain"
+        if ext == "html" and _check_auth(scope) != "approve":
+            return {"error": "html write requires approve", "_status": 403}
+        if name.startswith(_DAV_SYS_PREFIXES) and _check_auth(scope) != "approve":
+            return {"error": "system write requires approve", "_status": 403}
+        c = conn(name)
+        meta = _extract_meta_headers(scope)
+        c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,version=version+1,updated_at=datetime('now') WHERE id=1", (raw, ext, meta)); c.commit()
+        ver = c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]
+        body_hash = hashlib.sha256(raw if isinstance(raw, bytes) else raw.encode("utf-8")).hexdigest()
+        log_event(name, "stage_written", {
+            "op": "put",
+            "len": len(raw),
+            "ext": ext,
+            "version_after": ver,
+            "meta_headers": json.loads(meta or "[]"),
+            "body_sha256_after": body_hash,
+        })
+        return {"_status":201, "_body":"", "_ct":"text/plain"}
+
+    if method == "DELETE":
+        name = _dav_world_name(path)
+        if not name: return {"error":"DELETE requires a name", "_status":405}
+        if not _valid_name(name): return {"error":"invalid world name", "_status":400}
+        targets = []
+        if (DATA / _disk_name(name) / "universe.db").exists():
+            targets.append(name)
+        if DATA.exists():
+            for d in sorted(DATA.iterdir()):
+                if d.is_dir() and (d / "universe.db").exists():
+                    w = _logical_name(d.name)
+                    if w.startswith(name + "/"):
+                        targets.append(w)
+        if not targets:
+            return {"error":"not found", "_status":404}
+        needs_approve = any(t.startswith(_DAV_SYS_PREFIXES) for t in targets)
+        if needs_approve and _check_auth(scope) != "approve":
+            return {"error":"system delete requires approve", "_status":403}
+        for w in targets:
+            _release_world(w)
+            _move_to_trash(w)
+        return {"_status":204, "_body":"", "_ct":"text/plain"}
+
+    if method == "MOVE":
+        src_name = _dav_world_name(path)
+        if not src_name:
+            return {"error":"MOVE requires a source name", "_status":405}
+        if not _valid_name(src_name):
+            return {"error":"invalid source name", "_status":400}
+        src_disk = DATA / _disk_name(src_name)
+        if not (src_disk / "universe.db").exists():
+            return {"error":"source not found", "_status":404}
+        dest_raw, overwrite = "", True
+        for k, v in scope.get("headers", []):
+            if k == b"destination": dest_raw = v.decode("utf-8", "replace")
+            elif k == b"overwrite": overwrite = v.decode().strip().upper() == "T"
+        if not dest_raw:
+            return {"error":"Destination header required", "_status":400}
+        from urllib.parse import urlparse, unquote
+        dest_path = unquote(urlparse(dest_raw).path or dest_raw)
+        dst_name = _dav_world_name(dest_path)
+        if not dst_name or not _valid_name(dst_name):
+            return {"error":"invalid destination", "_status":400}
+        if (src_name.startswith(_DAV_SYS_PREFIXES) or dst_name.startswith(_DAV_SYS_PREFIXES)) \
+           and _check_auth(scope) != "approve":
+            return {"error":"system move requires approve", "_status":403}
+        dst_disk = DATA / _disk_name(dst_name)
+        if dst_disk.exists():
+            if not overwrite:
+                return {"error":"destination exists", "_status":412}
+            shutil.rmtree(dst_disk)
+        _release_world(src_name)
+        _release_world(dst_name)
+        dst_disk.parent.mkdir(parents=True, exist_ok=True)
+        for attempt in range(5):
+            try:
+                src_disk.rename(dst_disk)
+                break
+            except PermissionError:
+                time.sleep(0.02 * (attempt + 1))
+        else:
+            shutil.move(str(src_disk), str(dst_disk))
+        log_event(dst_name, "stage_moved", {"from": src_name})
+        return {"_status":204, "_body":"", "_ct":"text/plain"}
+
+    if method == "COPY":
+        src_name = _dav_world_name(path)
+        if not src_name:
+            return {"error":"COPY requires a source name", "_status":405}
+        if not _valid_name(src_name):
+            return {"error":"invalid source name", "_status":400}
+        src_disk = DATA / _disk_name(src_name)
+        src_is_world = (src_disk / "universe.db").exists()
+        dest_raw, overwrite = "", True
+        for k, v in scope.get("headers", []):
+            if k == b"destination": dest_raw = v.decode("utf-8", "replace")
+            elif k == b"overwrite": overwrite = v.decode().strip().upper() == "T"
+        if not dest_raw:
+            return {"error":"Destination header required", "_status":400}
+        from urllib.parse import urlparse, unquote
+        dest_path = unquote(urlparse(dest_raw).path or dest_raw)
+        dst_name = _dav_world_name(dest_path)
+        if not dst_name or not _valid_name(dst_name):
+            return {"error":"invalid destination", "_status":400}
+        pairs = []
+        if src_is_world:
+            pairs.append((src_name, dst_name))
+        if DATA.exists():
+            for d in sorted(DATA.iterdir()):
+                if d.is_dir() and (d / "universe.db").exists():
+                    w = _logical_name(d.name)
+                    if w.startswith(src_name + "/"):
+                        pairs.append((w, dst_name + w[len(src_name):]))
+        if not pairs:
+            return {"error":"source not found", "_status":404}
+        touches_sys = any(s.startswith(_DAV_SYS_PREFIXES) or d.startswith(_DAV_SYS_PREFIXES) for s, d in pairs)
+        if touches_sys and _check_auth(scope) != "approve":
+            return {"error":"system copy requires approve", "_status":403}
+        if not overwrite:
+            for _, dw in pairs:
+                if (DATA / _disk_name(dw) / "universe.db").exists():
+                    return {"error":"destination exists", "_status":412}
+        for sw, dw in pairs:
+            src_db = DATA / _disk_name(sw) / "universe.db"
+            dst_dir = DATA / _disk_name(dw)
+            dst_db = dst_dir / "universe.db"
+            if sw in _db:
+                try: _db[sw].execute("PRAGMA wal_checkpoint(TRUNCATE)"); _db[sw].commit()
+                except Exception: pass
+            if dst_dir.exists():
+                if dw in _db: _db.pop(dw).close()
+                shutil.rmtree(dst_dir)
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_db, dst_db)
+            log_event(dw, "stage_copied", {"from": sw})
+        return {"_status":204, "_body":"", "_ct":"text/plain"}
+
+    if method == "MKCOL":
+        name = _dav_world_name(path)
+        if not name: return {"_status":201, "_body":"", "_ct":"text/plain"}
+        if not _valid_name(name): return {"_status":201, "_body":"", "_ct":"text/plain"}
+        c = conn(name)
+        c.execute("UPDATE stage_meta SET ext='dir',updated_at=datetime('now') WHERE id=1"); c.commit()
+        return {"_status":201, "_body":"", "_ct":"text/plain"}
+    if method in ("LOCK", "UNLOCK"):
+        return {"_body":"", "_ct":"text/plain", "_status":501}
+    return {"error":"method not allowed", "_status":405}
+
+
 def register_plugin_routes():
     """Register /plugins/propose and /plugins/approve in _plugins, plus
-    core inline routes (sse)."""
+    core inline routes (sse, dav)."""
     _plugins["/plugins/propose"] = handle_propose
     _plugins["/plugins/approve"] = handle_approve
     _plugins["/stream"] = _core_sse_handle
     _plugin_auth["/stream"] = "none"
+    _plugins["/dav"] = _core_dav_handle
+    _plugin_auth["/dav"] = "none"
 
 
 async def cron_loop():
