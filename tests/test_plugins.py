@@ -1220,6 +1220,21 @@ def _run_meta_headers_tests(port, label, token, approve):
          st3 == 206 and hdrs3.get("x-meta-author") == "codex",
          f"status={st3} headers={hdrs3}")
 
+    # 3a. Symmetric-JSON-read: plain GET /world (no ?raw) now also replays
+    #     X-Meta-* in response headers, alongside the existing "headers"
+    #     field in the JSON body. Invariant: both come from the same
+    #     _replay_meta_headers() call — header and body can never drift.
+    st_json, hdrs_json = _raw_hdrs(f"/home/{W}")
+    test(f"{label} meta: JSON GET reflects x-meta-author in response headers",
+         hdrs_json.get("x-meta-author") == "codex",
+         f"headers={hdrs_json}")
+    test(f"{label} meta: JSON body 'headers' field preserved (back-compat)",
+         d.get("headers") == [["x-meta-author", "codex"]],
+         f"body_headers={d.get('headers')}")
+    test(f"{label} meta: JSON GET x-meta-* matches ?raw x-meta-*",
+         hdrs_json.get("x-meta-author") == hdrs.get("x-meta-author"),
+         f"json={hdrs_json.get('x-meta-author')!r} raw={hdrs.get('x-meta-author')!r}")
+
     # 4. Multi-value (same name twice) → two list entries, HTTP allows it
     #    urllib.request can't send dup headers easily, use http.client
     c = _hc.HTTPConnection("127.0.0.1", port, timeout=5)
@@ -1531,13 +1546,14 @@ def _run_head_tests(port, label, token, approve):
 
     Contract: HEAD ≡ corresponding GET minus body bytes. Same status,
     same headers (Content-Length reflects what the GET body would be,
-    Content-Type, Accept-Ranges, Content-Range on 206, X-Meta-* on the
-    ?raw path), body is always empty.
+    Content-Type, Accept-Ranges, Content-Range on 206, X-Meta-* on
+    both JSON and ?raw world reads), body is always empty.
 
-    Deliberately: plain HEAD /world only mirrors the JSON read surface
-    and does NOT expose X-Meta-* in response headers; that lives on
-    ?raw, same as GET's existing contract. AI that wants metadata
-    should use HEAD /world?raw.
+    Symmetric after the follow-up `reflect X-Meta-* on JSON GET/HEAD
+    world reads` change: plain HEAD /world now exposes X-Meta-* too,
+    so AI can stat() without needing ?raw. The body's "headers" field
+    stays for backward compat. Browser-shell HEAD (Accept: text/html)
+    deliberately does NOT leak world metadata — asserted here.
     """
     import http.client as _hc
     W = "head-test-world"
@@ -1580,8 +1596,11 @@ def _run_head_tests(port, label, token, approve):
          hhdrs.get("content-length") == str(len(gbody)),
          f"head={hhdrs.get('content-length')} get_body_len={len(gbody)}")
     test(f"{label} head: JSON read body is empty", len(hbody) == 0, f"len={len(hbody)}")
-    test(f"{label} head: JSON read does NOT expose x-meta-* (same as GET JSON)",
-         "x-meta-author" not in hhdrs, f"headers={hhdrs}")
+    # JSON GET/HEAD now symmetric with ?raw: x-meta-* replays in response
+    # headers too. The body's "headers" field is preserved for back-compat;
+    # asserted separately in _run_meta_headers_tests.
+    test(f"{label} head: JSON read reflects x-meta-author on HEAD",
+         hhdrs.get("x-meta-author") == "ranger", f"headers={hhdrs}")
 
     # 2. HEAD /home/<w>?raw — X-Meta-* replayed, body empty
     gst, ghdrs, gbody = _get(f"/home/{W}?raw")
@@ -1652,6 +1671,18 @@ def _run_head_tests(port, label, token, approve):
     test(f"{label} head: sensitive read w/o approve -> 403",
          hst == 403, f"status={hst}")
     test(f"{label} head: 403 body is empty", len(hbody) == 0, f"len={len(hbody)}")
+
+    # 10. HEAD with Accept: text/html → browser shell path, NOT world read.
+    #     Must NOT leak world x-meta-* into the shell response headers.
+    #     Confirms the "reflect X-Meta-*" change is scoped to the JSON read
+    #     branch, not the browser is_browser branch.
+    hst, hhdrs, hbody = _head(f"/home/{W}", {"Accept": "text/html"})
+    test(f"{label} head: shell path status 200", hst == 200, f"status={hst}")
+    test(f"{label} head: shell path Content-Type is text/html",
+         "text/html" in (hhdrs.get("content-type") or ""),
+         f"content-type={hhdrs.get('content-type')}")
+    test(f"{label} head: shell path does NOT leak world x-meta-*",
+         "x-meta-author" not in hhdrs, f"headers={hhdrs}")
 
     # cleanup
     http_method(port, f"/home/{W}", method="DELETE", token=approve)

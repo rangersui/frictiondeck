@@ -968,11 +968,18 @@ async def app(scope, receive, send):
                 try: raw = raw.decode("utf-8")
                 except UnicodeDecodeError: raw = ""
             ext = r["ext"] or "html"
-            _, safe_pairs = _replay_meta_headers(r["headers"])
+            # Symmetric metadata: response headers get X-Meta-* replayed
+            # (same shape as ?raw), AND the JSON body keeps the "headers"
+            # field for backward compat. Both come from the same
+            # _replay_meta_headers() call — invariant by construction,
+            # not by discipline. AI stat() via HEAD /world now sees
+            # metadata without needing ?raw.
+            extra_hdrs, safe_pairs = _replay_meta_headers(r["headers"])
             return await send_r(send, 200, json.dumps({
                 "stage_html": raw, "pending_js": r["pending_js"] or "",
                 "js_result": r["js_result"] or "", "version": r["version"],
-                "ext": ext, "type": ext, "headers": safe_pairs}), head_only=ho)
+                "ext": ext, "type": ext, "headers": safe_pairs}),
+                extra_headers=extra_hdrs, head_only=ho)
         # ── PUT: overwrite ──
         if method == "PUT":
             c = conn(name)
