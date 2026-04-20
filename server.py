@@ -737,6 +737,20 @@ async def app(scope, receive, send):
         c.execute("UPDATE stage_meta SET stage_html=stage_html||?,version=version+1,updated_at=datetime('now') WHERE id=1",(entry,)); c.commit()
         # Redirect to /shared so user sees what they shared
         return await send_r(send, 302, "", extra_headers=[[b"location", b"/shared"]])
+    # /proc — ls the pseudo-filesystem. Like `ls /proc` on Linux: lists the
+    # introspection endpoints, doesn't expose them as on-disk worlds. Static
+    # list because /proc/* entries are hand-written, not world-backed.
+    if method in ("GET", "HEAD") and path == "/proc":
+        _proc_entries = ["status", "uptime", "version", "worlds"]
+        _ho = method == "HEAD"
+        _acc = ""
+        for k, v in scope.get("headers", []):
+            if k == b"accept": _acc = v.decode(); break
+        if "json" in _acc:
+            return await send_r(send, 200, json.dumps(
+                [{"name": n, "dir": False} for n in _proc_entries]), head_only=_ho)
+        return await send_r(send, 200, "\n".join(_proc_entries) + "\n",
+                            "text/plain", head_only=_ho)
     # /proc/worlds — list of worlds (was: /stages)
     if method == "GET" and path == "/proc/worlds":
         stages = []

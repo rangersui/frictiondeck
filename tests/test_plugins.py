@@ -919,6 +919,22 @@ def _run_http_tests(port, label, token="", approve=""):
         except json.JSONDecodeError:
             test(f"{label}: /proc/worlds returns JSON", False)
 
+    # /proc/ — ls the pseudo-filesystem. Like `ls /proc` on Linux.
+    st, body = http_get(port, "/proc/")
+    test(f"{label}: GET /proc/ -> 200", st == 200, f"status={st}")
+    for n in ("status", "uptime", "version", "worlds"):
+        test(f"{label}: /proc/ lists {n}", n in body, f"body={body[:120]}")
+    st, body = http_method(port, "/proc/", method="GET",
+                           headers={"Accept": "application/json"})
+    try:
+        d = json.loads(body)
+        names = {e.get("name") for e in d if isinstance(e, dict)}
+        test(f"{label}: /proc/ JSON lists all four entries",
+             names == {"status", "uptime", "version", "worlds"},
+             f"names={names}")
+    except json.JSONDecodeError:
+        test(f"{label}: /proc/ JSON parses", False, f"body={body[:80]}")
+
 
 def _run_flush_sse_test(port, label, token):
     """Integration test: /flush + SSE. The toilet is the test.
