@@ -1904,6 +1904,161 @@ def _run_lib_tests(port, label, token, approve):
     # cleanup
     http_method(port, f"/lib/{W}", method="DELETE", token=approve)
 
+    # ── Phase 1: actual exec + route registration on activation ──
+    # Phase 0 recorded state only; Phase 1 wires the state transitions
+    # to real effects. Runtime activation and boot-time loading share
+    # the same plugins.load_plugin_from_source() code path — testing
+    # runtime exercises the boot path as well.
+
+    # 14. Activation actually registers a route callable via HTTP
+    W3 = "lib-exec-test"
+    http_method(port, f"/lib/{W3}", method="DELETE", token=approve)
+    # Minimal plugin that registers /lib-exec-test and returns a known body.
+    # Uses v1 spec: ROUTES as list + handle() async function.
+    plugin_src = (
+        "ROUTES = ['/lib-exec-test']\n"
+        "AUTH = 'none'\n"
+        "async def handle(method, body, params):\n"
+        "    return {'hello': 'from-lib-plugin'}\n"
+    )
+    st, _ = http_method(port, f"/lib/{W3}", method="PUT", body=plugin_src,
+                        token=token)
+    test(f"{label} lib: PUT plugin source -> 200", st == 200, f"status={st}")
+    # Before activation, the route is NOT registered. We check the
+    # canonical route list (/bin) rather than probing the route itself,
+    # because unmatched paths fall through to the browser INDEX shell
+    # (200 text/html), which would look like "route exists".
+    def _route_in_bin(route):
+        _, bin_body = http_method(port, "/bin", method="GET",
+                                   headers={"Accept": "application/json"})
+        try:
+            return any(e.get("route") == route for e in json.loads(bin_body))
+        except (json.JSONDecodeError, AttributeError):
+            return False
+    test(f"{label} lib: pre-activation route NOT in /bin",
+         not _route_in_bin("/lib-exec-test"),
+         "route leaked into /bin before activation")
+    # Activate — load_plugin_from_source should register the route
+    st, body = http_method(port, f"/lib/{W3}/state", method="PUT",
+                           body="active", basic_auth=approve)
+    test(f"{label} lib: activation succeeds -> 200", st == 200,
+         f"status={st} body={body[:100]}")
+    # Route now appears in /bin and actually serves
+    test(f"{label} lib: /bin now lists activated plugin route",
+         _route_in_bin("/lib-exec-test"),
+         "route did not register in /bin after activation")
+    st, body = http_get(port, "/lib-exec-test")
+    test(f"{label} lib: post-activation route returns 200", st == 200,
+         f"status={st}")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test(f"{label} lib: post-activation route runs plugin code",
+                 d.get("hello") == "from-lib-plugin", f"body={body[:60]}")
+        except json.JSONDecodeError:
+            test(f"{label} lib: plugin returns JSON", False, f"body={body[:60]}")
+
+    # 15. Invalid source (syntax error) → activation fails with 422,
+    #     state stays at prev (pending); routes NOT registered.
+    W4 = "lib-badsrc-test"
+    http_method(port, f"/lib/{W4}", method="DELETE", token=approve)
+    bad_src = "def this is not valid python\n"
+    http_method(port, f"/lib/{W4}", method="PUT", body=bad_src, token=token)
+    st, body = http_method(port, f"/lib/{W4}/state", method="PUT",
+                           body="active", basic_auth=approve)
+    test(f"{label} lib: activation of invalid source -> 422", st == 422,
+         f"status={st}")
+    # State should still be 'pending' (transition was refused)
+    _, body = http_get(port, f"/lib/{W4}")
+    d = json.loads(body)
+    test(f"{label} lib: failed activation leaves state=pending",
+         d.get("state") == "pending", f"state={d.get('state')!r}")
+    http_method(port, f"/lib/{W4}", method="DELETE", token=approve)
+
+    # 16. Route collision → activation fails with 422
+    W5 = "lib-collide-test"
+    http_method(port, f"/lib/{W5}", method="DELETE", token=approve)
+    # Try to register /lib-exec-test (already owned by W3's plugin).
+    collide_src = (
+        "ROUTES = ['/lib-exec-test']\n"
+        "AUTH = 'none'\n"
+        "async def handle(method, body, params):\n"
+        "    return {'hijacked': True}\n"
+    )
+    http_method(port, f"/lib/{W5}", method="PUT", body=collide_src, token=token)
+    st, body = http_method(port, f"/lib/{W5}/state", method="PUT",
+                           body="active", basic_auth=approve)
+    test(f"{label} lib: activation on route collision -> 422", st == 422,
+         f"status={st}")
+    # Victim plugin (W3) still serves its own content, not hijacked
+    st, body = http_get(port, "/lib-exec-test")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test(f"{label} lib: collision-refused activation did NOT hijack",
+                 d.get("hello") == "from-lib-plugin",
+                 f"body={body[:60]}")
+        except json.JSONDecodeError:
+            test(f"{label} lib: victim plugin still returns JSON", False,
+                 f"body={body[:60]}")
+    http_method(port, f"/lib/{W5}", method="DELETE", token=approve)
+
+    # 17. Name collision with Tier 0 plugin → 422
+    # (Tier 0 plugins loaded from plugins/*.py — if there's a plugin
+    # named 'info' at _plugin_meta level, can't activate /lib/info.)
+    # Using 'info' because it's in the defaults set.
+    http_method(port, f"/lib/info", method="DELETE", token=approve)
+    http_method(port, f"/lib/info", method="PUT",
+                body="ROUTES = []\nasync def handle(m,b,p): return {}\n",
+                token=token)
+    st, body = http_method(port, f"/lib/info/state", method="PUT",
+                           body="active", basic_auth=approve)
+    test(f"{label} lib: Tier-0 name collision refused -> 422",
+         st == 422, f"status={st}")
+    http_method(port, f"/lib/info", method="DELETE", token=approve)
+
+    # 18. Disable removes the route from runtime (check via /bin listing)
+    st, body = http_method(port, f"/lib/{W3}/state", method="PUT",
+                           body="disabled", basic_auth=approve)
+    test(f"{label} lib: disable -> 200", st == 200, f"status={st}")
+    test(f"{label} lib: disabled plugin route removed from /bin",
+         not _route_in_bin("/lib-exec-test"),
+         "route leaked in /bin after disable")
+
+    # 19. Re-activation re-registers
+    st, _ = http_method(port, f"/lib/{W3}/state", method="PUT",
+                        body="active", basic_auth=approve)
+    test(f"{label} lib: re-activate -> 200", st == 200, f"status={st}")
+    test(f"{label} lib: re-activated route back in /bin",
+         _route_in_bin("/lib-exec-test"),
+         "route did not re-register after re-activation")
+
+    # 20. DELETE an active plugin unregisters the route before trashing
+    st, _ = http_method(port, f"/lib/{W3}", method="DELETE", token=approve)
+    test(f"{label} lib: DELETE active plugin -> 200", st == 200,
+         f"status={st}")
+    test(f"{label} lib: post-DELETE route removed from /bin",
+         not _route_in_bin("/lib-exec-test"),
+         "route leaked in /bin after DELETE")
+
+    # 21. Default ext for /lib/* PUT is 'py' (Codex Phase 0 observation)
+    W6 = "lib-ext-test"
+    http_method(port, f"/lib/{W6}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{W6}", method="PUT",
+                body="# just a comment\n", token=token)
+    _, body = http_get(port, f"/lib/{W6}")
+    d = json.loads(body)
+    test(f"{label} lib: PUT /lib/* defaults to ext='py'",
+         d.get("ext") == "py", f"ext={d.get('ext')!r}")
+    # Explicit ?ext= still wins
+    http_method(port, f"/lib/{W6}?ext=plain", method="PUT",
+                body="# still plain\n", token=token)
+    _, body = http_get(port, f"/lib/{W6}")
+    d = json.loads(body)
+    test(f"{label} lib: explicit ?ext= overrides the 'py' default",
+         d.get("ext") == "plain", f"ext={d.get('ext')!r}")
+    http_method(port, f"/lib/{W6}", method="DELETE", token=approve)
+
 
 # ── Main ────────────────────────────────────────────────────────────
 

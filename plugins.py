@@ -137,18 +137,201 @@ def unload_plugin(name):
         server._plugin_auth.pop(r, None)
     if name == "auth" or "auth" in meta.get("description", "").lower(): server._auth = None
     _sync_actions_remove(name, meta["routes"])
-    # Auto-clear skills world
-    skill_world = f"usr/lib/skills/{name.replace('_', '-')}"
-    try:
-        if (server.DATA / server._disk_name(skill_world)).exists():
-            c = server.conn(skill_world)
-            c.execute("UPDATE stage_meta SET stage_html='',version=version+1,updated_at=datetime('now') WHERE id=1")
-            c.commit()
-            print(f"  skill cleared: {skill_world}")
-    except Exception as e: print(f"  warn: skill cleanup failed for {skill_world}: {e}")
+    # Auto-clear skills world (only for Tier 0 — Tier 1 plugins use
+    # a different name scheme "lib:<basename>" and don't emit skills).
+    if not name.startswith("lib:"):
+        skill_world = f"usr/lib/skills/{name.replace('_', '-')}"
+        try:
+            if (server.DATA / server._disk_name(skill_world)).exists():
+                c = server.conn(skill_world)
+                c.execute("UPDATE stage_meta SET stage_html='',version=version+1,updated_at=datetime('now') WHERE id=1")
+                c.commit()
+                print(f"  skill cleared: {skill_world}")
+        except Exception as e: print(f"  warn: skill cleanup failed for {skill_world}: {e}")
     _cron_tasks.pop(name, None)
     server._plugin_meta[:] = [m for m in server._plugin_meta if m["name"] != name]
     print(f"  unloaded: {name}")
+
+
+def load_plugin_from_source(plugin_name, source):
+    """Tier 1 plugin loader: exec source from a /lib/<plugin_name> world,
+    register its declared ROUTES into _plugins, track in _plugin_meta under
+    meta name 'lib:<plugin_name>' (distinct from Tier 0 basenames).
+
+    Returns (True, None) on success.
+    Returns (False, error_str) on:
+      - name collision with a Tier 0 plugin (same basename)
+      - invalid plugin name
+      - dangerous-plugin + insufficient MODE
+      - exec raising
+      - declared ROUTE overlapping with a route already registered
+        (Tier 0 plugin, core route via _plugins, or another Tier 1)
+
+    Caller (server.py activation handler or boot loader) decides how to
+    react to a False return: 422 for live activation, continue-loop for
+    boot-time failure per PLAN guardrail D.
+    """
+    if not server._valid_name(plugin_name):
+        return False, f"invalid plugin name: {plugin_name}"
+    if plugin_name in _DANGEROUS_PLUGINS and MODE < 2:
+        return False, f"{plugin_name} blocked — mode {MODE} requires mode 2 (container)"
+    # Tier 0 collision guard: refuse if a plugin with this basename is
+    # already loaded from disk. Tier 1 gets its own "lib:" namespace in
+    # _plugin_meta so "lib:admin" (Tier 1) cannot displace "admin" (Tier 0).
+    if any(m["name"] == plugin_name for m in server._plugin_meta):
+        return False, f"name collision: '{plugin_name}' is already loaded as a Tier 0 plugin"
+    meta_name = f"lib:{plugin_name}"
+
+    async def _call(route, method="POST", body=b"", params=None):
+        h = server._plugins.get(route)
+        if not h: return {"error": f"route {route} not found"}
+        return await h(method, body, params or {})
+    _injectable = {
+        "load_plugin": load_plugin, "unload_plugin": unload_plugin,
+        "_plugins": server._plugins, "_plugin_meta": server._plugin_meta,
+        "_cron_tasks": _cron_tasks, "_start_time": _start_time,
+    }
+    ns = {"__file__": f"<lib/{plugin_name}>", "_ROOT": Path(server.__file__).resolve().parent,
+          "conn": server.conn, "log_event": server.log_event, "_call": _call}
+    needs_match = re.search(r'NEEDS\s*=\s*\[([^\]]*)\]', source)
+    if needs_match:
+        needed = [s.strip().strip('"').strip("'") for s in needs_match.group(1).split(",") if s.strip()]
+        ns.update({k: _injectable[k] for k in needed if k in _injectable})
+    try:
+        exec(source, ns)
+    except Exception as e:
+        return False, f"exec failed: {type(e).__name__}: {e}"
+
+    # Collect declared routes, both v0 (dict) and v1 (list + handle) forms
+    raw_routes = ns.get("ROUTES", {})
+    declared = []
+    handle_fn = ns.get("handle")
+    if isinstance(raw_routes, list):
+        if not handle_fn:
+            return False, "ROUTES is a list but no handle() function defined"
+        declared = [(r, handle_fn) for r in raw_routes]
+    elif isinstance(raw_routes, dict):
+        declared = list(raw_routes.items())
+    else:
+        return False, f"ROUTES must be a list or dict, got {type(raw_routes).__name__}"
+
+    # Re-activation of THIS plugin owns its previously-registered routes.
+    # Collision check must exclude those — else re-activation would falsely
+    # report conflict with its own old routes.
+    prior = next((m for m in server._plugin_meta if m["name"] == meta_name), None)
+    own_routes = set(prior["routes"]) if prior else set()
+    for route, _h in declared:
+        if route in server._plugins and route not in own_routes:
+            return False, f"route conflict: '{route}' is already registered"
+
+    # Tear down any prior registration for this Tier 1 plugin (re-activation
+    # after source update is a normal flow — PUT changed source, T3 re-
+    # activates, we load fresh).
+    if prior:
+        for r in prior["routes"]:
+            server._plugins.pop(r, None)
+            server._plugin_auth.pop(r, None)
+        server._plugin_meta[:] = [m for m in server._plugin_meta if m["name"] != meta_name]
+
+    # Register new routes
+    auth_level = ns.get("AUTH", "none")
+    routes = []
+    for route, h in declared:
+        server._plugins[route] = h
+        server._plugin_auth[route] = auth_level
+        routes.append(route)
+    # AUTH_MIDDLEWARE from Tier 1 plugins is NOT honoured — middleware is a
+    # privileged hook that should come from Tier 0 only. Silently ignore.
+    server._plugin_meta.append({
+        "name": meta_name, "description": ns.get("DESCRIPTION", ""),
+        "routes": routes, "params": ns.get("PARAMS_SCHEMA", {}),
+        "ops": ns.get("OPS_SCHEMA", []),
+    })
+    # CRON handlers — Tier 1 plugins can register them, same as Tier 0.
+    if "CRON" in ns and "CRON_HANDLER" in ns:
+        _cron_tasks[meta_name] = {
+            "interval": int(ns["CRON"]),
+            "handler": ns["CRON_HANDLER"],
+            "last_run": time.time(),
+        }
+    # SKILL fields from Tier 1 are ignored to avoid name collisions with
+    # Tier 0 skill worlds under /usr/lib/skills/*. A Tier 1 plugin that
+    # wants to emit documentation can PUT to its own path.
+    return True, None
+
+
+def activate_lib_world(plugin_name):
+    """Wire PUT /lib/<name>/state=active to actual exec + registration.
+
+    Reads the world's source from SQLite directly (no self-HTTP per
+    PLAN guardrail B), calls load_plugin_from_source. Returns the
+    same (ok, error) tuple.
+    """
+    world_name = f"lib/{plugin_name}"
+    db_path = server.DATA / server._disk_name(world_name) / "universe.db"
+    if not db_path.exists():
+        return False, "plugin world not found"
+    c = server.conn(world_name)
+    r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+    source = r["stage_html"] if r else None
+    if isinstance(source, bytes):
+        source = source.decode("utf-8", "replace")
+    if not source or not source.strip():
+        return False, "plugin source is empty"
+    return load_plugin_from_source(plugin_name, source)
+
+
+def deactivate_lib_world(plugin_name):
+    """Wire PUT /lib/<name>/state=disabled (and DELETE /lib/<name> if
+    active) to route unregistration. Idempotent — silently no-op if
+    the plugin wasn't loaded."""
+    unload_plugin(f"lib:{plugin_name}")
+
+
+def boot_load_active_lib():
+    """Boot-time loader: iterate data/ for lib/<name> worlds with
+    state='active' and exec each. Called once from server.py after
+    Tier 0 init. Per PLAN guardrail D, exec failures log and skip —
+    they do NOT auto-disable. Operator intent stays, runtime outcome
+    is a log line.
+    """
+    if not server.DATA.exists(): return
+    loaded, failed = 0, 0
+    for d in sorted(server.DATA.iterdir()):
+        if not (d.is_dir() and (d / "universe.db").exists()): continue
+        try: name = server._logical_name(d.name)
+        except Exception: continue
+        if not name.startswith("lib/"): continue
+        plugin_name = name[4:]
+        try:
+            c = server.conn(name)
+            row = c.execute("SELECT state,stage_html FROM stage_meta WHERE id=1").fetchone()
+        except Exception as e:
+            print(f"  lib: {plugin_name}: read failed — {e}")
+            continue
+        if not row: continue
+        state = (row["state"] or "pending") if row else "pending"
+        if state != "active": continue
+        source = row["stage_html"]
+        if isinstance(source, bytes):
+            source = source.decode("utf-8", "replace")
+        if not source or not source.strip():
+            print(f"  lib: {plugin_name}: state=active but source empty; skipping")
+            failed += 1
+            continue
+        ok, err = load_plugin_from_source(plugin_name, source)
+        if ok:
+            loaded += 1
+            print(f"  lib: loaded {plugin_name}")
+            try: server.log_event(name, "plugin_activated_on_boot", {"source_len": len(source)})
+            except Exception: pass
+        else:
+            failed += 1
+            print(f"  lib: {plugin_name}: LOAD FAILED — {err} (state stays active)")
+            try: server.log_event(name, "plugin_load_failed", {"error": err})
+            except Exception: pass
+    if loaded or failed:
+        print(f"  lib: {loaded} loaded, {failed} failed")
 
 
 def _sync_actions_add(name):

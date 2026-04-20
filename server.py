@@ -839,7 +839,14 @@ async def app(scope, receive, send):
             return await send_r(send, 403, '{"error":"unauthorized"}')
         if isinstance(auth, str) and auth.startswith("cap:r:"):
             return await send_r(send, 403, '{"error":"read-only token"}')
+        # Phase 1: DELETE /lib/<name> must unregister routes before
+        # trashing the world, otherwise the plugin keeps running with
+        # an orphan _plugins dict entry pointing at an exec'd handler
+        # that references a now-deleted world.
+        import plugins as _p
         for w in targets:
+            if w.startswith("lib/"):
+                _p.deactivate_lib_world(w[4:])
             _release_world(w)
             _move_to_trash(w)
         return await send_r(send, 200, json.dumps({"deleted": targets}))
@@ -903,6 +910,21 @@ async def app(scope, receive, send):
             # Idempotent: no-op, no event, no version bump.
             return await send_r(send, 200, json.dumps({
                 "state": target_state, "version": ver, "changed": False}))
+        # Phase 1: wire state transitions to actual route registration.
+        # - activate: exec source + register ROUTES atomically. If exec
+        #   fails, refuse the transition; state stays at prev (no UPDATE,
+        #   no event) and the plugin remains not-loaded.
+        # - disable: unregister routes. Idempotent — safe even if routes
+        #   weren't registered (silent no-op inside deactivate_lib_world).
+        import plugins as _p
+        if target_state == "active":
+            ok, err = _p.activate_lib_world(plugin)
+            if not ok:
+                return await send_r(send, 422, json.dumps({
+                    "error": "activation failed", "detail": err,
+                    "state": prev_state}))
+        elif target_state == "disabled":
+            _p.deactivate_lib_world(plugin)
         c.execute("UPDATE stage_meta SET state=?,updated_at=datetime('now') WHERE id=1",
                   (target_state,))
         c.commit()
@@ -1077,7 +1099,14 @@ async def app(scope, receive, send):
             # under an existing T3 approval.
             is_lib = name.startswith("lib/")
             prev_state = ((cur["state"] if cur else "pending") or "pending") if is_lib else None
-            new_ext = req_ext or (_infer_type(b) if isinstance(b, str) else cur_ext)
+            # Default ext for /lib/* is 'py' (plugin source). Without
+            # this, _infer_type sees no '<' tags and falls back to 'plain',
+            # which gives ?raw a Content-Type of text/plain on source
+            # code instead of text/x-python. Explicit ?ext= still wins.
+            if is_lib and not req_ext:
+                new_ext = "py"
+            else:
+                new_ext = req_ext or (_infer_type(b) if isinstance(b, str) else cur_ext)
             if (cur_ext == "html" or new_ext == "html") and _check_auth(scope) != "approve":
                 return await send_r(send, 403, '{"error":"html write requires approve"}')
             hdrs = _extract_meta_headers(scope)
@@ -1309,6 +1338,13 @@ if __name__ == "__main__":
         _sync_dir("skills", "*.md", lambda f: f"usr/lib/skills/{f.stem}", "skills")
         _sync_dir("renderers", "renderer-*.html",
                   lambda f: f"usr/lib/renderer/{f.stem[9:]}", "renderers")  # strip "renderer-"
+        # Phase 1 plugin-as-world: after Tier 0 (filesystem) plugins
+        # load, iterate /lib/* worlds with state='active' and exec each.
+        # Per PLAN guardrail B, reads the DB directly via conn() — no
+        # self-HTTP. Per guardrail D, exec failures log and skip; state
+        # stays 'active' (operator intent), only the runtime route
+        # registration is missing.
+        plugins.boot_load_active_lib()
     # /boot — write once at startup, read requires T3.
     # boot/env: which env vars are set (names + non-secret values).
     # boot/grub: which plugins loaded.
