@@ -1804,10 +1804,92 @@ async def handle_approve(method, body, params):
     return {"ok": True}
 
 
+# ── Core route: /stream (SSE) — inlined v4.5.0, formerly Tier 0 plugin.
+# Push on write, no client polling. Opens EventSource, receives events
+# only when the world's version/pending_js/js_result changes.
+_SSE_POLL = 0.02      # internal DB poll (20ms → up to 50 events/sec)
+_SSE_HB_EVERY = 25    # heartbeat every 25 polls (0.5s) — keeps edge buffers flushing.
+
+async def _core_sse_handle(method, body, params):
+    """Server-sent events. GET /stream/{name} → text/event-stream.
+    Emits event: update when world state changes; comment heartbeat every 0.5s.
+    """
+    send = params.get("_send")
+    scope = params.get("_scope", {})
+    if not send:
+        return {"error": "server does not expose raw send; SSE unavailable", "_status": 500}
+    if method != "GET":
+        return {"error": "SSE is GET only", "_status": 405}
+    path = scope.get("path", "").rstrip("/")
+    if not path.startswith("/stream/") or path == "/stream":
+        return {"error": "path must be /stream/{name}", "_status": 400}
+    name = path[len("/stream/"):]
+    if not _valid_name(name):
+        return {"error": "invalid world name", "_status": 400}
+    if not (DATA / _disk_name(name) / "universe.db").exists():
+        return {"error": "world not found", "_status": 404}
+    c = conn(name)
+    await send({
+        "type": "http.response.start",
+        "status": 200,
+        "headers": [
+            [b"content-type", b"text/event-stream; charset=utf-8"],
+            [b"cache-control", b"no-cache"],
+            [b"connection", b"keep-alive"],
+            [b"x-accel-buffering", b"no"],
+        ],
+    })
+    def _snapshot():
+        r = c.execute(
+            "SELECT stage_html,pending_js,js_result,version,ext FROM stage_meta WHERE id=1"
+        ).fetchone()
+        raw = r["stage_html"] or ""
+        if isinstance(raw, bytes):
+            try: raw = raw.decode("utf-8")
+            except UnicodeDecodeError: raw = ""
+        ext = r["ext"] or "html"
+        pj = r["pending_js"] or ""
+        jr = r["js_result"] or ""
+        sig = (r["version"], pj, jr)
+        payload = json.dumps({
+            "version": r["version"], "stage_html": raw,
+            "pending_js": pj, "js_result": jr,
+            "ext": ext, "type": ext,
+        }, ensure_ascii=False)
+        return sig, payload
+    last_sig = None
+    ticks = 0
+    try:
+        while True:
+            sig, data = _snapshot()
+            if sig != last_sig:
+                msg = f"event: update\ndata: {data}\n\n".encode("utf-8")
+                await send({"type": "http.response.body", "body": msg, "more_body": True})
+                last_sig = sig
+                ticks = 0
+            else:
+                ticks += 1
+                if ticks >= _SSE_HB_EVERY:
+                    await send({"type": "http.response.body", "body": b": hb\n\n", "more_body": True})
+                    ticks = 0
+            await asyncio.sleep(_SSE_POLL)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+    finally:
+        try: await send({"type": "http.response.body", "body": b"", "more_body": False})
+        except Exception: pass
+    return None
+
+
 def register_plugin_routes():
-    """Register /plugins/propose and /plugins/approve in _plugins."""
+    """Register /plugins/propose and /plugins/approve in _plugins, plus
+    core inline routes (sse)."""
     _plugins["/plugins/propose"] = handle_propose
     _plugins["/plugins/approve"] = handle_approve
+    _plugins["/stream"] = _core_sse_handle
+    _plugin_auth["/stream"] = "none"
 
 
 async def cron_loop():
