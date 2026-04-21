@@ -60,7 +60,7 @@ async def handle_self(method, body, params):
         files = [str(f.relative_to(_ROOT)) for f in
                  sorted(list(_ROOT.glob("*.py")) + list(_ROOT.glob("*.html")) +
                         list(_ROOT.glob("*.json")) + list(_ROOT.glob("*.js")) +
-                        list((_ROOT / "plugins" / "available").glob("*.py")))]
+                        list((_ROOT / "plugins").glob("*.py")))]
     _secret = {".env", "_env", ".env.local"}
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:

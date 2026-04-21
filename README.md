@@ -1,5 +1,7 @@
 # elastik
 
+*v5.0.0 lambda — one file runs it. Plugins are worlds.*
+
 You have a Linux machine whose interface is curl.
 
 ## Quickstart
@@ -34,12 +36,11 @@ Every path is a world. Writing to a new path creates it. FHS layout:
 /home/       your stuff
 /etc/        config (T3 to write)
 /boot/       startup config (T3 to read, changes need restart)
-/usr/lib/    skills, renderers (auto-synced)
-/var/log/    system logs
+/usr/lib/    skills and renderers (conventional)
+/var/log/    logs (conventional)
 /proc/       introspection (uptime, version, status, worlds)
-/bin/        commands (plugin routes)
-/dev/        devices (gpu, stone, fire, river, db)
-/mnt/        local filesystem mounts (via /etc/fstab)
+/bin/        active routes (core + /lib plugins)
+/dev/        devices (Tier 1 plugins can register)
 /dav/        WebDAV (mount in Finder/Explorer)
 ```
 
@@ -48,40 +49,21 @@ Every path is a world. Writing to a new path creates it. FHS layout:
 ```
 GET    /home/{name}       read (JSON)
 GET    /home/{name}?raw   raw bytes
+HEAD   /home/{name}       stat — same headers as GET, no body
 PUT    /home/{name}       overwrite
 POST   /home/{name}       append
 DELETE /home/{name}       delete (T3)
 GET    /home/             ls (trailing slash)
+
+GET    /stream/{name}     SSE live updates
+GET    /proc/status       machine state {pid, uptime, worlds, plugins, version}
 GET    /proc/worlds       list all worlds
-GET    /bin               list all commands
+GET    /bin               list all active routes
 ```
 
 HTTP method IS the action. No `/read` `/write` suffixes. Trailing `/` = ls.
 
 Content negotiation: browser gets HTML, curl gets JSON, pipes get plain text.
-
-## Mount anything
-
-elastik mounts local paths through HTTP. No FUSE. No kernel module.
-
-```bash
-# Write fstab (T3):
-curl -X PUT localhost:3005/etc/fstab \
-  -H "Authorization: Basic $(echo -n ':$APPROVE' | base64)" \
-  -d "/Users/you/Documents   /mnt/docs   ro
-/Users/you/Code          /mnt/code   rw"
-
-# Now:
-curl localhost:3005/mnt/docs/               # ls
-curl localhost:3005/mnt/code/server.py      # read file
-
-# Query any SQLite database under a mount:
-curl -X POST "localhost:3005/dev/db?file=brave/History" \
-  -d "SELECT url, title FROM urls WHERE title LIKE '%pizza%' LIMIT 5"
-```
-
-Edit fstab. Next request reflects it. No reload. No mount command.
-fstab is queried per-request, not loaded at boot.
 
 ## Auth
 
@@ -90,7 +72,7 @@ Three tiers. Physics, not policy.
 ```
 T1 (no token)      read anything public
 T2 (auth token)    write /home/*
-T3 (approve token) write /etc/*, /usr/*, /boot/*. delete. admin.
+T3 (approve token) write /etc/*, /usr/*, /boot/*. delete. activate plugins.
 ```
 
 ```bash
@@ -145,10 +127,10 @@ curl -sI "localhost:3005/home/findings/x"
 #   x-meta-severity: high
 # ?raw is the same plus raw body bytes (content-type from ext).
 
-# bound to content in the event log:
-curl -X POST "localhost:3005/dev/db?world=home/findings/x" \
-  -H "Authorization: Bearer $APPROVE" \
-  -d "SELECT payload FROM events ORDER BY id DESC LIMIT 1"
+# bound to content in the event log. Each world has an events table in
+# its universe.db; inspect directly with sqlite3:
+sqlite3 'data/home%2Ffindings%2Fx/universe.db' \
+  "SELECT payload FROM events ORDER BY id DESC LIMIT 1"
 # → {"op":"put", "meta_headers":[["x-meta-author","codex"],...],
 #     "body_sha256_after":"e3b0...", "version_after":1, "len":58}
 ```
@@ -197,23 +179,62 @@ No SDK. No tool registration. No MCP. If it can send a string, it's an elastik c
 
 ## Plugins
 
-Plugins are .py files. Hot load/unload via HTTP. No restart.
+Plugins are `/lib/<name>` worlds in SQLite. PUT source with T2, approve
+with T3 by setting `state=active`, routes register live. No disk loader.
+No restart.
 
 ```bash
-curl -X POST /admin/load -H "Authorization: Bearer $APPROVE" -d "devtools"
+# Install (T2 writes source; state resets to 'pending'):
+curl -X PUT http://localhost:3005/lib/example \
+  -H "Authorization: Bearer $ELASTIK_TOKEN" \
+  --data-binary @plugins/example.py   # --data-binary preserves newlines; -d will mangle Python source
+
+# Activate (T3 — execs source, registers declared ROUTES):
+curl -X PUT http://localhost:3005/lib/example/state \
+  -H "Authorization: Bearer $ELASTIK_APPROVE_TOKEN" \
+  --data-binary "active"
+
+# Use it:
+curl http://localhost:3005/example -d "hi"
+# → {"hello":"from example plugin","echo":"hi"}
+
+# Verify:
+curl http://localhost:3005/bin     # is the route registered?
+curl http://localhost:3005/lib/    # list all installed plugin worlds
+
+# Disable (T3 — route down, source kept):
+curl -X PUT http://localhost:3005/lib/example/state \
+  -H "Authorization: Bearer $ELASTIK_APPROVE_TOKEN" --data-binary "disabled"
+
+# Delete (T3 — source world moves to .trash):
+curl -X DELETE http://localhost:3005/lib/example \
+  -H "Authorization: Bearer $ELASTIK_APPROVE_TOKEN"
 ```
 
-| Plugin | What it does |
-|--------|-------------|
-| admin | Load/unload plugins at runtime |
-| dav | WebDAV — worlds as files |
-| devtools | grep, cowsay, 🗿, logic gates, electronics, flush |
-| fstab | /mnt/ local filesystem mount |
-| browser | Chrome/Brave/Edge remote control via CDP |
-| db | /dev/db — read-only SQL on any SQLite |
-| shell | Browser terminal |
-| gpu | `/dev/gpu` — AI as device. Backend via `/etc/gpu.conf`. Ollama/Claude/OpenAI/Deepseek/Vast. |
-| sse | Server-Sent Events — real-time streaming |
+The repo ships two specimens in `plugins/`. Neither is auto-loaded.
+
+| File | Shape |
+|---|---|
+| `plugins/example.py` | 13-line template — `AUTH`, `ROUTES`, `handle()` contract |
+| `plugins/reality.py` | self-replicator — GET `/__reality__` (data tar.gz) + GET `/self` (source tar.gz) |
+
+Any source-changing PUT resets `state=pending`, so approval re-binds to
+the new source hash. The chain records `stage_written` (with
+`body_sha256_after`) and `state_transition` events on every step.
+
+A plugin can do anything its source allows — including route registrations
+that make the HTTP interface unreachable. elastik is a process, not a
+sovereign OS. The filesystem is the real source of truth:
+
+```bash
+# Stop the server. Then:
+rm -rf "data/lib%2F<bad-plugin>/"
+python server.py
+```
+
+No recovery endpoint. No "safe mode" flag. The directory under `data/` is
+the plugin; `rm` is the uninstall. Works the same whether the plugin
+never activated, bricked everything, or just turned out boring.
 
 ## Pipes
 
@@ -222,7 +243,6 @@ curl output is plain text. Unix pipes just work.
 ```bash
 curl localhost:3005/home/ | grep boot
 curl localhost:3005/home/ | wc -l
-curl localhost:3005/bin | grep say
 curl localhost:3005/home/ | shuf | head -1
 ```
 
@@ -241,7 +261,7 @@ curl -s "localhost:3005/home/boot?raw" | python -X utf8 -
 Snapshot a machine into durable worlds with one command:
 
 ```bash
-# If AUTH_TOKEN is configured (default via .env.example), export it first:
+# If ELASTIK_TOKEN is configured (default via .env.example), export it first:
 ELASTIK_TOKEN=your-t2-token bash examples/introspect.sh   # writes /home/env/{os,disk,...}
 curl localhost:3005/home/env/                             # list
 curl localhost:3005/home/env/processes?raw                # read content
@@ -259,13 +279,25 @@ on the command line are **not** persisted. Edit the script to use
 
 ## Self-replication
 
+`/self` and `/__reality__` come from `plugins/reality.py`. It ships in
+the repo but isn't auto-loaded — install it once per deployment:
+
+```bash
+curl -X PUT http://A/lib/reality \
+  -H "Authorization: Bearer $TOKEN" --data-binary @plugins/reality.py
+curl -X PUT http://A/lib/reality/state \
+  -H "Authorization: Bearer $APPROVE" --data-binary "active"
+```
+
+Then the clone is two curls and a tar:
+
 ```bash
 curl -H "Authorization: Bearer $APPROVE" http://A/self > elastik.tar.gz
 curl -H "Authorization: Bearer $APPROVE" http://A/__reality__ > data.tar.gz
 tar xzf elastik.tar.gz && tar xzf data.tar.gz && python server.py
 ```
 
-Two curls. One clone. The clone can clone itself.
+The clone can install reality and clone itself.
 
 ## Supply chain
 

@@ -1,5 +1,6 @@
 """elastik — the protocol. Core routes only; everything else is a plugin."""
-import asyncio, base64, hashlib, hmac as _hmac, json, os, re, shutil, sqlite3, sys, time
+import asyncio, base64, hashlib, hmac as _hmac, ipaddress as _ipa, json, os, re, shutil, sqlite3, sys, time
+from email.utils import formatdate
 from pathlib import Path
 VERSION = "4"
 _BOOT = time.time()
@@ -80,8 +81,41 @@ _BINARY_EXT = {"png","jpg","jpeg","gif","webp","ico","pdf","zip","mp3","mp4",
                "wav","ogg","woff","woff2","ttf","otf","eot","bin"}
 # FHS top-level namespaces + per-world internal ops. Module-level so
 # DELETE (line <710) can read them before the GET-ls branch would assign.
-_FHS = {"home", "etc", "usr", "var", "boot"}
+_FHS = {"home", "etc", "usr", "var", "boot", "lib"}
 _INTERNAL = {"sync", "pending", "result", "clear"}
+
+# ── Public gate (inline; formerly plugins/available/public_gate.py) ──
+# Header-only HTTP auth for non-localhost traffic. Inlined from the
+# Tier 0 plugin in v4.5.0's microkernel cut. No cookies. No URL
+# tokens. Authorization header is the only authenticated surface.
+# App shell resources pass through anonymously (PWA needs that).
+_PUBLIC_SHELL = {
+    "/manifest.json", "/sw.js", "/opensearch.xml",
+    "/favicon.ico", "/icon.png", "/icon-192.png",
+}
+_TRUST_HEADER = os.getenv("ELASTIK_TRUST_PROXY_HEADER", "").lower()
+_TRUST_FROM = []
+for _c in os.getenv("ELASTIK_TRUST_PROXY_FROM", "").split(","):
+    _c = _c.strip()
+    if _c:
+        try: _TRUST_FROM.append(_ipa.ip_network(_c, strict=False))
+        except ValueError: pass
+if APPROVE_TOKEN and _TRUST_HEADER and not _TRUST_FROM:
+    print("  public_gate: refusing — ELASTIK_TRUST_PROXY_HEADER set "
+          "but ELASTIK_TRUST_PROXY_FROM is empty", file=sys.stderr)
+    sys.exit(1)
+
+def _real_ip(scope):
+    """Resolve the real client IP, honouring X-Forwarded-For only when
+    the immediate hop is in ELASTIK_TRUST_PROXY_FROM."""
+    ip = (scope.get("client") or ["127.0.0.1"])[0]
+    if _TRUST_HEADER and _TRUST_FROM:
+        try: addr = _ipa.ip_address(ip)
+        except ValueError: return ip
+        if any(addr in n for n in _TRUST_FROM):
+            v = dict(scope.get("headers", [])).get(_TRUST_HEADER.encode(), b"").decode()
+            if v: return v.split(",")[0].strip()
+    return ip
 
 # ── X-Meta-* metadata headers (Phase 1: X-Meta-* only, PUT only) ────
 # Blind propagation: PUT request X-Meta-* headers are stored with the
@@ -289,6 +323,38 @@ def _check_auth(scope):
     # _check_url_auth — injected by url_auth plugin if installed.
     # Not here. No plugin = no URL auth = no attack surface.
 
+
+async def _public_gate(scope, receive, send, path, method):
+    """Inline public-access gate. Returns True if it sent a 401
+    response (caller should stop processing), None to let the request
+    continue.
+
+    Active when ELASTIK_APPROVE_TOKEN is set. App shell resources
+    (_PUBLIC_SHELL) pass through anonymously. Localhost (127.* / ::1)
+    passes through. Anything else needs an Authorization header —
+    Basic, Bearer, or cap token.
+
+    Behind a reverse proxy, set ELASTIK_TRUST_PROXY_HEADER and
+    ELASTIK_TRUST_PROXY_FROM so _real_ip() resolves X-Forwarded-For
+    correctly; without those, the proxy's own IP is what the gate
+    sees and traffic either always-passes or always-fails depending
+    on the proxy's network position.
+    """
+    if not APPROVE_TOKEN: return None
+    if path in _PUBLIC_SHELL: return None
+    ip = _real_ip(scope)
+    if ip.startswith("127.") or ip == "::1": return None
+    if _check_auth(scope): return None
+    body = b"pastebin\nPOST to create, GET /<key> to fetch.\n"
+    await send({"type": "http.response.start", "status": 401, "headers": [
+        [b"www-authenticate", b'Basic realm="pastebin"'],
+        [b"content-type", b"text/plain; charset=utf-8"],
+        [b"content-length", str(len(body)).encode()],
+        [b"server", b"pastebin"]]})
+    await send({"type": "http.response.body", "body": body})
+    return True
+
+
 _db = {}
 
 def _release_world(name):
@@ -362,7 +428,8 @@ def conn(name):
             CREATE TABLE IF NOT EXISTS stage_meta(id INTEGER PRIMARY KEY CHECK(id=1),
                 stage_html BLOB DEFAULT '', pending_js TEXT DEFAULT '', js_result TEXT DEFAULT '',
                 version INTEGER DEFAULT 0, updated_at TEXT DEFAULT '',
-                ext TEXT DEFAULT 'plain', headers TEXT DEFAULT '[]');
+                ext TEXT DEFAULT 'plain', headers TEXT DEFAULT '[]',
+                state TEXT DEFAULT 'pending');
             INSERT OR IGNORE INTO stage_meta(id,updated_at) VALUES(1,datetime('now'));
             CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,
                 timestamp TEXT NOT NULL, event_type TEXT NOT NULL, payload TEXT DEFAULT '{}',
@@ -420,6 +487,15 @@ def conn(name):
             # someone PUTs with X-Meta-* headers.
             c.execute("ALTER TABLE stage_meta ADD COLUMN headers TEXT DEFAULT '[]'")
             c.execute("UPDATE stage_meta SET headers='[]' WHERE headers IS NULL OR headers=''")
+            c.commit()
+        if "state" not in cols:
+            # plugin-as-world Phase 0: `state` column for /lib/* plugin
+            # lifecycle (pending / active / disabled). Existing non-plugin
+            # worlds get 'pending' as default — meaningless outside /lib/*,
+            # harmless inside. Route contract: PUT /lib/<name> creates with
+            # state='pending'; PUT /lib/<name>/state with approve promotes.
+            c.execute("ALTER TABLE stage_meta ADD COLUMN state TEXT DEFAULT 'pending'")
+            c.execute("UPDATE stage_meta SET state='pending' WHERE state IS NULL OR state=''")
             c.commit()
         _db[name] = c
     return _db[name]
@@ -527,8 +603,15 @@ async def app(scope, receive, send):
     raw_len = len(scope.get("raw_path", b"")) or len(_raw_path)
     if raw_len > MAX_URL:
         return await send_r(send, 414, '{"error":"URI too long"}')
-    # Auth gate — if a plugin sets _auth, it can intercept any request.
-    # Return truthy = "I sent a response" (e.g. pastebin). Falsy = proceed.
+    # Public gate — inline (v4.5.0 microkernel cut; formerly a Tier 0
+    # plugin at plugins/available/public_gate.py). Runs on every
+    # request when ELASTIK_APPROVE_TOKEN is set. Returns True if it
+    # sent a 401; None to proceed.
+    if await _public_gate(scope, receive, send, path, method):
+        return
+    # Legacy plugin-registered middleware (kept so a user-written
+    # Tier 1 plugin could in principle still set server._auth). Runs
+    # after the inline gate so a plugin can ADD stricter auth on top.
     if _auth:
         if await _auth(scope, receive, send, path, method):
             return
@@ -780,8 +863,15 @@ async def app(scope, receive, send):
             for d in sorted(DATA.iterdir()):
                 if d.is_dir() and (d / "universe.db").exists():
                     name = _logical_name(d.name)
-                    r = conn(name).execute("SELECT version,updated_at FROM stage_meta WHERE id=1").fetchone()
-                    stages.append({"name": name, "version": r["version"], "updated_at": r["updated_at"]})
+                    r = conn(name).execute("SELECT version,updated_at,state FROM stage_meta WHERE id=1").fetchone()
+                    entry = {"name": name, "version": r["version"], "updated_at": r["updated_at"]}
+                    # state is /lib-scoped semantics (pending/active/disabled).
+                    # Non-lib worlds have the column (default 'pending') but
+                    # the field is meaningless outside /lib — don't surface it
+                    # as if it were a general world property.
+                    if name.startswith("lib/"):
+                        entry["state"] = r["state"] or "pending"
+                    stages.append(entry)
         return await send_r(send, 200, json.dumps(stages))
     # /proc/uptime, /proc/version, /proc/status — Unix-style introspection
     if method == "GET" and path == "/proc/uptime":
@@ -844,14 +934,20 @@ async def app(scope, receive, send):
         # Auth: T3 if any target is under a system prefix; else T2 is enough.
         # Capability tokens in read-only mode are rejected for writes.
         auth = _check_auth(scope)
-        needs_approve = any(t.startswith(("etc/", "usr/", "var/", "boot/")) for t in targets)
+        needs_approve = any(t.startswith(("etc/", "usr/", "var/", "boot/", "lib/")) for t in targets)
         if needs_approve and auth != "approve":
             return await send_r(send, 403, '{"error":"system delete requires approve"}')
         if not needs_approve and AUTH_TOKEN and auth is None:
             return await send_r(send, 403, '{"error":"unauthorized"}')
         if isinstance(auth, str) and auth.startswith("cap:r:"):
             return await send_r(send, 403, '{"error":"read-only token"}')
+        # Phase 1: DELETE /lib/<name> must unregister routes before
+        # trashing the world, otherwise the plugin keeps running with
+        # an orphan _plugins dict entry pointing at an exec'd handler
+        # that references a now-deleted world.
         for w in targets:
+            if w.startswith("lib/"):
+                deactivate_lib_world(w[4:])
             _release_world(w)
             _move_to_trash(w)
         return await send_r(send, 200, json.dumps({"deleted": targets}))
@@ -881,6 +977,85 @@ async def app(scope, receive, send):
         # plain text — one per line. dirs get trailing /
         lines = [(n + "/" if d else n) for n, d in entries]
         return await send_r(send, 200, "\n".join(lines) + "\n" if lines else "", "text/plain", head_only=ho)
+
+    # /lib/<name>/state — plugin lifecycle transition (Phase 0 of
+    # plugin-as-world). Separated from _INTERNAL ops because the
+    # semantics differ: this is a PUT on a virtual "state" sub-
+    # resource (set state to value), not a POST content-modifying op
+    # like /sync. Requires approve (T3) per the /etc/* analogue.
+    # This Phase 0 handler records the desired state only; it does
+    # NOT exec or register/unregister plugin routes. Route
+    # registration at activation is Phase 1.
+    if (method == "PUT" and len(parts) == 3 and parts[0] == "lib"
+            and parts[2] == "state"):
+        if _check_auth(scope) != "approve":
+            return await send_r(send, 403, '{"error":"state transition requires approve"}')
+        plugin = parts[1]
+        if not _valid_name(plugin):
+            return await send_r(send, 400, '{"error":"invalid plugin name"}')
+        world_name = "lib/" + plugin
+        try: body_bytes = await recv(receive)
+        except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
+        target_state = body_bytes.decode("utf-8", "replace").strip()
+        if target_state not in ("active", "disabled"):
+            return await send_r(send, 422, json.dumps({
+                "error": "invalid state",
+                "allowed": ["active", "disabled"]}))
+        if not (DATA / _disk_name(world_name) / "universe.db").exists():
+            return await send_r(send, 404, '{"error":"plugin not found"}')
+        c = conn(world_name)
+        r = c.execute("SELECT state,version FROM stage_meta WHERE id=1").fetchone()
+        prev_state = (r["state"] if r else "pending") or "pending"
+        ver = r["version"] if r else 0
+        # Idempotent EXCEPT for the retry case: state is already 'active'
+        # but the plugin is not currently loaded (e.g. boot-time exec
+        # failed, operator fixed the problem, now wants to retry).
+        # Per PLAN guardrail D, boot failures preserve state='active'
+        # as operator intent; that only remains useful if PUT state=active
+        # can trigger a reload without demanding a disable→active dance.
+        is_loaded = any(m["name"] == f"lib:{plugin}" for m in _plugin_meta)
+        if prev_state == target_state:
+            if target_state == "active" and not is_loaded:
+                # Retry activation. Fall through to the exec path below.
+                pass
+            else:
+                return await send_r(send, 200, json.dumps({
+                    "state": target_state, "version": ver, "changed": False}))
+        # Phase 1: wire state transitions to actual route registration.
+        # - activate: exec source + register ROUTES atomically. If exec
+        #   fails, refuse the transition; state stays at prev (no UPDATE,
+        #   no event) and the plugin remains not-loaded.
+        # - disable: unregister routes. Idempotent — safe even if routes
+        #   weren't registered (silent no-op inside deactivate_lib_world).
+        if target_state == "active":
+            ok, err = activate_lib_world(plugin)
+            if not ok:
+                return await send_r(send, 422, json.dumps({
+                    "error": "activation failed", "detail": err,
+                    "state": prev_state}))
+        elif target_state == "disabled":
+            deactivate_lib_world(plugin)
+        if prev_state != target_state:
+            c.execute("UPDATE stage_meta SET state=?,updated_at=datetime('now') WHERE id=1",
+                      (target_state,))
+            c.commit()
+            # Audit: state_transition is its own event type, separate
+            # from stage_written. "Who wrote source" and "who activated
+            # it" are independently queryable on the HMAC chain.
+            log_event(world_name, "state_transition", {
+                "from": prev_state, "to": target_state, "version": ver})
+            return await send_r(send, 200, json.dumps({
+                "state": target_state, "version": ver, "changed": True,
+                "from": prev_state}))
+        # Retry case: state column didn't change, but plugin got loaded.
+        # Emit a separate event type so the chain shows "reload happened"
+        # distinct from a fresh state transition.
+        log_event(world_name, "plugin_reloaded", {
+            "state": target_state, "version": ver,
+            "reason": "active→active retry after boot/load failure"})
+        return await send_r(send, 200, json.dumps({
+            "state": target_state, "version": ver, "changed": False,
+            "reloaded": True}))
 
     # World routes — HTTP method IS the action.
     #   GET    /home/foo       → read content (no trailing slash)
@@ -997,7 +1172,7 @@ async def app(scope, receive, send):
             if is_browser: return await send_r(send, 200, INDEX, "text/html", csp=True, head_only=ho)
             # JSON read
             c = conn(name)
-            r = c.execute("SELECT stage_html,pending_js,js_result,version,ext,headers FROM stage_meta WHERE id=1").fetchone()
+            r = c.execute("SELECT stage_html,pending_js,js_result,version,ext,headers,state FROM stage_meta WHERE id=1").fetchone()
             cv = params.get("v")
             if cv:
                 try:
@@ -1010,14 +1185,18 @@ async def app(scope, receive, send):
             ext = r["ext"] or "html"
             # Metadata lives in response headers. The JSON body carries
             # content (stage_html + pending_js + js_result + version +
-            # ext). There is no "headers" field in the body — that was
-            # a transitional duplicate; header is the canonical home for
-            # metadata, same as everywhere else in HTTP.
+            # ext + state). There is no "headers" field in the body —
+            # that was a transitional duplicate; header is the canonical
+            # home for metadata, same as everywhere else in HTTP.
+            # `state` is meaningful for /lib/* plugin worlds (pending /
+            # active / disabled) and always 'pending' by default for
+            # other worlds — semantic scope is /lib/*, but the column
+            # exists on every row so the field is always present.
             extra_hdrs = _replay_meta_headers(r["headers"])
             return await send_r(send, 200, json.dumps({
                 "stage_html": raw, "pending_js": r["pending_js"] or "",
                 "js_result": r["js_result"] or "", "version": r["version"],
-                "ext": ext, "type": ext}),
+                "ext": ext, "type": ext, "state": r["state"] or "pending"}),
                 extra_headers=extra_hdrs, head_only=ho)
         # ── PUT: overwrite ──
         if method == "PUT":
@@ -1030,13 +1209,32 @@ async def app(scope, receive, send):
             else:
                 b = body_bytes.decode("utf-8", "replace")
                 b = _extract(b, "write")
-            cur = c.execute("SELECT ext FROM stage_meta WHERE id=1").fetchone()
+            cur = c.execute("SELECT ext,state FROM stage_meta WHERE id=1").fetchone()
             cur_ext = (cur["ext"] if cur else "plain") or "plain"
-            new_ext = req_ext or (_infer_type(b) if isinstance(b, str) else cur_ext)
+            # Plugin-as-world: source-changing PUT on /lib/* invalidates
+            # prior approval. If state was 'active' or 'disabled', reset to
+            # 'pending' — approval is bound to a specific source version
+            # (body_sha256_after in the stage_written event), not to the
+            # plugin name. T2 caller cannot silently swap in new code
+            # under an existing T3 approval.
+            is_lib = name.startswith("lib/")
+            prev_state = ((cur["state"] if cur else "pending") or "pending") if is_lib else None
+            # Default ext for /lib/* is 'py' (plugin source). Without
+            # this, _infer_type sees no '<' tags and falls back to 'plain',
+            # which gives ?raw a Content-Type of text/plain on source
+            # code instead of text/x-python. Explicit ?ext= still wins.
+            if is_lib and not req_ext:
+                new_ext = "py"
+            else:
+                new_ext = req_ext or (_infer_type(b) if isinstance(b, str) else cur_ext)
             if (cur_ext == "html" or new_ext == "html") and _check_auth(scope) != "approve":
                 return await send_r(send, 403, '{"error":"html write requires approve"}')
             hdrs = _extract_meta_headers(scope)
-            c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b, new_ext, hdrs)); c.commit()
+            if is_lib and prev_state != "pending":
+                c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,state='pending',version=version+1,updated_at=datetime('now') WHERE id=1",(b, new_ext, hdrs))
+            else:
+                c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,version=version+1,updated_at=datetime('now') WHERE id=1",(b, new_ext, hdrs))
+            c.commit()
             # Phase 2.5 audit binding: bind metadata to content at event time.
             # Version + body hash + meta_headers go into the HMAC-chained
             # payload so the claim ("codex wrote this, confidence 0.95")
@@ -1056,6 +1254,14 @@ async def app(scope, receive, send):
                 "meta_headers": json.loads(hdrs or "[]"),
                 "body_sha256_after": body_hash,
             })
+            # If this was a /lib/* PUT that reset state, record the
+            # forced transition on the chain after the stage_written
+            # event so "source replaced, approval invalidated" is
+            # independently auditable from "source written".
+            if is_lib and prev_state and prev_state != "pending":
+                log_event(name, "state_transition", {
+                    "from": prev_state, "to": "pending",
+                    "version": ver, "reason": "source replaced"})
             return await send_r(send, 200, json.dumps({"version": ver, "ext": new_ext, "type": new_ext}))
         # ── POST: append or internal op ──
         if method == "POST":
@@ -1220,19 +1426,846 @@ def run(extra_tasks=None):
             await asyncio.gather(_mini_serve(app, HOST, PORT), *tasks)
         asyncio.run(_serve())
 
-def _sync_dir(directory, glob_pattern, world_name_fn, label):
-    """Sync files from a directory to worlds at startup."""
-    d = Path(__file__).resolve().parent / directory
-    if not d.exists(): return
-    for f in sorted(d.glob(glob_pattern)):
-        name = world_name_fn(f)
-        content = f.read_text(encoding="utf-8")
+# ──────────────────────────────────────────────────────────────────────
+# Plugin subsystem — Tier 1 (/lib/*) only, v4.5.0 microkernel cut.
+# World loader (load_plugin_from_source), activation lifecycle
+# (activate_lib_world / deactivate_lib_world), boot loader
+# (boot_load_active_lib), cron scheduler (cron_loop), and the
+# AI plugin-propose/approve flow (rewired to /lib/*).
+#
+# Disk-based Tier 0 loading was removed: no more load_plugin(),
+# load_plugins(), plugins.lock, _verify_plugin, _find_lib_disk_collisions,
+# plugins/available/ scan, plugins/ auto-install. The runtime reads
+# /lib/<name> worlds from DATA and nothing from the filesystem.
+# ──────────────────────────────────────────────────────────────────────
+
+_DANGEROUS_PLUGINS = {"exec", "fs"}
+_cron_tasks = {}   # name → {interval, handler, last_run}
+_start_time = time.time()
+
+# Mode system — environment detection × user intent.
+# Environment ceiling: container=2, bare metal=1. User cannot exceed it.
+IN_CONTAINER = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv") or os.getenv("CONTAINER") == "1"
+_ENV_CEILING = 2 if IN_CONTAINER else 1
+_USER_MODE = int(os.getenv("ELASTIK_MODE", "0"))  # 0 = auto
+MODE = min(_USER_MODE, _ENV_CEILING) if _USER_MODE else _ENV_CEILING
+# MODE 1: executor  — read/write worlds, use plugins. admin/config/dangerous locked.
+# MODE 2: autonomous — approve token unlocks admin/config. dangerous plugins allowed.
+
+
+def unload_plugin(name):
+    """Unload a plugin — remove its routes. Works for both Tier 0
+    (bare names) and Tier 1 (`lib:<name>` prefix)."""
+    global _auth
+    meta = next((m for m in _plugin_meta if m["name"] == name), None)
+    if not meta: print(f"  not loaded: {name}"); return
+    for r in meta["routes"]:
+        _plugins.pop(r, None)
+        _plugin_auth.pop(r, None)
+    if name == "auth" or "auth" in meta.get("description", "").lower(): _auth = None
+    _sync_actions_remove(name, meta["routes"])
+    # Auto-clear skills world (only for Tier 0 — Tier 1 plugins use
+    # a different name scheme "lib:<basename>" and don't emit skills).
+    if not name.startswith("lib:"):
+        skill_world = f"usr/lib/skills/{name.replace('_', '-')}"
+        try:
+            if (DATA / _disk_name(skill_world)).exists():
+                c = conn(skill_world)
+                c.execute("UPDATE stage_meta SET stage_html='',version=version+1,updated_at=datetime('now') WHERE id=1")
+                c.commit()
+                print(f"  skill cleared: {skill_world}")
+        except Exception as e: print(f"  warn: skill cleanup failed for {skill_world}: {e}")
+    _cron_tasks.pop(name, None)
+    _plugin_meta[:] = [m for m in _plugin_meta if m["name"] != name]
+    print(f"  unloaded: {name}")
+
+
+def load_plugin_from_source(plugin_name, source):
+    """Tier 1 plugin loader: exec source from a /lib/<plugin_name> world,
+    register declared ROUTES, track in _plugin_meta under 'lib:<name>'.
+    Returns (True, None) or (False, error_str). AUTH_MIDDLEWARE from
+    Tier 1 is silently ignored — privileged hook stays Tier 0."""
+    if not _valid_name(plugin_name):
+        return False, f"invalid plugin name: {plugin_name}"
+    if plugin_name in _DANGEROUS_PLUGINS and MODE < 2:
+        return False, f"{plugin_name} blocked — mode {MODE} requires mode 2 (container)"
+    if any(m["name"] == plugin_name for m in _plugin_meta):
+        return False, f"name collision: '{plugin_name}' is already loaded as a Tier 0 plugin"
+    meta_name = f"lib:{plugin_name}"
+
+    async def _call(route, method="POST", body=b"", params=None):
+        h = _plugins.get(route)
+        if not h: return {"error": f"route {route} not found"}
+        return await h(method, body, params or {})
+    _injectable = {
+        "unload_plugin": unload_plugin,
+        "_plugins": _plugins, "_plugin_meta": _plugin_meta,
+        "_cron_tasks": _cron_tasks, "_start_time": _start_time,
+    }
+    ns = {"__file__": f"<lib/{plugin_name}>", "_ROOT": Path(__file__).resolve().parent,
+          "conn": conn, "log_event": log_event, "_call": _call}
+    needs_match = re.search(r'NEEDS\s*=\s*\[([^\]]*)\]', source)
+    if needs_match:
+        needed = [s.strip().strip('"').strip("'") for s in needs_match.group(1).split(",") if s.strip()]
+        ns.update({k: _injectable[k] for k in needed if k in _injectable})
+    try:
+        exec(source, ns)
+    except Exception as e:
+        return False, f"exec failed: {type(e).__name__}: {e}"
+    raw_routes = ns.get("ROUTES", {})
+    declared = []
+    handle_fn = ns.get("handle")
+    if isinstance(raw_routes, list):
+        if not handle_fn:
+            return False, "ROUTES is a list but no handle() function defined"
+        declared = [(r, handle_fn) for r in raw_routes]
+    elif isinstance(raw_routes, dict):
+        declared = list(raw_routes.items())
+    else:
+        return False, f"ROUTES must be a list or dict, got {type(raw_routes).__name__}"
+    prior = next((m for m in _plugin_meta if m["name"] == meta_name), None)
+    own_routes = set(prior["routes"]) if prior else set()
+    for route, _h in declared:
+        if route in _plugins and route not in own_routes:
+            return False, f"route conflict: '{route}' is already registered"
+    if prior:
+        for r in prior["routes"]:
+            _plugins.pop(r, None)
+            _plugin_auth.pop(r, None)
+        _plugin_meta[:] = [m for m in _plugin_meta if m["name"] != meta_name]
+    auth_level = ns.get("AUTH", "none")
+    routes = []
+    for route, h in declared:
+        _plugins[route] = h
+        _plugin_auth[route] = auth_level
+        routes.append(route)
+    _plugin_meta.append({
+        "name": meta_name, "description": ns.get("DESCRIPTION", ""),
+        "routes": routes, "params": ns.get("PARAMS_SCHEMA", {}),
+        "ops": ns.get("OPS_SCHEMA", []),
+    })
+    if "CRON" in ns and "CRON_HANDLER" in ns:
+        _cron_tasks[meta_name] = {
+            "interval": int(ns["CRON"]),
+            "handler": ns["CRON_HANDLER"],
+            "last_run": time.time(),
+        }
+    return True, None
+
+
+def activate_lib_world(plugin_name):
+    """Wire PUT /lib/<name>/state=active to exec + registration."""
+    world_name = f"lib/{plugin_name}"
+    db_path = DATA / _disk_name(world_name) / "universe.db"
+    if not db_path.exists():
+        return False, "plugin world not found"
+    c = conn(world_name)
+    r = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
+    source = r["stage_html"] if r else None
+    if isinstance(source, bytes):
+        source = source.decode("utf-8", "replace")
+    if not source or not source.strip():
+        return False, "plugin source is empty"
+    return load_plugin_from_source(plugin_name, source)
+
+
+def deactivate_lib_world(plugin_name):
+    """Wire PUT /lib/<name>/state=disabled (and DELETE /lib/<name> if
+    active) to route unregistration. Idempotent — silently no-op if
+    the plugin wasn't loaded."""
+    unload_plugin(f"lib:{plugin_name}")
+
+
+def boot_load_active_lib():
+    """Boot-time loader: iterate data/ for lib/<name> worlds with
+    state='active' and exec each. Per PLAN guardrail D, exec failures
+    log and skip — they do NOT auto-disable."""
+    if not DATA.exists(): return
+    loaded, failed = 0, 0
+    for d in sorted(DATA.iterdir()):
+        if not (d.is_dir() and (d / "universe.db").exists()): continue
+        try: name = _logical_name(d.name)
+        except Exception: continue
+        if not name.startswith("lib/"): continue
+        plugin_name = name[4:]
+        try:
+            c = conn(name)
+            row = c.execute("SELECT state,stage_html FROM stage_meta WHERE id=1").fetchone()
+        except Exception as e:
+            print(f"  lib: {plugin_name}: read failed — {e}")
+            continue
+        if not row: continue
+        state = (row["state"] or "pending") if row else "pending"
+        if state != "active": continue
+        source = row["stage_html"]
+        if isinstance(source, bytes):
+            source = source.decode("utf-8", "replace")
+        if not source or not source.strip():
+            print(f"  lib: {plugin_name}: state=active but source empty; skipping")
+            failed += 1
+            continue
+        ok, err = load_plugin_from_source(plugin_name, source)
+        if ok:
+            loaded += 1
+            print(f"  lib: loaded {plugin_name}")
+            try: log_event(name, "plugin_activated_on_boot", {"source_len": len(source)})
+            except Exception: pass
+        else:
+            failed += 1
+            print(f"  lib: {plugin_name}: LOAD FAILED — {err} (state stays active)")
+            try: log_event(name, "plugin_load_failed", {"error": err})
+            except Exception: pass
+    if loaded or failed:
+        print(f"  lib: {loaded} loaded, {failed} failed")
+
+
+def _sync_actions_remove(name, routes):
+    """Remove a plugin's routes from etc/actions whitelist."""
+    if not routes: return
+    try:
+        c = conn("etc/actions")
+        old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
+        remove = set(routes)
+        lines = [l for l in old.splitlines() if l.strip() and l.strip() not in remove]
+        c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1",
+                  ("\n".join(lines) + "\n" if lines else "",))
+        c.commit()
+    except Exception as e: print(f"  warn: actions cleanup failed: {e}")
+
+
+async def handle_propose(method, body, params):
+    """POST /plugins/propose — submit a plugin proposal (AI → operator review).
+    Appends the proposal to the plugin-proposals world. Operator then
+    reviews and, if approved, POSTs to /plugins/approve which PUTs the
+    source into /lib/<name> and activates it."""
+    try: b = json.loads(body)
+    except (json.JSONDecodeError, TypeError): return {"error": "invalid json", "_status": 400}
+    log_event("default", "plugin_proposed", b)
+    name = b.get("name", "unknown")
+    desc = b.get("description", "")
+    code = b.get("code", "")
+    summary = f"\n---\n## {name}\n{desc}\n```python\n{code}\n```\n"
+    c = conn("plugin-proposals")
+    old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
+    c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (old + summary,))
+    c.commit()
+    return {"ok": True}
+
+
+async def handle_approve(method, body, params):
+    """POST /plugins/approve — approve and install a plugin as /lib/<name>
+    (requires approve). Mirrors the canonical /lib/* surface end-to-end:
+
+      1. Source write: same UPDATE + state-reset + stage_written event
+         (with body_sha256_after) and forced state_transition (if prior
+         state != 'pending') that PUT /lib/<name> emits on its own.
+      2. Activation: activate_lib_world (shared with PUT /lib/<name>/state)
+         + state flip to 'active' + state_transition event identical in
+         shape to the one emitted by PUT /lib/<name>/state=active.
+
+    Post-condition: the event-chain provenance of a plugin installed via
+    /plugins/approve is indistinguishable from one installed via
+    PUT /lib/<name> + PUT /lib/<name>/state=active. Codex P1 2026-04-21.
+
+    Rewired for the v4.5.0 microkernel cut: no disk writes remain; /lib/*
+    is the only loader."""
+    try: b = json.loads(body)
+    except (json.JSONDecodeError, TypeError): return {"error": "invalid json", "_status": 400}
+    scope = params.get("_scope", {})
+    if _check_auth(scope) != "approve":
+        return {"error": "unauthorized", "_status": 403}
+    n, code = b.get("name", ""), b.get("code", "")
+    if n and not _valid_name(n):
+        return {"error": "invalid plugin name", "_status": 400}
+    if n and code:
+        world_name = f"lib/{n}"
+        c = conn(world_name)
+        cur = c.execute("SELECT state FROM stage_meta WHERE id=1").fetchone()
+        prev_state = ((cur["state"] if cur else "pending") or "pending")
+        code_bytes = code.encode("utf-8") if isinstance(code, str) else code
+        # Source write — /lib/* PUT semantics: reset state to pending, bump
+        # version, default ext='py'. Approval-binding invariant stays intact:
+        # a source-changing write on an already-approved world sinks it back
+        # to pending so the re-approval below re-binds to the new source hash.
+        c.execute(
+            "UPDATE stage_meta SET stage_html=?,ext='py',headers=NULL,"
+            "state='pending',version=version+1,"
+            "updated_at=datetime('now') WHERE id=1",
+            (code,),
+        )
+        c.commit()
+        ver = c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]
+        body_hash = hashlib.sha256(code_bytes).hexdigest()
+        log_event(world_name, "stage_written", {
+            "op": "put",
+            "len": len(code_bytes),
+            "ext": "py",
+            "version_after": ver,
+            "meta_headers": [],
+            "body_sha256_after": body_hash,
+        })
+        if prev_state != "pending":
+            log_event(world_name, "state_transition", {
+                "from": prev_state, "to": "pending",
+                "version": ver, "reason": "source replaced"})
+        # Activation — /lib/<name>/state=active semantics: exec + register
+        # routes, flip state, emit state_transition. Exec failure leaves
+        # state='pending' and refuses activation (mirrors PUT state).
+        ok, err = activate_lib_world(n)
+        if not ok:
+            log_event(world_name, "plugin_approve_failed", {"name": n, "error": err})
+            return {"error": f"activation failed: {err}", "_status": 500}
+        c.execute("UPDATE stage_meta SET state='active',"
+                  "updated_at=datetime('now') WHERE id=1")
+        c.commit()
+        log_event(world_name, "state_transition", {
+            "from": "pending", "to": "active", "version": ver})
+        log_event("default", "plugin_approved", {"name": n})
+    return {"ok": True}
+
+
+# ── Core route: /stream (SSE) — inlined v4.5.0, formerly Tier 0 plugin.
+# Push on write, no client polling. Opens EventSource, receives events
+# only when the world's version/pending_js/js_result changes.
+_SSE_POLL = 0.02      # internal DB poll (20ms → up to 50 events/sec)
+_SSE_HB_EVERY = 25    # heartbeat every 25 polls (0.5s) — keeps edge buffers flushing.
+
+async def _core_sse_handle(method, body, params):
+    """Server-sent events. GET /stream/{name} → text/event-stream.
+    Emits event: update when world state changes; comment heartbeat every 0.5s.
+    """
+    send = params.get("_send")
+    scope = params.get("_scope", {})
+    if not send:
+        return {"error": "server does not expose raw send; SSE unavailable", "_status": 500}
+    if method != "GET":
+        return {"error": "SSE is GET only", "_status": 405}
+    path = scope.get("path", "").rstrip("/")
+    if not path.startswith("/stream/") or path == "/stream":
+        return {"error": "path must be /stream/{name}", "_status": 400}
+    name = path[len("/stream/"):]
+    if not _valid_name(name):
+        return {"error": "invalid world name", "_status": 400}
+    if not (DATA / _disk_name(name) / "universe.db").exists():
+        return {"error": "world not found", "_status": 404}
+    c = conn(name)
+    await send({
+        "type": "http.response.start",
+        "status": 200,
+        "headers": [
+            [b"content-type", b"text/event-stream; charset=utf-8"],
+            [b"cache-control", b"no-cache"],
+            [b"connection", b"keep-alive"],
+            [b"x-accel-buffering", b"no"],
+        ],
+    })
+    def _snapshot():
+        r = c.execute(
+            "SELECT stage_html,pending_js,js_result,version,ext FROM stage_meta WHERE id=1"
+        ).fetchone()
+        raw = r["stage_html"] or ""
+        if isinstance(raw, bytes):
+            try: raw = raw.decode("utf-8")
+            except UnicodeDecodeError: raw = ""
+        ext = r["ext"] or "html"
+        pj = r["pending_js"] or ""
+        jr = r["js_result"] or ""
+        sig = (r["version"], pj, jr)
+        payload = json.dumps({
+            "version": r["version"], "stage_html": raw,
+            "pending_js": pj, "js_result": jr,
+            "ext": ext, "type": ext,
+        }, ensure_ascii=False)
+        return sig, payload
+    last_sig = None
+    ticks = 0
+    try:
+        while True:
+            sig, data = _snapshot()
+            if sig != last_sig:
+                msg = f"event: update\ndata: {data}\n\n".encode("utf-8")
+                await send({"type": "http.response.body", "body": msg, "more_body": True})
+                last_sig = sig
+                ticks = 0
+            else:
+                ticks += 1
+                if ticks >= _SSE_HB_EVERY:
+                    await send({"type": "http.response.body", "body": b": hb\n\n", "more_body": True})
+                    ticks = 0
+            await asyncio.sleep(_SSE_POLL)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+    finally:
+        try: await send({"type": "http.response.body", "body": b"", "more_body": False})
+        except Exception: pass
+    return None
+
+
+# ── Core route: /dav (WebDAV) — inlined v4.5.0, formerly Tier 0 plugin.
+# FHS tree over worlds. Mount it, cd home. PROPFIND/GET/PUT/DELETE/
+# MOVE/COPY/MKCOL. Reads are public (like core routes); writes require
+# auth; system prefix writes require approve.
+#
+# Two distinct prefix sets — originally conflated into one, split per
+# Codex review 2026-04-21:
+#
+#   _DAV_SYS_PREFIXES      Auth-elevated. Writes require T3 (approve).
+#                          lib/ NOT here — core PUT /lib/<n> accepts T2,
+#                          DAV must match (state-reset via DAV PUT is
+#                          enforced separately; see 132e718).
+#
+#   _DAV_TOP_NAMESPACES    Top-level namespaces surfaced as /dav/<ns>/
+#                          collections in root PROPFIND + HTML listings
+#                          AND excluded from /dav/home/'s "user content"
+#                          set. lib/ IS here so plugin worlds appear at
+#                          /dav/lib/ and don't double-alias as
+#                          /dav/home/lib/<n>.
+_DAV_SYS_PREFIXES = ("etc/", "usr/", "var/", "boot/", "tmp/", "mnt/")
+_DAV_TOP_NAMESPACES = _DAV_SYS_PREFIXES + ("lib/",)
+
+def _dav_suffix(rest, ext):
+    """Render-time ext decoration for PROPFIND hrefs.
+    Dotted or dir/empty → ''. html → '.html.txt' (file:// safety).
+    plain → '.txt'. Everything else → '.{ext}'.
+    """
+    last = rest.rsplit("/", 1)[-1]
+    if "." in last: return ""
+    if not ext or ext == "dir": return ""
+    if ext == "html": return ".html.txt"
+    if ext == "plain": return ".txt"
+    return f".{ext}"
+
+def _dav_world_name(path):
+    """DAV URL → world name. Identity first, strip-and-retry fallback.
+    Strip-retry handles PROPFIND-decorated hrefs (.html.txt etc.)."""
+    rest = path[4:].lstrip("/").rstrip("/")
+    if rest.startswith("home/"): rest = rest[5:]
+    elif rest == "home": rest = ""
+    if not rest: return ""
+    candidate = rest
+    for _ in range(3):
+        if (DATA / _disk_name(candidate) / "universe.db").exists():
+            return candidate
+        segs = candidate.split("/")
+        last = segs[-1]
+        dot = last.rfind(".")
+        if dot <= 0:
+            break
+        candidate = "/".join(segs[:-1] + [last[:dot]])
+    return rest
+
+def _dav_read(name):
+    c = conn(name)
+    r = c.execute("SELECT stage_html,ext FROM stage_meta WHERE id=1").fetchone()
+    raw = r["stage_html"] if r and r["stage_html"] else b""
+    if isinstance(raw, str): raw = raw.encode("utf-8")
+    ext = (r["ext"] if r else "html") or "html"
+    return raw, ext
+
+def _dav_prop(href, restype, ct, size, mod):
+    rt = "<D:resourcetype><D:collection/></D:resourcetype>" if restype == "collection" else "<D:resourcetype/>"
+    ctl = f"<D:getcontenttype>{ct}</D:getcontenttype>" if ct else ""
+    return (f"<D:response><D:href>{href}</D:href><D:propstat><D:prop>"
+            f"{rt}<D:getcontentlength>{size}</D:getcontentlength>"
+            f"<D:getlastmodified>{mod}</D:getlastmodified>"
+            f"{ctl}</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>")
+
+
+async def _core_dav_handle(method, body, params):
+    """/dav/ → FHS WebDAV surface. PROPFIND/GET/PUT/DELETE over worlds."""
+    scope = params.get("_scope", {})
+    path = scope.get("path", "/dav")
+    now = formatdate(usegmt=True)
+
+    if method == "OPTIONS":
+        return {"_body":"", "_ct":"text/plain",
+                "_headers":[["dav","1"],["allow","OPTIONS, GET, HEAD, PUT, DELETE, MOVE, COPY, PROPFIND, MKCOL"]]}
+
+    raw_rest = path[4:].strip("/")
+    if raw_rest == "home": dav_prefix = "home"
+    elif raw_rest.startswith("home/"): dav_prefix = raw_rest
+    else: dav_prefix = raw_rest
+
+    def _write_auth_ok():
+        return _check_auth(scope) is not None
+
+    if method == "PROPFIND":
+        depth = "1"
+        for k, v in scope.get("headers", []):
+            if k == b"depth": depth = v.decode(); break
+        all_worlds = []
+        if DATA.exists():
+            for d in sorted(DATA.iterdir()):
+                if d.is_dir() and (d / "universe.db").exists():
+                    all_worlds.append(_logical_name(d.name))
+        world = _dav_world_name(path)
+        if world and world.endswith("/"): world = world[:-1]
+        is_world = world and any(w == world for w in all_worlds)
+        has_children = bool(world) and any(w.startswith(world + "/") for w in all_worlds)
+        is_top_ns = (dav_prefix in ("", "home") or dav_prefix in (p.rstrip("/") for p in _DAV_TOP_NAMESPACES))
+        if world and not is_world and not has_children and not is_top_ns:
+            return {"error":"not found", "_status":404}
+        if is_world:
+            raw, ext = _dav_read(world)
+            is_dir = ext == "dir" or has_children
+            if not is_dir:
+                dav_href = f"/dav/home/{world}" if not world.startswith(_DAV_TOP_NAMESPACES) else f"/dav/{world}"
+                xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
+                       + _dav_prop(f"{dav_href}{_dav_suffix(world, ext)}", "", _ext_to_ct(ext), len(raw), now)
+                       + '</D:multistatus>')
+                return {"_body":xml, "_ct":"application/xml; charset=utf-8", "_status":207}
+        href = f"/dav/{dav_prefix}/" if dav_prefix else "/dav/"
+        xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
+               + _dav_prop(href, "collection", "", 0, now))
+        if depth == "1":
+            if dav_prefix == "":
+                has_user = any(not w.startswith(_DAV_TOP_NAMESPACES) for w in all_worlds)
+                if has_user:
+                    xml += _dav_prop("/dav/home/", "collection", "", 0, now)
+                for pref in _DAV_TOP_NAMESPACES:
+                    if any(w.startswith(pref) for w in all_worlds):
+                        xml += _dav_prop(f"/dav/{pref}", "collection", "", 0, now)
+            else:
+                if dav_prefix == "home":
+                    world_prefix = ""
+                    children_href = "/dav/home/"
+                    candidates = [w for w in all_worlds if not w.startswith(_DAV_TOP_NAMESPACES)]
+                elif dav_prefix.startswith("home/"):
+                    world_prefix = dav_prefix[5:] + "/"
+                    children_href = f"/dav/{dav_prefix}/"
+                    candidates = [w for w in all_worlds
+                                  if not w.startswith(_DAV_TOP_NAMESPACES) and w.startswith(world_prefix)]
+                else:
+                    world_prefix = dav_prefix + "/"
+                    children_href = f"/dav/{dav_prefix}/"
+                    candidates = [w for w in all_worlds if w.startswith(world_prefix)]
+                seen_dirs = set()
+                for w in candidates:
+                    rest = w[len(world_prefix):] if world_prefix else w
+                    if "/" in rest:
+                        subdir = rest.split("/")[0]
+                        if subdir not in seen_dirs:
+                            seen_dirs.add(subdir)
+                            xml += _dav_prop(f"{children_href}{subdir}/", "collection", "", 0, now)
+                    else:
+                        raw, ext = _dav_read(w)
+                        if ext == "dir":
+                            if rest not in seen_dirs:
+                                seen_dirs.add(rest)
+                                xml += _dav_prop(f"{children_href}{rest}/", "collection", "", 0, now)
+                        else:
+                            xml += _dav_prop(f"{children_href}{rest}{_dav_suffix(rest, ext)}", "", _ext_to_ct(ext), len(raw), now)
+        xml += '</D:multistatus>'
+        return {"_body":xml, "_ct":"application/xml; charset=utf-8", "_status":207}
+
+    if method in ("GET", "HEAD"):
+        name = _dav_world_name(path)
+        if not name:
+            listing = (f'<h1>elastik WebDAV — /{dav_prefix or ""}</h1>'
+                    '<p style="background:#fee;padding:.5em;border:1px solid #c00">'
+                    'AI-generated content -- treat all links as hostile.</p><ul>')
+            if DATA.exists():
+                all_worlds = [_logical_name(d.name) for d in sorted(DATA.iterdir())
+                              if d.is_dir() and (d / "universe.db").exists()]
+                if dav_prefix == "":
+                    if any(not w.startswith(_DAV_TOP_NAMESPACES) for w in all_worlds):
+                        listing += '<li><a href="/dav/home/">home/</a></li>'
+                    for pref in _DAV_TOP_NAMESPACES:
+                        if any(w.startswith(pref) for w in all_worlds):
+                            listing += f'<li><a href="/dav/{pref}">{pref}</a></li>'
+                else:
+                    if dav_prefix == "home":
+                        world_prefix = ""
+                        href_base = "/dav/home/"
+                        cands = [w for w in all_worlds if not w.startswith(_DAV_TOP_NAMESPACES)]
+                    elif dav_prefix.startswith("home/"):
+                        world_prefix = dav_prefix[5:] + "/"
+                        href_base = f"/dav/{dav_prefix}/"
+                        cands = [w for w in all_worlds
+                                 if not w.startswith(_DAV_TOP_NAMESPACES) and w.startswith(world_prefix)]
+                    else:
+                        world_prefix = dav_prefix + "/"
+                        href_base = f"/dav/{dav_prefix}/"
+                        cands = [w for w in all_worlds if w.startswith(world_prefix)]
+                    seen = set()
+                    for w in cands:
+                        rest = w[len(world_prefix):] if world_prefix else w
+                        if "/" in rest:
+                            first = rest.split("/")[0]
+                            if first not in seen:
+                                seen.add(first)
+                                listing += f'<li><a href="{href_base}{first}/">{first}/</a></li>'
+                        else:
+                            _, ext = _dav_read(w)
+                            listing += f'<li><a href="{href_base}{rest}{_dav_suffix(rest, ext)}">{rest}</a> <em>({ext})</em></li>'
+            listing += "</ul>"
+            return {"_html": listing}
+        if not _valid_name(name) or not (DATA / _disk_name(name) / "universe.db").exists():
+            return {"error":"not found", "_status":404}
+        if (name == "etc/shadow" or name.startswith("boot/")) and _check_auth(scope) != "approve":
+            return {"error":"read requires approve", "_status":403}
+        raw, ext = _dav_read(name)
+        return {"_body":raw, "_ct":_ext_to_ct(ext)}
+
+    if method in ("PUT", "DELETE", "MOVE", "COPY", "MKCOL") and not _write_auth_ok():
+        return {"error":"authentication required", "_status":401,
+                "_headers":[["www-authenticate",'Basic realm="elastik"']]}
+
+    if method == "PUT":
+        name = _dav_world_name(path)
+        if not name: return {"error":"PUT on collection not supported", "_status":405}
+        if not _valid_name(name): return {"error":"invalid world name", "_status":400}
+        raw = params.get("_body_raw", body.encode("utf-8") if isinstance(body, str) else body or b"")
+        ext = params.get("ext")
+        if not ext:
+            ct = ""
+            for k, v in scope.get("headers", []):
+                if k == b"content-type":
+                    ct = v.decode("utf-8", "replace").split(";")[0].strip().lower()
+                    break
+            ct_to_ext = {v: k for k, v in _CT.items()}
+            ext = ct_to_ext.get(ct, "")
+        if not ext:
+            last_seg = path.rstrip("/").rsplit("/", 1)[-1]
+            dot = last_seg.rfind(".")
+            if dot > 0:
+                maybe_ext = last_seg[dot+1:].lower()
+                if maybe_ext in _CT:
+                    ext = maybe_ext
+        if not ext: ext = "plain"
+        if ext == "html" and _check_auth(scope) != "approve":
+            return {"error": "html write requires approve", "_status": 403}
+        if name.startswith(_DAV_SYS_PREFIXES) and _check_auth(scope) != "approve":
+            return {"error": "system write requires approve", "_status": 403}
         c = conn(name)
-        old = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()
-        if old["stage_html"] != content:
-            c.execute("UPDATE stage_meta SET stage_html=?,version=version+1,updated_at=datetime('now') WHERE id=1", (content,))
-            c.commit()
-            print(f"  {label}: synced {name}")
+        meta = _extract_meta_headers(scope)
+        # Phase 0/1 P2: source-changing PUT on /lib/* invalidates approval.
+        # Mirror the core FHS PUT handler — if state was active/disabled,
+        # reset to pending so re-approval re-binds to the new source hash.
+        # Without this, DAV writes silently swap code under an existing
+        # T3 approval and boot_load_active_lib would exec the new code on
+        # next restart without fresh operator sign-off.
+        is_lib = name.startswith("lib/")
+        cur = c.execute("SELECT state FROM stage_meta WHERE id=1").fetchone()
+        prev_state = ((cur["state"] if cur else "pending") or "pending") if is_lib else None
+        if is_lib and prev_state != "pending":
+            c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,state='pending',version=version+1,updated_at=datetime('now') WHERE id=1", (raw, ext, meta))
+        else:
+            c.execute("UPDATE stage_meta SET stage_html=?,ext=?,headers=?,version=version+1,updated_at=datetime('now') WHERE id=1", (raw, ext, meta))
+        c.commit()
+        ver = c.execute("SELECT version FROM stage_meta WHERE id=1").fetchone()["version"]
+        body_hash = hashlib.sha256(raw if isinstance(raw, bytes) else raw.encode("utf-8")).hexdigest()
+        log_event(name, "stage_written", {
+            "op": "put",
+            "len": len(raw),
+            "ext": ext,
+            "version_after": ver,
+            "meta_headers": json.loads(meta or "[]"),
+            "body_sha256_after": body_hash,
+        })
+        # Forced state-reset audit event — matches core PUT handler.
+        if is_lib and prev_state and prev_state != "pending":
+            log_event(name, "state_transition", {
+                "from": prev_state, "to": "pending",
+                "version": ver, "reason": "source replaced"})
+        return {"_status":201, "_body":"", "_ct":"text/plain"}
+
+    if method == "DELETE":
+        name = _dav_world_name(path)
+        if not name: return {"error":"DELETE requires a name", "_status":405}
+        if not _valid_name(name): return {"error":"invalid world name", "_status":400}
+        targets = []
+        if (DATA / _disk_name(name) / "universe.db").exists():
+            targets.append(name)
+        if DATA.exists():
+            for d in sorted(DATA.iterdir()):
+                if d.is_dir() and (d / "universe.db").exists():
+                    w = _logical_name(d.name)
+                    if w.startswith(name + "/"):
+                        targets.append(w)
+        if not targets:
+            return {"error":"not found", "_status":404}
+        # DELETE on /lib/* requires T3 — matches core DELETE /lib/<n> which
+        # already includes lib/ in its elevated-auth tuple (server.py:915).
+        # _DAV_TOP_NAMESPACES = _DAV_SYS_PREFIXES + ("lib/",); reused here so
+        # T2 can't trash T3-approved plugins via DAV. PUT/MOVE/COPY keep
+        # _DAV_SYS_PREFIXES so DAV writes to /lib/<n> stay T2 (matching core
+        # PUT /lib/<n>) — MOVE/COPY into /lib/* are neutralized via state
+        # reset below, not via auth elevation.
+        needs_approve = any(t.startswith(_DAV_TOP_NAMESPACES) for t in targets)
+        if needs_approve and _check_auth(scope) != "approve":
+            return {"error":"system delete requires approve", "_status":403}
+        for w in targets:
+            _release_world(w)
+            _move_to_trash(w)
+        return {"_status":204, "_body":"", "_ct":"text/plain"}
+
+    if method == "MOVE":
+        src_name = _dav_world_name(path)
+        if not src_name:
+            return {"error":"MOVE requires a source name", "_status":405}
+        if not _valid_name(src_name):
+            return {"error":"invalid source name", "_status":400}
+        src_disk = DATA / _disk_name(src_name)
+        if not (src_disk / "universe.db").exists():
+            return {"error":"source not found", "_status":404}
+        dest_raw, overwrite = "", True
+        for k, v in scope.get("headers", []):
+            if k == b"destination": dest_raw = v.decode("utf-8", "replace")
+            elif k == b"overwrite": overwrite = v.decode().strip().upper() == "T"
+        if not dest_raw:
+            return {"error":"Destination header required", "_status":400}
+        from urllib.parse import urlparse, unquote
+        dest_path = unquote(urlparse(dest_raw).path or dest_raw)
+        dst_name = _dav_world_name(dest_path)
+        if not dst_name or not _valid_name(dst_name):
+            return {"error":"invalid destination", "_status":400}
+        if (src_name.startswith(_DAV_SYS_PREFIXES) or dst_name.startswith(_DAV_SYS_PREFIXES)) \
+           and _check_auth(scope) != "approve":
+            return {"error":"system move requires approve", "_status":403}
+        dst_disk = DATA / _disk_name(dst_name)
+        if dst_disk.exists():
+            if not overwrite:
+                return {"error":"destination exists", "_status":412}
+            shutil.rmtree(dst_disk)
+        _release_world(src_name)
+        _release_world(dst_name)
+        dst_disk.parent.mkdir(parents=True, exist_ok=True)
+        for attempt in range(5):
+            try:
+                src_disk.rename(dst_disk)
+                break
+            except PermissionError:
+                time.sleep(0.02 * (attempt + 1))
+        else:
+            shutil.move(str(src_disk), str(dst_disk))
+        # Approval-binding: a MOVE landing inside /lib/* carries the source
+        # world's state column over with the rename. If that state was
+        # active/disabled, the destination would auto-boot on next restart
+        # under a new name without any T3 re-approval. Force state back to
+        # pending so re-approval is explicit. Mirrors core PUT /lib/<n>.
+        if dst_name.startswith("lib/"):
+            dc = conn(dst_name)
+            dr = dc.execute("SELECT state,version FROM stage_meta WHERE id=1").fetchone()
+            prev = ((dr["state"] if dr else "pending") or "pending")
+            if prev != "pending":
+                dc.execute("UPDATE stage_meta SET state='pending',"
+                           "updated_at=datetime('now') WHERE id=1")
+                dc.commit()
+                log_event(dst_name, "state_transition", {
+                    "from": prev, "to": "pending",
+                    "version": dr["version"] if dr else 0,
+                    "reason": "source replaced (via MOVE)"})
+        log_event(dst_name, "stage_moved", {"from": src_name})
+        return {"_status":204, "_body":"", "_ct":"text/plain"}
+
+    if method == "COPY":
+        src_name = _dav_world_name(path)
+        if not src_name:
+            return {"error":"COPY requires a source name", "_status":405}
+        if not _valid_name(src_name):
+            return {"error":"invalid source name", "_status":400}
+        src_disk = DATA / _disk_name(src_name)
+        src_is_world = (src_disk / "universe.db").exists()
+        dest_raw, overwrite = "", True
+        for k, v in scope.get("headers", []):
+            if k == b"destination": dest_raw = v.decode("utf-8", "replace")
+            elif k == b"overwrite": overwrite = v.decode().strip().upper() == "T"
+        if not dest_raw:
+            return {"error":"Destination header required", "_status":400}
+        from urllib.parse import urlparse, unquote
+        dest_path = unquote(urlparse(dest_raw).path or dest_raw)
+        dst_name = _dav_world_name(dest_path)
+        if not dst_name or not _valid_name(dst_name):
+            return {"error":"invalid destination", "_status":400}
+        pairs = []
+        if src_is_world:
+            pairs.append((src_name, dst_name))
+        if DATA.exists():
+            for d in sorted(DATA.iterdir()):
+                if d.is_dir() and (d / "universe.db").exists():
+                    w = _logical_name(d.name)
+                    if w.startswith(src_name + "/"):
+                        pairs.append((w, dst_name + w[len(src_name):]))
+        if not pairs:
+            return {"error":"source not found", "_status":404}
+        touches_sys = any(s.startswith(_DAV_SYS_PREFIXES) or d.startswith(_DAV_SYS_PREFIXES) for s, d in pairs)
+        if touches_sys and _check_auth(scope) != "approve":
+            return {"error":"system copy requires approve", "_status":403}
+        if not overwrite:
+            for _, dw in pairs:
+                if (DATA / _disk_name(dw) / "universe.db").exists():
+                    return {"error":"destination exists", "_status":412}
+        for sw, dw in pairs:
+            src_db = DATA / _disk_name(sw) / "universe.db"
+            dst_dir = DATA / _disk_name(dw)
+            dst_db = dst_dir / "universe.db"
+            if sw in _db:
+                try: _db[sw].execute("PRAGMA wal_checkpoint(TRUNCATE)"); _db[sw].commit()
+                except Exception: pass
+            if dst_dir.exists():
+                if dw in _db: _db.pop(dw).close()
+                shutil.rmtree(dst_dir)
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_db, dst_db)
+            # Approval-binding: same reason as MOVE above. A raw file-copy
+            # of universe.db carries the state column over. If the copy
+            # target sits in /lib/*, force state=pending so the operator
+            # must re-approve before the clone can auto-boot under a new
+            # name.
+            if dw.startswith("lib/"):
+                dc = conn(dw)
+                dr = dc.execute("SELECT state,version FROM stage_meta WHERE id=1").fetchone()
+                prev = ((dr["state"] if dr else "pending") or "pending")
+                if prev != "pending":
+                    dc.execute("UPDATE stage_meta SET state='pending',"
+                               "updated_at=datetime('now') WHERE id=1")
+                    dc.commit()
+                    log_event(dw, "state_transition", {
+                        "from": prev, "to": "pending",
+                        "version": dr["version"] if dr else 0,
+                        "reason": "source replaced (via COPY)"})
+            log_event(dw, "stage_copied", {"from": sw})
+        return {"_status":204, "_body":"", "_ct":"text/plain"}
+
+    if method == "MKCOL":
+        name = _dav_world_name(path)
+        if not name: return {"_status":201, "_body":"", "_ct":"text/plain"}
+        if not _valid_name(name): return {"_status":201, "_body":"", "_ct":"text/plain"}
+        c = conn(name)
+        c.execute("UPDATE stage_meta SET ext='dir',updated_at=datetime('now') WHERE id=1"); c.commit()
+        return {"_status":201, "_body":"", "_ct":"text/plain"}
+    if method in ("LOCK", "UNLOCK"):
+        return {"_body":"", "_ct":"text/plain", "_status":501}
+    return {"error":"method not allowed", "_status":405}
+
+
+def register_plugin_routes():
+    """Register /plugins/propose and /plugins/approve in _plugins, plus
+    core inline routes (sse, dav)."""
+    _plugins["/plugins/propose"] = handle_propose
+    _plugins["/plugins/approve"] = handle_approve
+    _plugins["/stream"] = _core_sse_handle
+    _plugin_auth["/stream"] = "none"
+    _plugins["/dav"] = _core_dav_handle
+    _plugin_auth["/dav"] = "none"
+
+
+async def cron_loop():
+    """Background cron loop — runs plugin CRON handlers."""
+    while True:
+        await asyncio.sleep(1)
+        now = time.time()
+        for name, task in list(_cron_tasks.items()):
+            if now - task["last_run"] >= task["interval"]:
+                try:
+                    await task["handler"]()
+                    task["last_run"] = now
+                except Exception as e:
+                    print(f"  cron {name}: {e}")
+
 
 if __name__ == "__main__":
     if not AUTH_TOKEN:
@@ -1242,16 +2275,14 @@ if __name__ == "__main__":
     _root = Path(__file__).resolve().parent
     os.environ.setdefault("ELASTIK_DATA", str(_root / "data"))
     os.environ.setdefault("ELASTIK_ROOT", str(_root))
-    try:
-        import plugins
-    except ImportError:
-        plugins = None
-    if plugins:
-        plugins.load_plugins()
-        plugins.register_plugin_routes()
-        _sync_dir("skills", "*.md", lambda f: f"usr/lib/skills/{f.stem}", "skills")
-        _sync_dir("renderers", "renderer-*.html",
-                  lambda f: f"usr/lib/renderer/{f.stem[9:]}", "renderers")  # strip "renderer-"
+
+    register_plugin_routes()
+    # /lib/* is the only loader. Iterate data/ for lib/<name> worlds
+    # with state='active' and exec each. Per PLAN guardrail B, reads
+    # the DB directly — no self-HTTP. Per guardrail D, exec failures
+    # log and skip; state stays 'active' (operator intent), runtime
+    # route registration is missing.
+    boot_load_active_lib()
     # /boot — write once at startup, read requires T3.
     # boot/env: which env vars are set (names + non-secret values).
     # boot/grub: which plugins loaded.
@@ -1271,9 +2302,5 @@ if __name__ == "__main__":
     c.execute("UPDATE stage_meta SET stage_html=?,ext='txt',version=version+1,"
               "updated_at=datetime('now') WHERE id=1", ("\n".join(_boot_grub),))
     c.commit()
-    if plugins:
-        print(f"\n  elastik -> http://{HOST}:{PORT}\n")
-        run(extra_tasks=[plugins.cron_loop()])
-    else:
-        print(f"\n  elastik -> http://{HOST}:{PORT}  [no plugins.py]\n")
-        run()
+    print(f"\n  elastik -> http://{HOST}:{PORT}\n")
+    run(extra_tasks=[cron_loop()])

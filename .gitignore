@@ -26,9 +26,10 @@ Desktop.ini
 # Misc
 screenshot_*.png
 nul
-# Installed plugins (only plugins/available/ is tracked)
-plugins/*.py
+# plugins/ now ships only specimens (example.py, reality.py).
+# Experimental / private work stays ignored.
 plugins/mcp_tools/
+plugins/dev-vm/
 
 llama-server/
 dist/

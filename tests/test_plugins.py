@@ -179,26 +179,9 @@ def test_cgi():
         except Exception as e:
             test(f"{name}: --routes runs", False, str(e))
 
-    # Edge cases on echo (now part of devtools.py)
-    devtools_path = os.path.join("plugins", "available", "devtools.py")
-    if os.path.exists(devtools_path):
-        print(f"\n  --- echo edge cases (via devtools) ---")
-
-        # Empty body
-        req = json.dumps({"path": "/echo", "method": "POST", "body": "", "query": ""})
-        out, _, rc = run_plugin(devtools_path, stdin_data=req + "\n")
-        if rc == 0:
-            resp = json.loads(out.strip())
-            test("echo: empty body -> status 200", resp["status"] == 200)
-            test("echo: empty body -> empty body back", resp["body"] == "")
-
-        # Large body
-        big = "x" * 10000
-        req = json.dumps({"path": "/echo", "method": "POST", "body": big, "query": ""})
-        out, _, rc = run_plugin(devtools_path, stdin_data=req + "\n")
-        if rc == 0:
-            resp = json.loads(out.strip())
-            test("echo: large body -> preserved", len(resp["body"]) == 10000)
+    # Echo edge-case tests (formerly via devtools.py) retired in v4.5.0
+    # microkernel cut — devtools was removed; any future CGI-mode coverage
+    # for /echo has to re-land through /lib/* once a replacement ships.
 
     # ── Adversarial CGI tests ──
     print(f"\n  --- adversarial CGI tests ---")
@@ -247,23 +230,13 @@ def test_cgi():
 def test_python():
     print("\n=== Layer 2: Python HTTP Integration ===")
 
-    # Ensure gpu + devtools plugins are installed for testing. public_gate
-    # tags along: it's normally auto-installed as a default, but load_plugins()
-    # only triggers that branch when plugins/ is empty — the pre-install of
-    # these test fixtures makes plugins/ non-empty before the subprocess
-    # boots, so on a fresh CI checkout the defaults (admin/info/public_gate)
-    # never get installed at all. Without public_gate loaded, server._auth
-    # stays None and the non-local probes in _run_public_gate_shell_tests
-    # slip past the gate → 404 instead of 401.
-    import shutil
-    _installed = []
-    for pname in ["gpu.py", "devtools.py", "shell.py", "mirror.py", "view.py", "dav.py", "fanout.py", "public_gate.py", "sse.py"]:
-        src = os.path.join(ROOT, "plugins", "available", pname)
-        dst = os.path.join(ROOT, "plugins", pname)
-        if os.path.exists(src) and not os.path.exists(dst):
-            shutil.copy2(src, dst)
-            _installed.append(dst)
-
+    # v4.5.0 microkernel cut: no more disk plugin preinstall. The disk
+    # loader (load_plugins / _verify_plugin / plugins.lock) is gone; /lib/*
+    # is the only loader. sse + dav are now inline core routes, public_gate
+    # is inlined into server.py, and the remaining Tier 1 candidates were
+    # removed from plugins/available/ (see logs/plugins-backup/ for source).
+    # Legacy per-plugin test helpers were retired with the cut — see
+    # commit fix(tests): retire legacy Tier 1 plugin test helpers.
     py_port = 13007
     py_token = "test-py-token"
     py_approve = "test-py-approve"
@@ -297,197 +270,57 @@ def test_python():
         test("Python server starts", True)
 
         _run_auth_tests(py_port, "python", py_token, py_approve)
-        _run_plugin_auth_tests(py_port, "python", py_token, py_approve)
         _run_blob_ext_tests(py_port, "python", py_token, py_approve)
-        _run_http_tests(py_port, "python", token=py_token, approve=py_approve)
-        _run_devtools_tests(py_port, "python", token=py_token)
-        _run_flush_sse_test(py_port, "python", py_token)
+        _run_proc_tests(py_port, "python")
         _run_public_gate_shell_tests(py_port, "python", py_token, py_approve)
         _run_uint16_redteam_tests(py_port, "python", py_token, py_approve)
         _run_meta_headers_tests(py_port, "python", py_token, py_approve)
         _run_audit_binding_tests(py_port, "python", py_token, py_approve)
         _run_head_tests(py_port, "python", py_token, py_approve)
+        _run_lib_tests(py_port, "python", py_token, py_approve)
+        # _run_lib_boot_collision_test retired in v4.5.0 microkernel cut.
+        # The scenario (plugins/<name>.py colliding with /lib/<name>) is
+        # impossible now that the disk loader is removed; _find_lib_disk_collisions
+        # and its boot-refuse logic are also gone.
     finally:
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
-        # Clean up test-installed plugins
-        for p in _installed:
-            if os.path.exists(p):
-                os.remove(p)
 
 
-def _run_devtools_tests(port, label, token=""):
-    """Devtools route tests."""
-    print(f"\n  --- devtools {label} HTTP tests ---")
-
-    # /wc-c: upload byte counter
-    big = "x" * 50000
-    st, body = http_post(port, "/wc-c", big, token=token)
-    test(f"{label} devtools: POST /wc-c -> byte count",
-         st == 200 and body.strip() == "50000",
-         f"status={st} body={body[:40]}")
-
-    # /full: always 507
-    st, body = http_get(port, "/full")
-    test(f"{label} devtools: GET /full -> 507", st == 507, f"status={st}")
-
-    # /true: always 200
-    st, _ = http_get(port, "/true")
-    test(f"{label} devtools: GET /true -> 200", st == 200, f"status={st}")
-
-    # /false: always 403
-    st, _ = http_get(port, "/false")
-    test(f"{label} devtools: GET /false -> 403", st == 403, f"status={st}")
-
-    # /yes: returns 'yes' n times
-    st, body = http_get(port, "/yes?n=3")
-    test(f"{label} devtools: GET /yes?n=3 -> 3 lines",
-         st == 200 and body.strip() == "yes\nyes\nyes",
-         f"status={st} body={body[:40]}")
-
-    # /health: ok + uptime
-    st, body = http_get(port, "/health")
+def _run_proc_tests(port, label):
+    """Core /proc/ pseudo-filesystem tests — salvaged from the
+    retired _run_http_tests helper. Covers the Linux-/proc-analogue
+    listing surface that ships from server.py core, independent of
+    any plugin being loaded."""
+    # GET unknown path -> serves index.html (200).
+    # Unknown GET paths are world entry points.
+    st, body = http_get(port, "/proc/worlds")
+    test(f"{label}: GET /proc/worlds -> 200", st == 200, f"status={st}")
     if st == 200:
         try:
             d = json.loads(body)
-            test(f"{label} devtools: /health has ok", d.get("ok") is True)
-            test(f"{label} devtools: /health has uptime", "uptime" in d)
+            test(f"{label}: /proc/worlds returns array", isinstance(d, list))
         except json.JSONDecodeError:
-            test(f"{label} devtools: /health JSON", False, body[:80])
-    else:
-        test(f"{label} devtools: GET /health -> 200", False, f"status={st}")
+            test(f"{label}: /proc/worlds returns JSON", False)
 
-    # /whoami: isolation mirror
-    st, body = http_get(port, "/whoami")
-    if st == 200:
-        try:
-            d = json.loads(body)
-            test(f"{label} devtools: /whoami has pid", "pid" in d)
-            test(f"{label} devtools: /whoami has user", "user" in d)
-            test(f"{label} devtools: /whoami has env", "env" in d)
-        except json.JSONDecodeError:
-            test(f"{label} devtools: /whoami JSON", False, body[:80])
-    else:
-        test(f"{label} devtools: GET /whoami -> 200", False, f"status={st}")
-
-    # /verify: structural integrity
-    st, body = http_get(port, "/verify")
-    if st == 200:
-        try:
-            d = json.loads(body)
-            test(f"{label} devtools: /verify has ok", "ok" in d)
-        except json.JSONDecodeError:
-            test(f"{label} devtools: /verify JSON", False, body[:80])
-    else:
-        test(f"{label} devtools: GET /verify -> 200", False, f"status={st}")
-
-    # /config/dump: sanitized config
-    st, body = http_get(port, "/config/dump")
-    if st == 200:
-        try:
-            d = json.loads(body)
-            test(f"{label} devtools: /config/dump has pid", "pid" in d)
-            test(f"{label} devtools: /config/dump token_set", "token_set" in d)
-        except json.JSONDecodeError:
-            test(f"{label} devtools: /config/dump JSON", False, body[:80])
-    else:
-        test(f"{label} devtools: GET /config/dump -> 200", False, f"status={st}")
-
-    # /uuid: returns valid UUID
-    st, body = http_get(port, "/uuid")
-    test(f"{label} devtools: GET /uuid -> 200", st == 200, f"status={st}")
-    if st == 200:
-        import re
-        test(f"{label} devtools: /uuid is valid UUID",
-             bool(re.match(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
-                           body.strip())),
-             f"got: {body[:50]}")
-
-    # /cowsay: ASCII art
-    st, body = http_get(port, "/cowsay?say=test")
-    test(f"{label} devtools: GET /cowsay -> 200", st == 200, f"status={st}")
-    if st == 200:
-        test(f"{label} devtools: /cowsay has cow", "(oo)" in body, f"body={body[:60]}")
-
-    # /time: Unix epoch timestamp
-    st, body = http_get(port, "/time")
-    test(f"{label} devtools: GET /time -> 200", st == 200, f"status={st}")
-    if st == 200:
-        ts = int(body.strip())
-        now = int(time.time())
-        test(f"{label} devtools: /time within 5s of local clock",
-             abs(ts - now) < 5, f"server={ts} local={now} diff={abs(ts-now)}")
-
-    # /rev: reverse bytes
-    st, body = http_post(port, "/rev", "hello", token=token)
-    test(f"{label} devtools: POST /rev 'hello' -> 'olleh'",
-         st == 200 and body.strip() == "olleh",
-         f"status={st} body={body[:40]}")
-
-    # /rev with emoji
-    st, body = http_post(port, "/rev", "abc\u2764def", token=token)
-    test(f"{label} devtools: POST /rev emoji round-trip",
-         st == 200 and len(body.strip()) > 0,
-         f"status={st} body={body[:40]}")
-
-    # /grep: write a test world, search it, clean up
-    _grep_world = "grep-integration-test"
-    _grep_content = "line one alpha\nline two NEEDLE beta\nline three gamma"
-    # Write test data
-    st, _ = http_method(port, f"/home/{_grep_world}", method="PUT", body=_grep_content, token=token)
-    if st == 200:
-        # grep default mode: line-level matches (world:lineno:content)
-        st, body = http_get(port, "/grep?q=NEEDLE")
-        test(f"{label} devtools: /grep default -> line match",
-             st == 200 and f"{_grep_world}:2:" in body and "NEEDLE" in body,
-             f"status={st} body={body[:100]}")
-
-        # grep -l mode: filenames only
-        st, body = http_get(port, "/grep?q=NEEDLE&mode=l")
-        test(f"{label} devtools: /grep?mode=l -> filename list",
-             st == 200 and _grep_world in body,
-             f"status={st} body={body[:100]}")
-
-        # grep no match
-        st, body = http_get(port, "/grep?q=ZZZZNOTFOUND")
-        test(f"{label} devtools: /grep no match -> empty",
-             st == 200 and body.strip() == "",
-             f"status={st} body={body[:60]}")
-
-        # grep missing ?q=
-        st, body = http_get(port, "/grep")
-        test(f"{label} devtools: /grep no ?q= -> 400",
-             st == 400,
-             f"status={st}")
-
-        # /head: first N lines
-        st, body = http_post(port, f"/head?world={_grep_world}&n=1", "", token=token)
-        test(f"{label} devtools: /head?n=1 -> first line",
-             st == 200 and "alpha" in body and "NEEDLE" not in body,
-             f"status={st} body={body[:80]}")
-
-        # /tail: last N lines
-        st, body = http_post(port, f"/tail?world={_grep_world}&n=1", "", token=token)
-        test(f"{label} devtools: /tail?n=1 -> last line",
-             st == 200 and "gamma" in body and "NEEDLE" not in body,
-             f"status={st} body={body[:80]}")
-
-        # /wc: line/word/byte counts
-        st, body = http_post(port, f"/wc?world={_grep_world}", "", token=token)
-        if st == 200:
-            try:
-                d = json.loads(body)
-                test(f"{label} devtools: /wc -> 3 lines",
-                     d.get("lines") == 3, f"got {d}")
-            except json.JSONDecodeError:
-                test(f"{label} devtools: /wc JSON", False, body[:80])
-        else:
-            test(f"{label} devtools: /wc -> 200", False, f"status={st}")
-    else:
-        test(f"{label} devtools: grep setup (write world)", False, f"write status={st}")
+    # /proc/ — ls the pseudo-filesystem. Like `ls /proc` on Linux.
+    st, body = http_get(port, "/proc/")
+    test(f"{label}: GET /proc/ -> 200", st == 200, f"status={st}")
+    for n in ("status", "uptime", "version", "worlds"):
+        test(f"{label}: /proc/ lists {n}", n in body, f"body={body[:120]}")
+    st, body = http_method(port, "/proc/", method="GET",
+                           headers={"Accept": "application/json"})
+    try:
+        d = json.loads(body)
+        names = {e.get("name") for e in d if isinstance(e, dict)}
+        test(f"{label}: /proc/ JSON lists all four entries",
+             names == {"status", "uptime", "version", "worlds"},
+             f"names={names}")
+    except json.JSONDecodeError:
+        test(f"{label}: /proc/ JSON parses", False, f"body={body[:80]}")
 
 
 def _run_auth_tests(port, label, token, approve):
@@ -567,65 +400,6 @@ def _run_auth_tests(port, label, token, approve):
     # GET to mutation actions -> 405 (blocks <img src> CSRF)
     st, _ = http_get(port, "/home/authtest/sync")
     test(f"{label} csrf: GET /sync -> 405", st == 405, f"status={st}")
-
-
-def _run_plugin_auth_tests(port, label, token, approve):
-    """Auth tests for plugin routes: shell, exec, mirror, view, dav."""
-
-    # ── Shell: GET needs approve (Basic Auth) ──
-    st, _ = http_get(port, "/shell")
-    test(f"{label} plugin-auth: GET /shell no auth -> 401", st == 401, f"status={st}")
-
-    st, _ = http_method(port, "/shell", basic_auth=approve)
-    test(f"{label} plugin-auth: GET /shell approve -> 200", st == 200, f"status={st}")
-
-    # ── Exec: POST needs approve ──
-    st, _ = http_post(port, "/exec", "echo hi")
-    test(f"{label} plugin-auth: POST /exec no auth -> 403", st in (401, 403), f"status={st}")
-
-    st, body = http_method(port, "/exec", method="POST", body="echo hi", basic_auth=approve)
-    test(f"{label} plugin-auth: POST /exec approve -> 200", st == 200 and "hi" in body, f"status={st}")
-
-    # ── Mirror: GET needs approve ──
-    st, _ = http_get(port, "/mirror")
-    test(f"{label} plugin-auth: GET /mirror no auth -> 401", st == 401, f"status={st}")
-
-    st, _ = http_method(port, "/mirror", basic_auth=approve)
-    test(f"{label} plugin-auth: GET /mirror approve -> 200", st == 200, f"status={st}")
-
-    # ── View: GET needs approve (+ type gate) ──
-    http_method(port, "/home/view-test?ext=html", method="PUT", body="<h1>test</h1>", token=token)
-    st, _ = http_get(port, "/view/view-test")
-    test(f"{label} plugin-auth: GET /view no auth -> 401", st == 401, f"status={st}")
-
-    st, _ = http_method(port, "/view/view-test", basic_auth=approve)
-    # 200 if html-typed, 415 if plain — either means auth passed
-    test(f"{label} plugin-auth: GET /view approve -> auth passed", st in (200, 415), f"status={st}")
-
-    # ── WebDAV: reads open, writes need auth ──
-    st, _ = http_method(port, "/dav/", method="OPTIONS")
-    test(f"{label} plugin-auth: OPTIONS /dav -> 200", st == 200, f"status={st}")
-
-    st, _ = http_method(port, "/dav/", method="PROPFIND", headers={"Depth": "0"})
-    test(f"{label} plugin-auth: PROPFIND /dav no auth -> 207", st == 207, f"status={st}")
-
-    st, _ = http_method(port, "/dav/home/auth-test-world", method="PUT", body="test")
-    test(f"{label} plugin-auth: PUT /dav no auth -> 401", st == 401, f"status={st}")
-
-    st, _ = http_method(port, "/dav/home/auth-test-world", method="PUT", body="dav-write", token=token)
-    test(f"{label} plugin-auth: PUT /dav token -> 201", st == 201, f"status={st}")
-
-    st, body = http_get(port, "/dav/home/auth-test-world")
-    test(f"{label} plugin-auth: GET /dav read back -> ok", st == 200 and "dav-write" in body, f"status={st}")
-
-    st, _ = http_method(port, "/dav/home/auth-test-world", method="PUT", body="dav-basic", basic_auth=approve)
-    test(f"{label} plugin-auth: PUT /dav Basic Auth -> 201", st == 201, f"status={st}")
-
-    st, _ = http_method(port, "/dav/home/auth-test-world", method="DELETE")
-    test(f"{label} plugin-auth: DELETE /dav no auth -> 401", st == 401, f"status={st}")
-
-    st, _ = http_method(port, "/dav/home/auth-test-world", method="DELETE", basic_auth=approve)
-    test(f"{label} plugin-auth: DELETE /dav approve -> 204", st == 204, f"status={st}")
 
 
 def _run_blob_ext_tests(port, label, token, approve):
@@ -737,316 +511,6 @@ def _run_blob_ext_tests(port, label, token, approve):
         test(f"{label} unicode: /proc/worlds has Chinese", any("\u8863" in n for n in names), f"names={[n for n in names if ord(n[0])>127][:5]}")
         test(f"{label} unicode: /proc/worlds has Korean", any("\ud55c" in n for n in names), "")
         test(f"{label} unicode: /proc/worlds has fake dir", any("\u82b1\u6912/" in n for n in names), "")
-
-
-def _run_http_tests(port, label, token="", approve=""):
-    """HTTP integration tests."""
-
-    # Echo
-    st, body = http_post(port, "/echo", "hello from test", token=token)
-    test(f"{label}: POST /echo -> 200", st == 200, f"status={st}")
-    if st == 200:
-        test(f"{label}: POST /echo -> body preserved",
-             "hello from test" in body, f"body={body[:80]}")
-
-    # /dev/gpu — pluggable AI device.
-    # Plugin AUTH="none" so man page (browser GET) works without auth.
-    # Handler gates POST inline — anon POST must 401 (API-bill protection).
-    st_anon, _ = http_post(port, "/dev/gpu", "hi", token="")
-    test(f"{label}: POST /dev/gpu no auth -> 401", st_anon == 401, f"status={st_anon}")
-
-    # Browser GET (Accept: text/html) → man page form. 200 HTML, not 405.
-    st_gui, body_gui = http_method(port, "/dev/gpu", method="GET",
-                                    headers={"Accept": "text/html"})
-    test(f"{label}: GET /dev/gpu browser -> 200 man page",
-         st_gui == 200 and "<form" in body_gui.lower(), f"status={st_gui}")
-
-    # curl GET (no Accept) → 405 (POST-only endpoint).
-    st_curl_get, _ = http_get(port, "/dev/gpu")
-    test(f"{label}: GET /dev/gpu curl -> 405", st_curl_get == 405, f"status={st_curl_get}")
-
-    st2, _ = http_post(port, "/dev/gpu", "", token=token)
-    test(f"{label}: POST /dev/gpu empty -> 400", st2 == 400, f"status={st2}")
-
-    # Wipe etc/gpu.conf first so the "no conf -> 503" check is deterministic.
-    # Left-over conf from prior runs could make the backend answer 200.
-    http_method(port, "/etc/gpu.conf", method="DELETE", token=approve)
-    st3, body3 = http_post(port, "/dev/gpu", "ping", token=token)
-    # 503 (no conf) or 502 (conf set but backend unreachable in CI). Both acceptable.
-    test(f"{label}: POST /dev/gpu (no conf) -> 503 or 502",
-         st3 in (502, 503), f"status={st3} body={body3[:80]}")
-
-    # /dev/fanout — tee-style broadcast.
-    # No conf → 503. Retry DELETE a few times — on Windows, the shared
-    # data/ dir may carry stale /etc/fanout.conf from a prior run, and
-    # _move_to_trash can partial-fail (file lock race, copytree succeeds
-    # but rmtree silently swallows the leftover src dir).
-    for _ in range(3):
-        http_method(port, "/etc/fanout.conf", method="DELETE", token=approve)
-        st, _ = http_post(port, "/dev/fanout", "hi", token=token)
-        if st == 503:
-            break
-        time.sleep(0.2)
-    test(f"{label}: fanout no conf -> 503", st == 503, f"status={st}")
-
-    # No auth → 401.
-    st, _ = http_post(port, "/dev/fanout", "hi", token="")
-    test(f"{label}: fanout no auth -> 401", st == 401, f"status={st}")
-
-    # Browser GET → man page.
-    st_gui, body_gui = http_method(port, "/dev/fanout", method="GET",
-                                    headers={"Accept": "text/html"})
-    test(f"{label}: fanout browser GET -> 200 man page",
-         st_gui == 200 and "<form" in body_gui.lower(), f"status={st_gui}")
-
-    # Write conf with 3 targets (T3 needed for /etc/* writes).
-    conf = "home/fanout-a\nhome/fanout-b\n# comment\n\n/home/fanout-c\n"
-    st, _ = http_method(port, "/etc/fanout.conf", method="PUT", body=conf, token=approve)
-    test(f"{label}: fanout conf write -> 200", st == 200, f"status={st}")
-
-    # POST /dev/fanout → append to all three. All should receive.
-    st, body = http_post(port, "/dev/fanout", "ping-1", token=token)
-    test(f"{label}: fanout POST -> 200", st == 200, f"status={st}")
-    d = json.loads(body)
-    test(f"{label}: fanout wrote 3 targets",
-         sorted(d.get("written", [])) == ["fanout-a", "fanout-b", "fanout-c"],
-         f"written={d.get('written')}")
-    test(f"{label}: fanout no failures", d.get("failed") == [], f"failed={d.get('failed')}")
-
-    # Each target has the message.
-    for tgt in ("fanout-a", "fanout-b", "fanout-c"):
-        st_t, body_t = http_get(port, f"/home/{tgt}")
-        dt = json.loads(body_t)
-        test(f"{label}: fanout target {tgt} got msg",
-             "ping-1" in dt.get("stage_html", ""), f"stage={dt.get('stage_html','')[:30]}")
-
-    # Second POST appends — target accumulates.
-    http_post(port, "/dev/fanout", "ping-2", token=token)
-    st_t, body_t = http_get(port, "/home/fanout-a")
-    dt = json.loads(body_t)
-    test(f"{label}: fanout POST appends",
-         "ping-1" in dt.get("stage_html", "") and "ping-2" in dt.get("stage_html", ""),
-         f"stage={dt.get('stage_html','')[:40]}")
-
-    # PUT overwrites — target content replaced.
-    http_method(port, "/dev/fanout", method="PUT", body="fresh", token=token)
-    st_t, body_t = http_get(port, "/home/fanout-a")
-    dt = json.loads(body_t)
-    test(f"{label}: fanout PUT overwrites",
-         dt.get("stage_html", "").strip() == "fresh",
-         f"stage={dt.get('stage_html','')[:40]}")
-
-    # System target in conf + T2 caller → that one fails, others still succeed.
-    conf_sys = "home/fanout-a\netc/fanout-sys-target\n"
-    http_method(port, "/etc/fanout.conf", method="PUT", body=conf_sys, token=approve)
-    st, body = http_post(port, "/dev/fanout", "t2-tries", token=token)
-    d = json.loads(body)
-    test(f"{label}: fanout T2 → home/* written",
-         "fanout-a" in d.get("written", []), f"written={d.get('written')}")
-    test(f"{label}: fanout T2 → etc/* refused",
-         any(f.get("target") == "etc/fanout-sys-target" for f in d.get("failed", [])),
-         f"failed={d.get('failed')}")
-
-    # T3 can hit system targets in fanout.
-    st, body = http_post(port, "/dev/fanout", "t3-can", token=approve)
-    d = json.loads(body)
-    test(f"{label}: fanout T3 → etc/* written too",
-         "etc/fanout-sys-target" in d.get("written", []),
-         f"written={d.get('written')}")
-
-    # Cap token — even mode=rw for /dev/fanout → still refused (broad vs narrow).
-    mint_body = http_method(port, "/auth/mint?prefix=/dev/fanout&ttl=600&mode=rw",
-                            method="POST", token=approve)
-    try:
-        cap = json.loads(mint_body[1]).get("token", "")
-    except Exception:
-        cap = ""
-    if cap:
-        st, _ = http_post(port, "/dev/fanout", "cap-tries", token=cap)
-        test(f"{label}: fanout rejects cap token -> 401", st == 401, f"status={st}")
-
-    # Cleanup — remove the test worlds and conf.
-    http_method(port, "/etc/fanout.conf", method="DELETE", token=approve)
-    for tgt in ("home/fanout-a", "home/fanout-b", "home/fanout-c", "etc/fanout-sys-target"):
-        http_method(port, "/" + tgt, method="DELETE", token=approve)
-
-    # Query-string URL-decoding regression: browsers URL-encode / as %2F
-    # when a form field value contains a slash. Before the fix, server.py
-    # hand-parsed qs without decoding → /dev/db got file="brave%2FHistory",
-    # _resolve_mnt did startswith("brave/") on "brave%2FHistory" → "file
-    # not under any fstab mount". Use /grep to probe: encode the space in
-    # "foo bar" as %20 and verify grep sees the decoded value.
-    http_method(port, "/home/qs-decode-grep", method="PUT",
-                body="line with foo bar here\nanother line", token=token)
-    st_enc, body_enc = http_get(port, "/grep?world=qs-decode-grep&q=foo%20bar")
-    test(f"{label}: qs decodes %20 to space (grep finds 'foo bar')",
-         st_enc == 200 and "foo bar" in body_enc, f"status={st_enc} body={body_enc[:80]}")
-
-    # /fetch — stdlib urllib.request, no curl subprocess. Protocol guard
-    # (only http/https) + urllib natively refuses file:// redirects.
-    st, _ = http_get(port, "/fetch")
-    test(f"{label}: /fetch no url -> 400", st == 400, f"status={st}")
-
-    st, _ = http_get(port, "/fetch?url=file:///etc/hosts")
-    test(f"{label}: /fetch file:// blocked at entry -> 400", st == 400, f"status={st}")
-
-    st, _ = http_get(port, "/fetch?url=ftp://example.com/foo")
-    test(f"{label}: /fetch ftp:// blocked at entry -> 400", st == 400, f"status={st}")
-
-    # argv-injection defense holds even with no subprocess — the scheme
-    # check would refuse a leading '-' too.
-    st, _ = http_get(port, "/fetch?url=-K/etc/passwd")
-    test(f"{label}: /fetch leading '-' blocked -> 400", st == 400, f"status={st}")
-
-    # Real fetch against our own elastik server (localhost, guaranteed up).
-    st, body = http_get(port, f"/fetch?url=http://127.0.0.1:{port}/proc/worlds")
-    test(f"{label}: /fetch localhost http -> 200", st == 200, f"status={st}")
-    test(f"{label}: /fetch body looks like JSON array",
-         body.startswith("[") and body.rstrip().endswith("]"), f"body={body[:60]}")
-
-    # HTTPError pass-through: fetch a known 404 upstream, expect 404 back.
-    st, _ = http_get(port, f"/fetch?url=http://127.0.0.1:{port}/home/nope-does-not-exist")
-    test(f"{label}: /fetch upstream 404 -> 404 passthrough", st == 404, f"status={st}")
-
-    # GET unknown path -> serves index.html (200).
-    # Unknown GET paths are world entry points.
-    st, body = http_get(port, "/proc/worlds")
-    test(f"{label}: GET /proc/worlds -> 200", st == 200, f"status={st}")
-    if st == 200:
-        try:
-            d = json.loads(body)
-            test(f"{label}: /proc/worlds returns array", isinstance(d, list))
-        except json.JSONDecodeError:
-            test(f"{label}: /proc/worlds returns JSON", False)
-
-    # /proc/ — ls the pseudo-filesystem. Like `ls /proc` on Linux.
-    st, body = http_get(port, "/proc/")
-    test(f"{label}: GET /proc/ -> 200", st == 200, f"status={st}")
-    for n in ("status", "uptime", "version", "worlds"):
-        test(f"{label}: /proc/ lists {n}", n in body, f"body={body[:120]}")
-    st, body = http_method(port, "/proc/", method="GET",
-                           headers={"Accept": "application/json"})
-    try:
-        d = json.loads(body)
-        names = {e.get("name") for e in d if isinstance(e, dict)}
-        test(f"{label}: /proc/ JSON lists all four entries",
-             names == {"status", "uptime", "version", "worlds"},
-             f"names={names}")
-    except json.JSONDecodeError:
-        test(f"{label}: /proc/ JSON parses", False, f"body={body[:80]}")
-
-    # /dev/ — ls the device plugins. Dynamic; depends on which plugins are
-    # loaded. In the test env, devtools / gpu / fanout / etc. register /dev/*
-    # routes, so we expect a non-empty list.
-    st, body = http_get(port, "/dev/")
-    test(f"{label}: GET /dev/ -> 200", st == 200, f"status={st}")
-    test(f"{label}: /dev/ is non-empty", len(body.strip()) > 0,
-         f"body={body[:80]}")
-    st, body = http_method(port, "/dev/", method="GET",
-                           headers={"Accept": "application/json"})
-    try:
-        d = json.loads(body)
-        test(f"{label}: /dev/ JSON is a list", isinstance(d, list),
-             f"type={type(d).__name__}")
-        test(f"{label}: /dev/ JSON entries have name+route+description",
-             all(isinstance(e, dict) and "name" in e and "route" in e
-                 and "description" in e for e in d) if d else True,
-             f"d={d[:2] if d else d}")
-    except json.JSONDecodeError:
-        test(f"{label}: /dev/ JSON parses", False, f"body={body[:80]}")
-
-
-def _run_flush_sse_test(port, label, token):
-    """Integration test: /flush + SSE. The toilet is the test.
-
-    Network: SSE long-connection stays open.
-    State:   world mutates through 💩 → 💧 → ✨ atomically per write.
-    Timing:  POST triggers state changes, SSE delivers them.
-    """
-    import threading
-
-    # 1. Pre-seed /home/toilet so the SSE listener can't race
-    # /flush's world-creation. Without this, the listener connects
-    # before /flush has had a chance to create the world's DB; sse.py
-    # returns 404 ("world not found"); the listener thread dies
-    # silently; events[] stays empty. On local repeat runs a prior
-    # run's leftover world would hide the race — CI + fresh local
-    # alike always lost. Pre-seeding fixes both environments, so the
-    # CI skip that used to paper over this can go.
-    #
-    # DELETE first to nuke any leftover state from a prior /flush run:
-    # devtools._write_stage creates the DB with `ext DEFAULT 'html'`,
-    # which would then block our T2-auth PUT (the html-write-requires-
-    # approve gate). A DELETE (move-to-trash) makes the next PUT
-    # create a fresh DB with the core's `ext DEFAULT 'plain'`.
-    http_method(port, "/home/toilet", method="DELETE", token=token)
-    http_method(port, "/home/toilet", method="PUT", body="\U0001f4a9",
-                token=token)
-
-    # 2. Open SSE listener in background
-    events = []
-    def sse_listen():
-        try:
-            r = urllib.request.urlopen(f"http://127.0.0.1:{port}/stream/toilet", timeout=10)
-            buf = b""
-            while True:
-                chunk = r.read(1)
-                if not chunk: break
-                buf += chunk
-                if buf.endswith(b"\n\n"):
-                    for line in buf.decode("utf-8", "replace").strip().splitlines():
-                        if line.startswith("data: "):
-                            try:
-                                d = json.loads(line[6:])
-                                events.append(d.get("stage_html", ""))
-                            except (json.JSONDecodeError, AttributeError):
-                                pass
-                    buf = b""
-        except Exception:
-            pass
-
-    t = threading.Thread(target=sse_listen, daemon=True)
-    t.start()
-    time.sleep(0.5)
-
-    # 3. Flush
-    st, body = http_post(port, "/flush", "", token=token)
-    test(f"{label} flush: POST /flush -> 200", st == 200, f"status={st}")
-    test(f"{label} flush: returns sparkle", "\u2728" in body, f"body={body[:20]}")
-
-    # 4. Wait for SSE events to arrive
-    time.sleep(1.5)
-
-    # 5. Verify SSE captured the show.
-    test(f"{label} flush: SSE got events", len(events) >= 3,
-         f"got {len(events)} events")
-    # Must start with 💩 and end with ✨
-    if events:
-        test(f"{label} flush: first event has seed",
-             "\U0001f4a9" in events[0] or "\U0001f4a9" in "".join(events[:2]),
-             f"first={events[0][:10]}")
-        test(f"{label} flush: last event is clean",
-             "\u2728" in events[-1],
-             f"last={events[-1][:10]}")
-        # Middle should have water
-        middle = "".join(events[1:-1])
-        test(f"{label} flush: middle has water",
-             "\U0001f4a7" in middle,
-             f"middle_sample={middle[:30]}")
-    else:
-        test(f"{label} flush: SSE events exist", False, "no events captured")
-
-    # 5. Verify world is clean
-    st, body = http_get(port, "/home/toilet")
-    if st == 200:
-        d = json.loads(body)
-        test(f"{label} flush: world is clean after",
-             "\u2728" in d.get("stage_html", ""),
-             f"stage={d.get('stage_html','')[:20]}")
-
-    # 6. Repeatable — flush again, should re-seed and re-flush
-    st, _ = http_post(port, "/flush", "", token=token)
-    test(f"{label} flush: repeatable", st == 200, f"status={st}")
 
 
 def _run_uint16_redteam_tests(port, label, token, approve):
@@ -1718,6 +1182,582 @@ def _run_head_tests(port, label, token, approve):
     # cleanup
     http_method(port, f"/home/{W}", method="DELETE", token=approve)
     http_method(port, f"/home/head-redirect-prefix/child", method="DELETE", token=approve)
+
+
+def _run_lib_tests(port, label, token, approve):
+    """Phase 0 of plugin-as-world: /lib/* namespace, state column, and
+    the PUT /lib/<name>/state lifecycle transition.
+
+    Covers:
+      - /lib in _FHS: PUT creates world, GET reads it, DELETE needs T3
+      - stage_meta.state column: lazy-migrated, default 'pending'
+      - state field exposed in GET JSON envelope
+      - PUT /lib/<name>/state with body='active'|'disabled' (T3 approve)
+      - Idempotent re-transitions (changed:false, no event)
+      - Invalid state body → 422
+      - State transition emits audit event of type 'state_transition'
+
+    Not covered (Phase 1): boot loader, plugin source exec/activation,
+    route registration. Phase 0 is data model + routes only.
+    """
+    import http.client as _hc
+    W = "lib-test-weather"
+    src = "# plugin source\nROUTES = {}\nasync def handle(m,b,p): return {'ok':True}\n"
+
+    # cleanup prior run
+    http_method(port, f"/lib/{W}", method="DELETE", token=approve)
+
+    # 1. PUT /lib/<name> with T2 → 200, creates world at state='pending'
+    st, _ = http_method(port, f"/lib/{W}", method="PUT", body=src, token=token)
+    test(f"{label} lib: PUT /lib/{W} T2 -> 200", st == 200, f"status={st}")
+
+    # 2. GET /lib/<name> JSON shows state=pending
+    st, body = http_get(port, f"/lib/{W}")
+    test(f"{label} lib: GET /lib/{W} -> 200", st == 200, f"status={st}")
+    d = json.loads(body) if st == 200 else {}
+    test(f"{label} lib: newly-created world has state='pending'",
+         d.get("state") == "pending", f"state={d.get('state')!r}")
+
+    # 3. GET /lib/<name>?raw returns source bytes
+    st, body = http_get(port, f"/lib/{W}?raw")
+    test(f"{label} lib: ?raw returns plugin source", body == src,
+         f"body={body[:40]!r}")
+
+    # 4. PUT /lib/<name>/state with T2 → 403
+    st, _ = http_method(port, f"/lib/{W}/state", method="PUT", body="active",
+                        token=token)
+    test(f"{label} lib: state transition with T2 -> 403", st == 403,
+         f"status={st}")
+
+    # 5. PUT /lib/<name>/state with invalid body → 422
+    st, body = http_method(port, f"/lib/{W}/state", method="PUT",
+                           body="garbage", basic_auth=approve)
+    test(f"{label} lib: invalid state body -> 422", st == 422,
+         f"status={st}")
+
+    # 6. PUT /lib/<name>/state body='active' with T3 → 200, state=active
+    st, body = http_method(port, f"/lib/{W}/state", method="PUT",
+                           body="active", basic_auth=approve)
+    test(f"{label} lib: activate with T3 -> 200", st == 200, f"status={st}")
+    d = json.loads(body) if st == 200 else {}
+    test(f"{label} lib: activation response state=active",
+         d.get("state") == "active" and d.get("changed") is True,
+         f"resp={d}")
+
+    # 7. GET JSON now reports state=active
+    _, body = http_get(port, f"/lib/{W}")
+    d = json.loads(body)
+    test(f"{label} lib: GET reports state=active after transition",
+         d.get("state") == "active", f"state={d.get('state')!r}")
+
+    # 8. Re-activate is idempotent (changed=false, no event)
+    st, body = http_method(port, f"/lib/{W}/state", method="PUT",
+                           body="active", basic_auth=approve)
+    test(f"{label} lib: re-activate is idempotent", st == 200,
+         f"status={st}")
+    d = json.loads(body) if st == 200 else {}
+    test(f"{label} lib: idempotent re-activation reports changed=false",
+         d.get("changed") is False, f"resp={d}")
+
+    # 9. Disable
+    st, body = http_method(port, f"/lib/{W}/state", method="PUT",
+                           body="disabled", basic_auth=approve)
+    test(f"{label} lib: disable -> 200", st == 200, f"status={st}")
+    d = json.loads(body) if st == 200 else {}
+    test(f"{label} lib: disable reports from=active to=disabled",
+         d.get("from") == "active" and d.get("state") == "disabled",
+         f"resp={d}")
+
+    # 10. DELETE /lib/<name> with T2 → 403 (lib requires approve)
+    st, _ = http_method(port, f"/lib/{W}", method="DELETE", token=token)
+    test(f"{label} lib: DELETE /lib/{W} with T2 -> 403", st == 403,
+         f"status={st}")
+
+    # 11. DELETE /lib/<name> with T3 → 200
+    st, _ = http_method(port, f"/lib/{W}", method="DELETE", token=approve)
+    test(f"{label} lib: DELETE /lib/{W} with T3 -> 200", st == 200,
+         f"status={st}")
+    st, _ = http_get(port, f"/lib/{W}")
+    test(f"{label} lib: deleted world -> 404", st == 404, f"status={st}")
+
+    # 12. State transition on nonexistent plugin → 404
+    st, _ = http_method(port, f"/lib/does-not-exist/state", method="PUT",
+                        body="active", basic_auth=approve)
+    test(f"{label} lib: state transition on missing plugin -> 404",
+         st == 404, f"status={st}")
+
+    # 12a. Source-changing PUT resets approval (Codex P1 fix). An
+    # active plugin that gets re-PUT'd by T2 must drop back to
+    # state='pending'; else T2 could silently swap code under an
+    # existing T3 approval.
+    W2 = "lib-approval-reset-test"
+    http_method(port, f"/lib/{W2}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{W2}", method="PUT", body="# v1", token=token)
+    http_method(port, f"/lib/{W2}/state", method="PUT", body="active",
+                basic_auth=approve)
+    _, body_mid = http_get(port, f"/lib/{W2}")
+    test(f"{label} lib: approval-reset — activated state=active",
+         json.loads(body_mid).get("state") == "active",
+         f"state={json.loads(body_mid).get('state')!r}")
+    # T2 replaces source — must reset to pending
+    http_method(port, f"/lib/{W2}", method="PUT", body="# v2 evil", token=token)
+    _, body_after = http_get(port, f"/lib/{W2}")
+    test(f"{label} lib: approval-reset — active -> pending after T2 PUT",
+         json.loads(body_after).get("state") == "pending",
+         f"state={json.loads(body_after).get('state')!r}")
+
+    # 12b. Same rule for disabled plugins — re-PUT goes back to pending,
+    # so re-approval is explicit.
+    http_method(port, f"/lib/{W2}/state", method="PUT", body="active",
+                basic_auth=approve)
+    http_method(port, f"/lib/{W2}/state", method="PUT", body="disabled",
+                basic_auth=approve)
+    http_method(port, f"/lib/{W2}", method="PUT", body="# v3", token=token)
+    _, body_after2 = http_get(port, f"/lib/{W2}")
+    test(f"{label} lib: approval-reset — disabled -> pending after T2 PUT",
+         json.loads(body_after2).get("state") == "pending",
+         f"state={json.loads(body_after2).get('state')!r}")
+
+    # 12c. Forced reset is audited — state_transition event with
+    # reason='source replaced' lands on the chain right after the
+    # stage_written event.
+    import sqlite3 as _sq2, os as _os2
+    db2 = _os2.path.join("data", "lib%2F" + W2, "universe.db")
+    if _os2.path.exists(db2):
+        conn2 = _sq2.connect(db2)
+        try:
+            rows = conn2.execute(
+                "SELECT event_type, payload FROM events ORDER BY id DESC LIMIT 4"
+            ).fetchall()
+        finally:
+            conn2.close()
+        # Look for a state_transition with reason="source replaced"
+        has_forced_reset = any(
+            r[0] == "state_transition" and '"source replaced"' in (r[1] or "")
+            for r in rows
+        )
+        test(f"{label} lib: approval-reset — audit records forced reset",
+             has_forced_reset,
+             f"recent events types={[r[0] for r in rows]}")
+
+    # cleanup for 12a/b/c
+    http_method(port, f"/lib/{W2}", method="DELETE", token=approve)
+
+    # 12d. DAV parity — same approval-reset invariant via DAV PUT.
+    # Codex P1 2026-04-21: DAV PUT to /dav/lib/<name> bypassed the
+    # is_lib state reset. Before the fix, attacker with T2 could swap
+    # source via DAV and leave state='active'; boot_load_active_lib on
+    # next restart would exec the new code without fresh T3 approval.
+    W2d = "lib-approval-reset-dav-test"
+    http_method(port, f"/lib/{W2d}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{W2d}", method="PUT", body="# v1", token=token)
+    http_method(port, f"/lib/{W2d}/state", method="PUT", body="active",
+                basic_auth=approve)
+    _, body_d1 = http_get(port, f"/lib/{W2d}")
+    test(f"{label} lib: DAV approval-reset — activated state=active",
+         json.loads(body_d1).get("state") == "active",
+         f"state={json.loads(body_d1).get('state')!r}")
+    # T2 replaces source via DAV — must reset to pending (not via core PUT)
+    http_method(port, f"/dav/lib/{W2d}", method="PUT", body="# v2 evil via dav", token=token)
+    _, body_d2 = http_get(port, f"/lib/{W2d}")
+    test(f"{label} lib: DAV approval-reset — active -> pending after DAV PUT",
+         json.loads(body_d2).get("state") == "pending",
+         f"state={json.loads(body_d2).get('state')!r}")
+    # Same rule for disabled → re-PUT via DAV lands on pending.
+    http_method(port, f"/lib/{W2d}/state", method="PUT", body="active",
+                basic_auth=approve)
+    http_method(port, f"/lib/{W2d}/state", method="PUT", body="disabled",
+                basic_auth=approve)
+    http_method(port, f"/dav/lib/{W2d}", method="PUT", body="# v3 via dav", token=token)
+    _, body_d3 = http_get(port, f"/lib/{W2d}")
+    test(f"{label} lib: DAV approval-reset — disabled -> pending after DAV PUT",
+         json.loads(body_d3).get("state") == "pending",
+         f"state={json.loads(body_d3).get('state')!r}")
+    # Audit chain records the forced reset emitted by DAV PUT too.
+    db_d = _os2.path.join("data", "lib%2F" + W2d, "universe.db")
+    if _os2.path.exists(db_d):
+        conn_d = _sq2.connect(db_d)
+        try:
+            rows_d = conn_d.execute(
+                "SELECT event_type, payload FROM events ORDER BY id DESC LIMIT 6"
+            ).fetchall()
+        finally:
+            conn_d.close()
+        has_dav_reset = any(
+            r[0] == "state_transition" and '"source replaced"' in (r[1] or "")
+            for r in rows_d
+        )
+        test(f"{label} lib: DAV approval-reset — audit records forced reset",
+             has_dav_reset,
+             f"recent events types={[r[0] for r in rows_d]}")
+    http_method(port, f"/lib/{W2d}", method="DELETE", token=approve)
+
+    # 12e. DAV listing surfaces /lib/ as top-level, not as home/lib/*.
+    # Codex P2 2026-04-21: before _DAV_TOP_NAMESPACES was split off, the
+    # /dav/ root only iterated _DAV_SYS_PREFIXES to list top-level
+    # collections — lib/ wasn't in it, so /lib/* worlds got lumped under
+    # /dav/home/ AND had no /dav/lib/ collection. Now both views are
+    # consistent with the browser's FHS homepage.
+    W2e = "lib-dav-listing-test"
+    http_method(port, f"/lib/{W2e}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{W2e}", method="PUT", body="# listing", token=token)
+
+    # Root PROPFIND should now advertise /dav/lib/ as a collection.
+    st_pf, body_pf = http_method(port, "/dav/", method="PROPFIND",
+                                 headers={"Depth": "1"})
+    test(f"{label} lib: DAV PROPFIND / advertises /dav/lib/",
+         st_pf == 207 and "/dav/lib/" in body_pf,
+         f"status={st_pf} body_has_lib={'/dav/lib/' in body_pf}")
+    # Root HTML listing should include a link to /dav/lib/.
+    st_gl, body_gl = http_get(port, "/dav/")
+    test(f"{label} lib: DAV GET / HTML listing includes lib/",
+         st_gl == 200 and 'href="/dav/lib/"' in body_gl,
+         f"status={st_gl}")
+    # /dav/home/ PROPFIND must NOT alias lib/* as user content.
+    st_hm, body_hm = http_method(port, "/dav/home/", method="PROPFIND",
+                                 headers={"Depth": "1"})
+    test(f"{label} lib: DAV /home/ PROPFIND excludes lib/* worlds",
+         st_hm == 207 and f"/home/lib/{W2e}" not in body_hm,
+         f"status={st_hm} has_leak={f'/home/lib/{W2e}' in body_hm}")
+    # /dav/lib/ PROPFIND must list the plugin world.
+    st_lb, body_lb = http_method(port, "/dav/lib/", method="PROPFIND",
+                                 headers={"Depth": "1"})
+    test(f"{label} lib: DAV /lib/ PROPFIND lists plugin worlds",
+         st_lb == 207 and W2e in body_lb,
+         f"status={st_lb} has_W2e={W2e in body_lb}")
+    # T2 write to /dav/lib/ still works — lib/ is NOT in _DAV_SYS_PREFIXES
+    # for auth, only for listing. Consistent with core PUT /lib/<n>.
+    st_t2, _ = http_method(port, f"/dav/lib/{W2e}", method="PUT",
+                           body="# T2 write via DAV", token=token)
+    test(f"{label} lib: DAV PUT /dav/lib/<n> accepts T2 (same as core /lib/<n>)",
+         st_t2 == 201, f"status={st_t2}")
+    http_method(port, f"/lib/{W2e}", method="DELETE", token=approve)
+
+    # 12f. DAV MOVE/COPY/DELETE vs /lib/* approval-binding.
+    # Red-team 2026-04-21: T2 could MOVE or COPY an approved /lib plugin
+    # to a new name and carry state='active' over, auto-booting on next
+    # server restart without fresh T3 approval. And DAV DELETE on /lib/*
+    # only required T2 where core DELETE requires T3. Close all three
+    # holes in one commit.
+    Wf = "lib-dav-verb-test"
+    Wf_dst = "lib-dav-verb-test-moved"
+    Wf_copy = "lib-dav-verb-test-clone"
+    # Setup: install + activate lib/<Wf>
+    http_method(port, f"/lib/{Wf}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{Wf_dst}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{Wf_copy}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{Wf}", method="PUT",
+                body="ROUTES=['/lib-verb-test']\nAUTH='none'\n"
+                     "async def handle(m,b,p): return {'v':1}\n",
+                token=token)
+    http_method(port, f"/lib/{Wf}/state", method="PUT", body="active",
+                basic_auth=approve)
+    _, body_pre = http_get(port, f"/lib/{Wf}")
+    test(f"{label} lib: verb-test setup — lib/{Wf} is active",
+         json.loads(body_pre).get("state") == "active",
+         f"state={json.loads(body_pre).get('state')!r}")
+
+    # (a) T2 MOVE /dav/lib/<Wf> -> /dav/lib/<Wf_dst>: dst must land pending.
+    import urllib.request as _ur, urllib.error as _ue, base64 as _b64
+    def _t2_dav(method, src_path, dst_path=None):
+        url = f"http://127.0.0.1:{port}{src_path}"
+        req = _ur.Request(url, method=method)
+        req.add_header("Authorization", f"Bearer {token}")
+        if dst_path:
+            req.add_header("Destination", f"http://127.0.0.1:{port}{dst_path}")
+        try:
+            r = _ur.urlopen(req, timeout=5)
+            return r.status
+        except _ue.HTTPError as e:
+            return e.code
+    st_mv = _t2_dav("MOVE", f"/dav/lib/{Wf}", f"/dav/lib/{Wf_dst}")
+    test(f"{label} lib: T2 DAV MOVE to /lib/* succeeds (T2 auth preserved)",
+         st_mv == 204, f"status={st_mv}")
+    _, body_mv = http_get(port, f"/lib/{Wf_dst}")
+    test(f"{label} lib: T2 DAV MOVE dst -> state=pending (approval bypass blocked)",
+         json.loads(body_mv).get("state") == "pending",
+         f"state={json.loads(body_mv).get('state')!r}")
+
+    # (b) T2 COPY /dav/lib/<Wf_dst> -> /dav/lib/<Wf_copy>: same rule.
+    # Re-activate the moved world so the COPY source has state=active.
+    http_method(port, f"/lib/{Wf_dst}/state", method="PUT", body="active",
+                basic_auth=approve)
+    st_cp = _t2_dav("COPY", f"/dav/lib/{Wf_dst}", f"/dav/lib/{Wf_copy}")
+    test(f"{label} lib: T2 DAV COPY to /lib/* succeeds (T2 auth preserved)",
+         st_cp == 204, f"status={st_cp}")
+    _, body_cp = http_get(port, f"/lib/{Wf_copy}")
+    test(f"{label} lib: T2 DAV COPY dst -> state=pending (approval bypass blocked)",
+         json.loads(body_cp).get("state") == "pending",
+         f"state={json.loads(body_cp).get('state')!r}")
+
+    # (c) T2 DAV DELETE /dav/lib/<n> must be refused (403).
+    st_del = _t2_dav("DELETE", f"/dav/lib/{Wf_dst}")
+    test(f"{label} lib: T2 DAV DELETE /lib/<n> -> 403 (T3 required)",
+         st_del == 403, f"status={st_del}")
+    _, body_still = http_get(port, f"/lib/{Wf_dst}")
+    test(f"{label} lib: T2 DAV DELETE refused — world still exists",
+         json.loads(body_still).get("state") in ("active", "pending", "disabled"),
+         f"body={body_still[:80]!r}")
+
+    # Cleanup
+    http_method(port, f"/lib/{Wf_dst}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{Wf_copy}", method="DELETE", token=approve)
+
+    # 13. Audit chain — state_transition events recorded.
+    # Read sqlite directly (same pattern as _run_audit_binding_tests);
+    # /dev/db would need to fight the server's WAL-mode connection for
+    # read-only access, and that's a separate plugin concern.
+    import sqlite3 as _sq, os as _os
+    http_method(port, f"/lib/{W}", method="PUT", body=src, token=token)
+    http_method(port, f"/lib/{W}/state", method="PUT", body="active",
+                basic_auth=approve)
+    http_method(port, f"/lib/{W}/state", method="PUT", body="disabled",
+                basic_auth=approve)
+    db_path = _os.path.join("data", "lib%2F" + W, "universe.db")
+    if _os.path.exists(db_path):
+        db = _sq.connect(db_path)
+        try:
+            rows = db.execute(
+                "SELECT event_type, payload FROM events "
+                "ORDER BY id DESC LIMIT 5"
+            ).fetchall()
+        finally:
+            db.close()
+        types = [r[0] for r in rows]
+        # Expected (newest first): state_transition (→disabled),
+        #   state_transition (→active), stage_written (PUT source), ...
+        test(f"{label} lib: audit chain has ≥2 state_transition events",
+             types.count("state_transition") >= 2, f"types={types}")
+        # Check payload of the most recent state_transition
+        trans_row = next((r for r in rows if r[0] == "state_transition"), None)
+        if trans_row:
+            try:
+                pd = json.loads(trans_row[1])
+            except (json.JSONDecodeError, TypeError):
+                pd = {}
+            test(f"{label} lib: state_transition payload has from+to+version",
+                 pd.get("from") in ("pending", "active") and
+                 pd.get("to") in ("active", "disabled") and
+                 "version" in pd,
+                 f"payload={pd}")
+    else:
+        skip(f"{label} lib: audit chain check",
+             f"world db not found at {db_path}")
+
+    # cleanup
+    http_method(port, f"/lib/{W}", method="DELETE", token=approve)
+
+    # ── Phase 1: actual exec + route registration on activation ──
+    # Phase 0 recorded state only; Phase 1 wires the state transitions
+    # to real effects. Runtime activation and boot-time loading share
+    # the same plugins.load_plugin_from_source() code path — testing
+    # runtime exercises the boot path as well.
+
+    # 14. Activation actually registers a route callable via HTTP
+    W3 = "lib-exec-test"
+    http_method(port, f"/lib/{W3}", method="DELETE", token=approve)
+    # Minimal plugin that registers /lib-exec-test and returns a known body.
+    # Uses v1 spec: ROUTES as list + handle() async function.
+    plugin_src = (
+        "ROUTES = ['/lib-exec-test']\n"
+        "AUTH = 'none'\n"
+        "async def handle(method, body, params):\n"
+        "    return {'hello': 'from-lib-plugin'}\n"
+    )
+    st, _ = http_method(port, f"/lib/{W3}", method="PUT", body=plugin_src,
+                        token=token)
+    test(f"{label} lib: PUT plugin source -> 200", st == 200, f"status={st}")
+    # Before activation, the route is NOT registered. We check the
+    # canonical route list (/bin) rather than probing the route itself,
+    # because unmatched paths fall through to the browser INDEX shell
+    # (200 text/html), which would look like "route exists".
+    def _route_in_bin(route):
+        _, bin_body = http_method(port, "/bin", method="GET",
+                                   headers={"Accept": "application/json"})
+        try:
+            return any(e.get("route") == route for e in json.loads(bin_body))
+        except (json.JSONDecodeError, AttributeError):
+            return False
+    test(f"{label} lib: pre-activation route NOT in /bin",
+         not _route_in_bin("/lib-exec-test"),
+         "route leaked into /bin before activation")
+    # Activate — load_plugin_from_source should register the route
+    st, body = http_method(port, f"/lib/{W3}/state", method="PUT",
+                           body="active", basic_auth=approve)
+    test(f"{label} lib: activation succeeds -> 200", st == 200,
+         f"status={st} body={body[:100]}")
+    # Route now appears in /bin and actually serves
+    test(f"{label} lib: /bin now lists activated plugin route",
+         _route_in_bin("/lib-exec-test"),
+         "route did not register in /bin after activation")
+    st, body = http_get(port, "/lib-exec-test")
+    test(f"{label} lib: post-activation route returns 200", st == 200,
+         f"status={st}")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test(f"{label} lib: post-activation route runs plugin code",
+                 d.get("hello") == "from-lib-plugin", f"body={body[:60]}")
+        except json.JSONDecodeError:
+            test(f"{label} lib: plugin returns JSON", False, f"body={body[:60]}")
+
+    # 15. Invalid source (syntax error) → activation fails with 422,
+    #     state stays at prev (pending); routes NOT registered.
+    W4 = "lib-badsrc-test"
+    http_method(port, f"/lib/{W4}", method="DELETE", token=approve)
+    bad_src = "def this is not valid python\n"
+    http_method(port, f"/lib/{W4}", method="PUT", body=bad_src, token=token)
+    st, body = http_method(port, f"/lib/{W4}/state", method="PUT",
+                           body="active", basic_auth=approve)
+    test(f"{label} lib: activation of invalid source -> 422", st == 422,
+         f"status={st}")
+    # State should still be 'pending' (transition was refused)
+    _, body = http_get(port, f"/lib/{W4}")
+    d = json.loads(body)
+    test(f"{label} lib: failed activation leaves state=pending",
+         d.get("state") == "pending", f"state={d.get('state')!r}")
+    http_method(port, f"/lib/{W4}", method="DELETE", token=approve)
+
+    # 16. Route collision → activation fails with 422
+    W5 = "lib-collide-test"
+    http_method(port, f"/lib/{W5}", method="DELETE", token=approve)
+    # Try to register /lib-exec-test (already owned by W3's plugin).
+    collide_src = (
+        "ROUTES = ['/lib-exec-test']\n"
+        "AUTH = 'none'\n"
+        "async def handle(method, body, params):\n"
+        "    return {'hijacked': True}\n"
+    )
+    http_method(port, f"/lib/{W5}", method="PUT", body=collide_src, token=token)
+    st, body = http_method(port, f"/lib/{W5}/state", method="PUT",
+                           body="active", basic_auth=approve)
+    test(f"{label} lib: activation on route collision -> 422", st == 422,
+         f"status={st}")
+    # Victim plugin (W3) still serves its own content, not hijacked
+    st, body = http_get(port, "/lib-exec-test")
+    if st == 200:
+        try:
+            d = json.loads(body)
+            test(f"{label} lib: collision-refused activation did NOT hijack",
+                 d.get("hello") == "from-lib-plugin",
+                 f"body={body[:60]}")
+        except json.JSONDecodeError:
+            test(f"{label} lib: victim plugin still returns JSON", False,
+                 f"body={body[:60]}")
+    http_method(port, f"/lib/{W5}", method="DELETE", token=approve)
+
+    # 17. Name collision with Tier 0 plugin — retired in v4.5.0 microkernel
+    # cut. There are no Tier 0 disk plugins anymore (load_plugins + the whole
+    # plugins/available/*.py autoloader is gone), so the collision check in
+    # load_plugin_from_source is unreachable by construction. The check
+    # itself is kept as defensive code for completeness but the HTTP test
+    # for it requires a loaded Tier 0 that no longer exists.
+
+    # 18. Disable removes the route from runtime (check via /bin listing)
+    st, body = http_method(port, f"/lib/{W3}/state", method="PUT",
+                           body="disabled", basic_auth=approve)
+    test(f"{label} lib: disable -> 200", st == 200, f"status={st}")
+    test(f"{label} lib: disabled plugin route removed from /bin",
+         not _route_in_bin("/lib-exec-test"),
+         "route leaked in /bin after disable")
+
+    # 19. Re-activation re-registers
+    st, _ = http_method(port, f"/lib/{W3}/state", method="PUT",
+                        body="active", basic_auth=approve)
+    test(f"{label} lib: re-activate -> 200", st == 200, f"status={st}")
+    test(f"{label} lib: re-activated route back in /bin",
+         _route_in_bin("/lib-exec-test"),
+         "route did not re-register after re-activation")
+
+    # 20. DELETE an active plugin unregisters the route before trashing
+    st, _ = http_method(port, f"/lib/{W3}", method="DELETE", token=approve)
+    test(f"{label} lib: DELETE active plugin -> 200", st == 200,
+         f"status={st}")
+    test(f"{label} lib: post-DELETE route removed from /bin",
+         not _route_in_bin("/lib-exec-test"),
+         "route leaked in /bin after DELETE")
+
+    # 21. Default ext for /lib/* PUT is 'py' (Codex Phase 0 observation)
+    W6 = "lib-ext-test"
+    http_method(port, f"/lib/{W6}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{W6}", method="PUT",
+                body="# just a comment\n", token=token)
+    _, body = http_get(port, f"/lib/{W6}")
+    d = json.loads(body)
+    test(f"{label} lib: PUT /lib/* defaults to ext='py'",
+         d.get("ext") == "py", f"ext={d.get('ext')!r}")
+    # Explicit ?ext= still wins
+    http_method(port, f"/lib/{W6}?ext=plain", method="PUT",
+                body="# still plain\n", token=token)
+    _, body = http_get(port, f"/lib/{W6}")
+    d = json.loads(body)
+    test(f"{label} lib: explicit ?ext= overrides the 'py' default",
+         d.get("ext") == "plain", f"ext={d.get('ext')!r}")
+    http_method(port, f"/lib/{W6}", method="DELETE", token=approve)
+
+    # 22. P2 retry fix: active → active is a no-op while the plugin is
+    # loaded, but a retry path when the plugin was active on disk (state
+    # column) yet failed to load at runtime. Simulate by force-unloading
+    # a live plugin through /admin/unload, then PUT state=active and
+    # expect the routes to come back.
+    W7 = "lib-retry-test"
+    http_method(port, f"/lib/{W7}", method="DELETE", token=approve)
+    # Test plugin declares a second route that calls unload_plugin on
+    # itself via NEEDS injection. With /admin cut in the microkernel, this
+    # is the only in-process way to simulate "state column says active but
+    # plugin is not loaded" — i.e. the guardrail-D boot-failure scenario
+    # the active→active retry path exists to handle. The self-kill route
+    # triggers unload; the plugin's state column stays 'active' because
+    # unload_plugin only touches _plugin_meta / _plugins, not the world DB.
+    retry_src = (
+        "NEEDS = ['unload_plugin']\n"
+        "ROUTES = ['/lib-retry-test', '/lib-retry-test-selfkill']\n"
+        "AUTH = 'none'\n"
+        "async def handle(m, b, p):\n"
+        "    scope = p.get('_scope', {})\n"
+        "    if scope.get('path', '').startswith('/lib-retry-test-selfkill'):\n"
+        "        unload_plugin('lib:lib-retry-test')\n"
+        "        return {'unloaded': True}\n"
+        "    return {'retry': 'ok'}\n"
+    )
+    http_method(port, f"/lib/{W7}", method="PUT", body=retry_src, token=token)
+    http_method(port, f"/lib/{W7}/state", method="PUT", body="active",
+                basic_auth=approve)
+    test(f"{label} lib: retry — route live pre-unload",
+         _route_in_bin("/lib-retry-test"),
+         "route not registered before retry test")
+    # Trigger in-process self-unload via the helper route. After this the
+    # plugin's routes (including the selfkill route) are gone from _plugins,
+    # but state='active' remains in the lib/<W7> world — matching the
+    # post-boot-failure state where guardrail D keeps operator intent.
+    st, _ = http_get(port, "/lib-retry-test-selfkill")
+    # Sanity: unload succeeded and route is gone (but state=active stays)
+    test(f"{label} lib: retry — route removed by simulated unload",
+         not _route_in_bin("/lib-retry-test"), "unload did not take effect")
+    _, body = http_get(port, f"/lib/{W7}")
+    test(f"{label} lib: retry — state stays 'active' after runtime unload",
+         json.loads(body).get("state") == "active",
+         f"state={json.loads(body).get('state')!r}")
+    # Now: active → active should RETRY (not noop), register routes,
+    # and respond with reloaded:true.
+    st, body = http_method(port, f"/lib/{W7}/state", method="PUT",
+                           body="active", basic_auth=approve)
+    test(f"{label} lib: retry — active→active on unloaded plugin -> 200",
+         st == 200, f"status={st}")
+    d = json.loads(body) if st == 200 else {}
+    test(f"{label} lib: retry — response flags reloaded:true",
+         d.get("reloaded") is True, f"resp={d}")
+    test(f"{label} lib: retry — route re-registered",
+         _route_in_bin("/lib-retry-test"),
+         "route did not come back after retry")
+    # Plain active→active on a loaded plugin still no-op
+    st, body = http_method(port, f"/lib/{W7}/state", method="PUT",
+                           body="active", basic_auth=approve)
+    d = json.loads(body) if st == 200 else {}
+    test(f"{label} lib: retry — active→active when loaded is still noop",
+         d.get("changed") is False and d.get("reloaded") is not True,
+         f"resp={d}")
+    http_method(port, f"/lib/{W7}", method="DELETE", token=approve)
 
 
 # ── Main ────────────────────────────────────────────────────────────
