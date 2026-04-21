@@ -184,19 +184,31 @@ with T3 by setting `state=active`, routes register live. No disk loader.
 No restart.
 
 ```bash
-# Install a plugin (T2 writes source; state resets to 'pending'):
+# Install (T2 writes source; state resets to 'pending'):
 curl -X PUT http://localhost:3005/lib/example \
-  -H "Authorization: Bearer $TOKEN" \
-  --data-binary @plugins/example.py
+  -H "Authorization: Bearer $ELASTIK_TOKEN" \
+  --data-binary @plugins/example.py   # --data-binary preserves newlines; -d will mangle Python source
 
-# Activate (T3 — execs the source, registers declared ROUTES):
+# Activate (T3 — execs source, registers declared ROUTES):
 curl -X PUT http://localhost:3005/lib/example/state \
-  -H "Authorization: Bearer $APPROVE" \
+  -H "Authorization: Bearer $ELASTIK_APPROVE_TOKEN" \
   --data-binary "active"
 
-# The plugin's route is now live:
+# Use it:
 curl http://localhost:3005/example -d "hi"
 # → {"hello":"from example plugin","echo":"hi"}
+
+# Verify:
+curl http://localhost:3005/bin     # is the route registered?
+curl http://localhost:3005/lib/    # list all installed plugin worlds
+
+# Disable (T3 — route down, source kept):
+curl -X PUT http://localhost:3005/lib/example/state \
+  -H "Authorization: Bearer $ELASTIK_APPROVE_TOKEN" --data-binary "disabled"
+
+# Delete (T3 — source world moves to .trash):
+curl -X DELETE http://localhost:3005/lib/example \
+  -H "Authorization: Bearer $ELASTIK_APPROVE_TOKEN"
 ```
 
 The repo ships two specimens in `plugins/`. Neither is auto-loaded.
