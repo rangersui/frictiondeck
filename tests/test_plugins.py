@@ -1392,6 +1392,47 @@ def _run_lib_tests(port, label, token, approve):
              f"recent events types={[r[0] for r in rows_d]}")
     http_method(port, f"/lib/{W2d}", method="DELETE", token=approve)
 
+    # 12e. DAV listing surfaces /lib/ as top-level, not as home/lib/*.
+    # Codex P2 2026-04-21: before _DAV_TOP_NAMESPACES was split off, the
+    # /dav/ root only iterated _DAV_SYS_PREFIXES to list top-level
+    # collections — lib/ wasn't in it, so /lib/* worlds got lumped under
+    # /dav/home/ AND had no /dav/lib/ collection. Now both views are
+    # consistent with the browser's FHS homepage.
+    W2e = "lib-dav-listing-test"
+    http_method(port, f"/lib/{W2e}", method="DELETE", token=approve)
+    http_method(port, f"/lib/{W2e}", method="PUT", body="# listing", token=token)
+
+    # Root PROPFIND should now advertise /dav/lib/ as a collection.
+    st_pf, body_pf = http_method(port, "/dav/", method="PROPFIND",
+                                 headers={"Depth": "1"})
+    test(f"{label} lib: DAV PROPFIND / advertises /dav/lib/",
+         st_pf == 207 and "/dav/lib/" in body_pf,
+         f"status={st_pf} body_has_lib={'/dav/lib/' in body_pf}")
+    # Root HTML listing should include a link to /dav/lib/.
+    st_gl, body_gl = http_get(port, "/dav/")
+    test(f"{label} lib: DAV GET / HTML listing includes lib/",
+         st_gl == 200 and 'href="/dav/lib/"' in body_gl,
+         f"status={st_gl}")
+    # /dav/home/ PROPFIND must NOT alias lib/* as user content.
+    st_hm, body_hm = http_method(port, "/dav/home/", method="PROPFIND",
+                                 headers={"Depth": "1"})
+    test(f"{label} lib: DAV /home/ PROPFIND excludes lib/* worlds",
+         st_hm == 207 and f"/home/lib/{W2e}" not in body_hm,
+         f"status={st_hm} has_leak={f'/home/lib/{W2e}' in body_hm}")
+    # /dav/lib/ PROPFIND must list the plugin world.
+    st_lb, body_lb = http_method(port, "/dav/lib/", method="PROPFIND",
+                                 headers={"Depth": "1"})
+    test(f"{label} lib: DAV /lib/ PROPFIND lists plugin worlds",
+         st_lb == 207 and W2e in body_lb,
+         f"status={st_lb} has_W2e={W2e in body_lb}")
+    # T2 write to /dav/lib/ still works — lib/ is NOT in _DAV_SYS_PREFIXES
+    # for auth, only for listing. Consistent with core PUT /lib/<n>.
+    st_t2, _ = http_method(port, f"/dav/lib/{W2e}", method="PUT",
+                           body="# T2 write via DAV", token=token)
+    test(f"{label} lib: DAV PUT /dav/lib/<n> accepts T2 (same as core /lib/<n>)",
+         st_t2 == 201, f"status={st_t2}")
+    http_method(port, f"/lib/{W2e}", method="DELETE", token=approve)
+
     # 13. Audit chain — state_transition events recorded.
     # Read sqlite directly (same pattern as _run_audit_binding_tests);
     # /dev/db would need to fight the server's WAL-mode connection for

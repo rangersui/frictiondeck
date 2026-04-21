@@ -1785,7 +1785,23 @@ async def _core_sse_handle(method, body, params):
 # FHS tree over worlds. Mount it, cd home. PROPFIND/GET/PUT/DELETE/
 # MOVE/COPY/MKCOL. Reads are public (like core routes); writes require
 # auth; system prefix writes require approve.
+#
+# Two distinct prefix sets — originally conflated into one, split per
+# Codex review 2026-04-21:
+#
+#   _DAV_SYS_PREFIXES      Auth-elevated. Writes require T3 (approve).
+#                          lib/ NOT here — core PUT /lib/<n> accepts T2,
+#                          DAV must match (state-reset via DAV PUT is
+#                          enforced separately; see 132e718).
+#
+#   _DAV_TOP_NAMESPACES    Top-level namespaces surfaced as /dav/<ns>/
+#                          collections in root PROPFIND + HTML listings
+#                          AND excluded from /dav/home/'s "user content"
+#                          set. lib/ IS here so plugin worlds appear at
+#                          /dav/lib/ and don't double-alias as
+#                          /dav/home/lib/<n>.
 _DAV_SYS_PREFIXES = ("etc/", "usr/", "var/", "boot/", "tmp/", "mnt/")
+_DAV_TOP_NAMESPACES = _DAV_SYS_PREFIXES + ("lib/",)
 
 def _dav_suffix(rest, ext):
     """Render-time ext decoration for PROPFIND hrefs.
@@ -1866,14 +1882,14 @@ async def _core_dav_handle(method, body, params):
         if world and world.endswith("/"): world = world[:-1]
         is_world = world and any(w == world for w in all_worlds)
         has_children = bool(world) and any(w.startswith(world + "/") for w in all_worlds)
-        is_top_ns = (dav_prefix in ("", "home") or dav_prefix in (p.rstrip("/") for p in _DAV_SYS_PREFIXES))
+        is_top_ns = (dav_prefix in ("", "home") or dav_prefix in (p.rstrip("/") for p in _DAV_TOP_NAMESPACES))
         if world and not is_world and not has_children and not is_top_ns:
             return {"error":"not found", "_status":404}
         if is_world:
             raw, ext = _dav_read(world)
             is_dir = ext == "dir" or has_children
             if not is_dir:
-                dav_href = f"/dav/home/{world}" if not world.startswith(_DAV_SYS_PREFIXES) else f"/dav/{world}"
+                dav_href = f"/dav/home/{world}" if not world.startswith(_DAV_TOP_NAMESPACES) else f"/dav/{world}"
                 xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
                        + _dav_prop(f"{dav_href}{_dav_suffix(world, ext)}", "", _ext_to_ct(ext), len(raw), now)
                        + '</D:multistatus>')
@@ -1883,22 +1899,22 @@ async def _core_dav_handle(method, body, params):
                + _dav_prop(href, "collection", "", 0, now))
         if depth == "1":
             if dav_prefix == "":
-                has_user = any(not w.startswith(_DAV_SYS_PREFIXES) for w in all_worlds)
+                has_user = any(not w.startswith(_DAV_TOP_NAMESPACES) for w in all_worlds)
                 if has_user:
                     xml += _dav_prop("/dav/home/", "collection", "", 0, now)
-                for pref in _DAV_SYS_PREFIXES:
+                for pref in _DAV_TOP_NAMESPACES:
                     if any(w.startswith(pref) for w in all_worlds):
                         xml += _dav_prop(f"/dav/{pref}", "collection", "", 0, now)
             else:
                 if dav_prefix == "home":
                     world_prefix = ""
                     children_href = "/dav/home/"
-                    candidates = [w for w in all_worlds if not w.startswith(_DAV_SYS_PREFIXES)]
+                    candidates = [w for w in all_worlds if not w.startswith(_DAV_TOP_NAMESPACES)]
                 elif dav_prefix.startswith("home/"):
                     world_prefix = dav_prefix[5:] + "/"
                     children_href = f"/dav/{dav_prefix}/"
                     candidates = [w for w in all_worlds
-                                  if not w.startswith(_DAV_SYS_PREFIXES) and w.startswith(world_prefix)]
+                                  if not w.startswith(_DAV_TOP_NAMESPACES) and w.startswith(world_prefix)]
                 else:
                     world_prefix = dav_prefix + "/"
                     children_href = f"/dav/{dav_prefix}/"
@@ -1932,21 +1948,21 @@ async def _core_dav_handle(method, body, params):
                 all_worlds = [_logical_name(d.name) for d in sorted(DATA.iterdir())
                               if d.is_dir() and (d / "universe.db").exists()]
                 if dav_prefix == "":
-                    if any(not w.startswith(_DAV_SYS_PREFIXES) for w in all_worlds):
+                    if any(not w.startswith(_DAV_TOP_NAMESPACES) for w in all_worlds):
                         listing += '<li><a href="/dav/home/">home/</a></li>'
-                    for pref in _DAV_SYS_PREFIXES:
+                    for pref in _DAV_TOP_NAMESPACES:
                         if any(w.startswith(pref) for w in all_worlds):
                             listing += f'<li><a href="/dav/{pref}">{pref}</a></li>'
                 else:
                     if dav_prefix == "home":
                         world_prefix = ""
                         href_base = "/dav/home/"
-                        cands = [w for w in all_worlds if not w.startswith(_DAV_SYS_PREFIXES)]
+                        cands = [w for w in all_worlds if not w.startswith(_DAV_TOP_NAMESPACES)]
                     elif dav_prefix.startswith("home/"):
                         world_prefix = dav_prefix[5:] + "/"
                         href_base = f"/dav/{dav_prefix}/"
                         cands = [w for w in all_worlds
-                                 if not w.startswith(_DAV_SYS_PREFIXES) and w.startswith(world_prefix)]
+                                 if not w.startswith(_DAV_TOP_NAMESPACES) and w.startswith(world_prefix)]
                     else:
                         world_prefix = dav_prefix + "/"
                         href_base = f"/dav/{dav_prefix}/"
