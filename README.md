@@ -2,7 +2,15 @@
 
 *v5.0.0 lambda — one file runs it. Plugins are worlds.*
 
-You have a Linux machine whose interface is curl.
+You have an HTTP machine.
+
+It can store raw worlds like a pastebin.
+
+But on read, its content-negotiation layer can think.
+
+This is not an AI API server.
+
+It is an HTTP server where AI shapes the response representation.
 
 ## Quickstart
 
@@ -23,14 +31,44 @@ Works on anything with Python 3.8+: laptop, Raspberry Pi, iOS (a-Shell), Android
 
 ## How it works
 
-AI writes a string. Browser renders it. You see something.
+Most "AI servers" today mean:
+
+```
+POST /v1/chat/completions
+{"messages":[{"role":"user","content":"..."}]}
+```
+
+That is an API for AI.
+
+elastik flips the stack:
+
+- HTTP is the product
+- AI is infrastructure
+- the model sits between data and representation
+
+AI is not the endpoint. AI is in the protocol path.
 
 ```
 PUT  /home/work -d "<h1>hello</h1>"   → stored in SQLite
 GET  /home/work                        → {"stage_html":"<h1>hello</h1>","version":1}
 ```
 
-Every path is a world. Writing to a new path creates it. FHS layout:
+Every path is a world. Writing to a new path creates it.
+
+At the storage layer, elastik is still beautifully dumb: bytes go in, bytes come out.
+
+But on read, plugins like `/shaped/*` can insert a thinking layer into HTTP semantics:
+
+```
+source bytes -> Accept + hint negotiation -> /dev/gpu transform -> cache -> response
+```
+
+Accept constrains output format. 406 constrains mismatch. 429 constrains rate.
+304 constrains repetition. `Vary` constrains cache identity.
+
+The protocol keeps the model in a cage.
+
+FHS layout:
 
 ```
 /home/       your stuff
@@ -318,6 +356,28 @@ Notes:
   send `X-Semantic-Intent` instead
 - plain `Accept: text/html` is a normal one-shot shaped response, **not**
   the streaming path
+
+#### Ask a world
+
+For a single world, `/shaped/*` already covers a large part of the
+"ask your docs" / summarise-this-file use case.
+
+Store the source once, then read it back with an answering or
+summarising intent:
+
+```bash
+curl "http://localhost:3005/shaped/home/albon-intel" \
+  -H "Authorization: Bearer $ELASTIK_TOKEN" \
+  -H "Accept: text/plain" \
+  -H "X-Semantic-Intent: answer-only/1.0 (question: what is their funding source?)"
+```
+
+With modern long-context models, many of these single-world reads do not
+need chunking, embeddings, or a vector database. `/shaped/*` can often
+just read the world and answer.
+
+This is **not** cross-world retrieval. It is direct semantic read over
+one source. Cross-world routing / composition is future work.
 
 Dedicated `/shaped/*` browser UX is intentionally deferred. A proper
 `shaped.html` / browser-side shell is future work and **not part of this
