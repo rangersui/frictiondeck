@@ -8,8 +8,15 @@ POST /dev/db?file=brave/History              body: SELECT url FROM urls ORDER BY
 ?file=<mount-name>/<path> resolves against /etc/fstab. Mount-name is
 the suffix after /mnt/ in the fstab line; path is anything under that
 mount. No .db extension required — SQLite opens any file that looks
-like a database. See the "Mount anything" section in README.md for
-how to set up fstab first.
+like a database.
+
+**file-kind mounts only.** fstab now supports multiple source schemes
+(file://, https://, etc.) but /dev/db can only open local files. An
+https:// or other non-file mount rejects with 400 "wrong mount kind"
+rather than trying and failing cryptically inside sqlite3. An unknown
+mount name rejects with 404. Use /mnt/<name>/<path> if you want the
+raw bytes an http mount serves; /dev/db is for SQL, which requires a
+local DB file.
 
 Read-only. file:...?mode=ro enforced at connection level.
 SELECT/PRAGMA/WITH/EXPLAIN only. Keyword whitelist is belt; ro mode is suspenders.
@@ -36,21 +43,51 @@ def _disk_name(name):
 
 def _resolve_mnt(file_path):
     """Resolve a file path like 'brave/History' against fstab mounts.
-    Returns absolute Path if allowed, None if not under any mount."""
+
+    SQLite can only open local files. fstab now supports multiple
+    source schemes (file://, https://, etc. — anything registered in
+    fstab.py's _ADAPTERS table), so /dev/db MUST distinguish between:
+
+      - "this mount doesn't exist"  (unknown mount name)   -> 404
+      - "mount exists, wrong kind"  (http, https, ...)     -> 400
+      - "mount exists, file-kind, resolves cleanly"        -> Path
+
+    Collapsing these into one 403 (as the pre-refactor code did) made
+    diagnosis impossible when fstab started mounting non-file sources.
+
+    Returns a (status, value) pair:
+      ("ok",        Path)        — file mount, path resolved
+      ("unknown",   None)        — no /mnt/<name> in fstab
+      ("no_fstab",  None)        — /etc/fstab world not created yet
+      ("wrong_kind", kind_str)   — mount exists but kind != "file"
+      ("traversal", None)        — resolved path escaped mount root
+    """
     # Read etc/fstab for mount definitions
     fstab_db = _DATA / "etc%2Ffstab" / "universe.db"
     if not fstab_db.exists():
-        return None
+        return ("no_fstab", None)
     try:
         c = sqlite3.connect(str(fstab_db))
         c.row_factory = sqlite3.Row
         raw = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
         c.close()
     except Exception:
-        return None
+        return ("no_fstab", None)
     if isinstance(raw, bytes):
         raw = raw.decode("utf-8", "replace")
-    # Parse fstab: local_path  /mnt/name  mode
+
+    # First segment of file_path is the mount name — same segmentation
+    # rule fstab uses (/mnt/<name>/<rest_path>).
+    first_slash = file_path.find("/")
+    if first_slash < 0:
+        want_name, want_rest = file_path, ""
+    else:
+        want_name, want_rest = file_path[:first_slash], file_path[first_slash + 1:]
+
+    # Parse fstab: <source>  /mnt/<name>  <mode>[,opts...]
+    # Match on name first so we can return wrong_kind vs unknown
+    # accurately — a bare startswith-scan on the original string would
+    # let a file mount partially shadow a similarly-named http mount.
     for line in (raw or "").splitlines():
         line = line.strip()
         if not line or line.startswith("#"):
@@ -58,32 +95,48 @@ def _resolve_mnt(file_path):
         parts = line.rsplit(None, 2)
         if len(parts) < 3:
             continue
-        local_path, mount_point, _ = parts
+        source, mount_point, _mode = parts
         name = mount_point.replace("/mnt/", "").strip("/")
-        if not name:
+        if not name or name != want_name:
             continue
-        # Check if file_path starts with this mount name
-        if file_path.startswith(name + "/") or file_path == name:
-            rest = file_path[len(name):].lstrip("/")
-            full = os.path.normpath(os.path.join(local_path, rest))
-            # Traversal check — commonpath, not startswith
-            try:
-                if os.path.commonpath([full, os.path.normpath(local_path)]) != os.path.normpath(local_path):
-                    return None
-            except ValueError:
-                return None
-            return Path(full)
-    return None
+
+        # Found the mount by name. Determine kind.
+        if "://" in source:
+            kind = source.split("://", 1)[0].lower()
+        else:
+            kind = "file"
+
+        if kind != "file":
+            return ("wrong_kind", kind)
+
+        # file-kind: resolve with traversal guard.
+        local_path = source
+        full = os.path.normpath(os.path.join(local_path, want_rest))
+        try:
+            if os.path.commonpath([full, os.path.normpath(local_path)]) != os.path.normpath(local_path):
+                return ("traversal", None)
+        except ValueError:
+            return ("traversal", None)
+        return ("ok", Path(full))
+    return ("unknown", None)
 
 
 async def handle_db(method, body, params):
-    """POST /dev/db — SELECT-only SQL over a world or fstab-mounted file.
+    """POST /dev/db — SELECT-only SQL over a world or file-kind fstab mount.
 
     body: the query. SELECT / PRAGMA / WITH / EXPLAIN only.
     query: ?world=<name>            → that world's universe.db
-           ?file=<mount>/<path>     → a file under an fstab mount
+           ?file=<mount>/<path>     → a file under a file-kind fstab mount
 
     Exactly one of ?world= / ?file= is required; otherwise 400.
+
+    ?file= status semantics:
+      200  — mount is file-kind AND the resolved path exists + is a DB
+      404  — <mount> is not declared in /etc/fstab
+      404  — <mount> is declared but the path under it doesn't exist
+      400  — <mount> is declared but its source scheme is non-file
+             (http/https/etc. — use /mnt/<name>/<path> for raw bytes)
+      403  — resolved path escaped the mount root (traversal)
 
     Examples:
       curl -X POST "localhost:3005/dev/db?file=brave/History" \\
@@ -119,12 +172,32 @@ async def handle_db(method, body, params):
     world = params.get("world", "")
     file_path = params.get("file", "")  # for /mnt/ paths
     if file_path:
-        # External file — must be under a fstab mount (read etc/fstab)
-        db_path = _resolve_mnt(file_path)
-        if not db_path:
-            return {"error": "file not under any fstab mount", "_status": 403}
-        if not db_path.exists():
-            return {"error": f"file not found: {file_path}", "_status": 404}
+        # External file — must resolve under a file-kind fstab mount.
+        # http(s)/other-scheme mounts serve bytes over the network and
+        # aren't openable by sqlite3.connect(); we surface that as 400
+        # rather than trying and failing with a cryptic sqlite error.
+        status, value = _resolve_mnt(file_path)
+        if status == "ok":
+            db_path = value
+            if not db_path.exists():
+                return {"error": f"file not found: {file_path}", "_status": 404}
+        elif status == "wrong_kind":
+            return {"error": (f"/dev/db requires a file-kind mount; "
+                              f"'{file_path.split('/', 1)[0]}' is a "
+                              f"{value!r} mount. Mount a local path in "
+                              f"/etc/fstab to query it here, or use "
+                              f"/mnt/<name>/<path> to fetch bytes over "
+                              f"the adapter."),
+                    "_status": 400}
+        elif status == "traversal":
+            return {"error": f"path traversal: {file_path}", "_status": 403}
+        else:
+            # "unknown" or "no_fstab" — both "the mount isn't there"
+            # from the caller's perspective.
+            return {"error": (f"mount not found: "
+                              f"'{file_path.split('/', 1)[0]}'. "
+                              f"Check /etc/fstab."),
+                    "_status": 404}
     elif world:
         db_path = _DATA / _disk_name(world) / "universe.db"
         if not db_path.exists():
@@ -140,17 +213,24 @@ async def handle_db(method, body, params):
         result = [dict(r) for r in rows]
         c.close()
 
-        # Plain text for pipe, JSON for explicit request
+        # Plain text for pipe, JSON for explicit request. Both paths
+        # return a dict envelope — server.py's dispatcher pops status/
+        # headers/body off the returned dict and bare `return result`
+        # (a list) would crash with AttributeError on list.pop("_status").
         scope = params.get("_scope", {})
         accept = ""
         for k, v in scope.get("headers", []):
             if k == b"accept":
                 accept = v.decode()
                 break
+        payload = json.dumps(result, ensure_ascii=False,
+                             indent=None if "json" in accept else 2,
+                             default=str)
         if "json" in accept:
-            return result  # auto-serialized to JSON by plugin dispatch
-        # Default: JSON pretty-printed as plain text (pipe-friendly)
-        return {"_html": json.dumps(result, ensure_ascii=False, indent=2, default=str),
+            return {"_body": payload, "_ct": "application/json",
+                    "_status": 200}
+        # Default: pretty-printed JSON as text/plain (pipe-friendly)
+        return {"_body": payload, "_ct": "text/plain; charset=utf-8",
                 "_status": 200}
     except sqlite3.OperationalError as e:
         if "timeout" in str(e).lower():

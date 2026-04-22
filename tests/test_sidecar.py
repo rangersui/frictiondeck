@@ -235,20 +235,24 @@ def _http(method, path, body=None, token="", headers=None):
         return 0, {}, str(e).encode("utf-8") if isinstance(str(e), str) else b""
 
 
-def _install_fstab_plugin():
-    """PUT plugins/fstab.py into /lib/fstab + activate."""
-    plugin = os.path.join(ROOT, "plugins", "fstab.py")
+def _install_plugin(name):
+    """PUT plugins/<name>.py into /lib/<name> + activate."""
+    plugin = os.path.join(ROOT, "plugins", f"{name}.py")
     with open(plugin, "rb") as f:
         src = f.read()
-    s1, _, _ = _http("PUT", "/lib/fstab", body=src, token=APPROVE,
+    s1, _, _ = _http("PUT", f"/lib/{name}", body=src, token=APPROVE,
                      headers={"Content-Type": "text/x-python"})
     if s1 not in (200, 201):
-        return False, f"PUT /lib/fstab -> HTTP {s1}"
-    s2, _, _ = _http("PUT", "/lib/fstab/state", body="active",
+        return False, f"PUT /lib/{name} -> HTTP {s1}"
+    s2, _, _ = _http("PUT", f"/lib/{name}/state", body="active",
                      token=APPROVE)
     if s2 not in (200, 204):
-        return False, f"PUT /lib/fstab/state -> HTTP {s2}"
+        return False, f"PUT /lib/{name}/state -> HTTP {s2}"
     return True, "installed"
+
+
+def _install_fstab_plugin():
+    return _install_plugin("fstab")
 
 
 def _write_fstab(content):
@@ -280,6 +284,18 @@ def run():
     # contract is the most compatibility-sensitive promise in B.1; this
     # mount locks it in.
     rw_mount_root = tempfile.mkdtemp(prefix="elastik-sidecar-localfs-rw-")
+
+    # Seed a real SQLite file under the local mount so /dev/db can
+    # open it for the file-kind positive case. Uses stdlib sqlite3
+    # — same engine /dev/db itself uses, so the file format is
+    # guaranteed compatible.
+    import sqlite3 as _sqlite3
+    _sample_db = os.path.join(local_mount_root, "sample.db")
+    _c = _sqlite3.connect(_sample_db)
+    _c.execute("CREATE TABLE items (id INTEGER PRIMARY KEY, name TEXT)")
+    _c.execute("INSERT INTO items(name) VALUES ('alpha'), ('beta')")
+    _c.commit()
+    _c.close()
 
     upstream = _start_fake_upstream(UPSTREAM_PORT)
     proc, tmp_root = _start_elastik()
@@ -557,6 +573,76 @@ def run():
                 headers={"Accept": "text/plain"})
             test("/shaped/mnt/<unknown>/* -> 404 (unknown mount)",
                  s == 404, f"got {s} body={body[:160]!r}")
+
+        # ---- /dev/db guard against non-file mounts ---------------
+        # fstab now mounts file + http(s) + bogus-scheme sources. /dev/db
+        # can only open local SQLite files; it MUST distinguish "mount
+        # missing" (404) from "mount exists but wrong kind for SQL" (400)
+        # so operators can diagnose instead of hitting a cryptic sqlite
+        # error. Pre-Track-B.3 code collapsed every failure into 403.
+        ok, detail = _install_plugin("db")
+        test("install db plugin", ok, detail)
+        if ok:
+            # Positive: file-kind mount, real .db → 200 + rows
+            s, h, body = _http(
+                "POST", "/dev/db?file=local/sample.db",
+                body="SELECT name FROM items ORDER BY id",
+                token=TOKEN,
+                headers={"Content-Type": "text/plain",
+                         "Accept": "application/json"})
+            test("/dev/db?file=local/sample.db -> 200",
+                 s == 200, f"got {s} body={body[:200]!r}")
+            try:
+                rows = json.loads(body.decode("utf-8"))
+            except Exception:
+                rows = None
+            test("/dev/db positive: rows come back",
+                 (isinstance(rows, list)
+                  and [r.get("name") for r in rows] == ["alpha", "beta"]),
+                 f"rows={rows}")
+
+            # Unknown mount name → 404 (mount doesn't exist in fstab).
+            s, _, body = _http(
+                "POST", "/dev/db?file=not-a-mount/x.db",
+                body="SELECT 1", token=TOKEN,
+                headers={"Content-Type": "text/plain"})
+            test("/dev/db unknown mount -> 404",
+                 s == 404, f"got {s} body={body[:200]!r}")
+
+            # http(s) mount → 400 (wrong kind). This is the pre-Track-
+            # B.3 regression: previously collapsed to 403 or would try
+            # to sqlite3.connect an http:// path and fail with a
+            # cryptic sqlite error. New contract: clean 400 naming
+            # the kind so the operator knows to switch to /mnt/<name>.
+            s, _, body = _http(
+                "POST", "/dev/db?file=remote/anything",
+                body="SELECT 1", token=TOKEN,
+                headers={"Content-Type": "text/plain"})
+            test("/dev/db http mount -> 400 (wrong kind)",
+                 s == 400, f"got {s} body={body[:200]!r}")
+            test("/dev/db wrong-kind error names the scheme",
+                 b"http" in body,
+                 f"body={body[:200]!r}")
+
+            # Bogus scheme in fstab → also 400 wrong_kind. Symmetric
+            # behaviour: any non-file kind is a 400, regardless of
+            # whether the adapter is actually registered.
+            s, _, body = _http(
+                "POST", "/dev/db?file=unk/x.db",
+                body="SELECT 1", token=TOKEN,
+                headers={"Content-Type": "text/plain"})
+            test("/dev/db non-file scheme -> 400 (wrong kind)",
+                 s == 400, f"got {s} body={body[:200]!r}")
+
+            # File-kind mount, but the path under it doesn't exist → 404
+            # (same status as unknown-mount but different meaning; the
+            # 'file not found' message distinguishes).
+            s, _, body = _http(
+                "POST", "/dev/db?file=local/does-not-exist.db",
+                body="SELECT 1", token=TOKEN,
+                headers={"Content-Type": "text/plain"})
+            test("/dev/db file-kind + missing path -> 404",
+                 s == 404, f"got {s} body={body[:200]!r}")
     finally:
         _stop_elastik(proc, tmp_root)
         try: upstream.shutdown()
