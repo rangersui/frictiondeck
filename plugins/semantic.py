@@ -589,6 +589,23 @@ def _accept_allows(accept_list, candidate_ct: str) -> bool:
     return False
 
 
+def _accept_wants_stream(accept_list) -> bool:
+    """True iff the client declared text/event-stream with q > 0.
+
+    text/event-stream is treated as an OUTER transport, not an inner
+    shape — see the strip dance in handle(). Presence here only
+    signals "wrap the response in SSE"; it does NOT participate in
+    _pick_required_ct (SLM never sees text/event-stream as
+    REQUIRED_CONTENT_TYPE) nor in _accept_allows (SLM output is
+    validated against the inner shape only). An `Accept:
+    text/event-stream;q=0` explicit refusal returns False here and
+    the non-stream path serves normally."""
+    for mime, q in accept_list:
+        if mime == "text/event-stream" and q > 0:
+            return True
+    return False
+
+
 def _text_plain_is_top(accept_list) -> bool:
     """Is text/plain the client's top-ranked admissible preference?
 
@@ -758,6 +775,301 @@ async def _call_gpu_device(prompt: str, scope) -> str:
     return text
 
 
+async def _call_gpu_stream(prompt: str, scope):
+    """Streaming sibling of _call_gpu_device. Returns the raw
+    AsyncIterator[str] of text tokens from /dev/gpu/stream.
+
+    Uses the same in-process dispatch as _call_gpu_device (no HTTP
+    loopback) via gpu.py's _stream_in_process bridge flag. When set,
+    _handle_stream hands back the per-backend iterator without
+    opening its own HTTP response — semantic wraps in SSE itself,
+    adds /shaped/-level audit, and writes the cache at stream end.
+    Without the flag gpu.py would frame the stream for an external
+    HTTP caller, which is wrong here.
+
+    Initialisation errors (gpu not installed, no /etc/gpu.conf,
+    missing API key, unknown scheme) arrive as a dict with _status
+    >= 400 and raise _SLMUnavailable so the caller can fall back
+    through the existing _accept_gated_fallback. Post-first-chunk
+    errors raise from inside the iterator and _stream_shape
+    surfaces them as `event: error` frames (200 already committed
+    at that point)."""
+    gpu_handler = server._plugins.get(GPU_ROUTE)
+    if gpu_handler is None:
+        raise _SLMUnavailable(f"{GPU_ROUTE} not registered")
+    # Spoof the scope path so gpu.py's front-door dispatches to
+    # _handle_stream instead of the non-stream handle body.
+    spoofed_scope = dict(scope or {})
+    spoofed_scope["path"] = "/dev/gpu/stream"
+    result = await gpu_handler("POST", prompt, {
+        "_scope": spoofed_scope,
+        "_stream_in_process": True,
+    })
+    if isinstance(result, dict):
+        status = result.get("_status", 200)
+        raise _SLMUnavailable(
+            f"gpu stream {status}: {str(result.get('error') or '')[:200]}"
+        )
+    # Raw async iterator; caller iterates with `async for`.
+    return result
+
+
+# ====================================================================
+# SSE framing helpers
+# ====================================================================
+
+def _sse_data(text: str) -> bytes:
+    """One SSE data frame. Every '\\n' in the payload becomes its own
+    `data:` line so multi-line shaped output (HTML, CSV, etc.)
+    reassembles byte-for-byte on the client. Frame terminated by the
+    empty line. Empty input returns empty bytes — callers should skip
+    rather than emit a zero-content frame."""
+    if not text:
+        return b""
+    lines = text.split("\n")
+    return ("".join(f"data: {ln}\n" for ln in lines) + "\n").encode("utf-8")
+
+
+def _sse_event(name: str, payload: str = "") -> bytes:
+    """Named SSE event with an inline `data:` line. Newlines in
+    payload are stripped — event frames carry short metadata (`done`
+    shape/ct summary, `error` reasons), not content. Callers pass a
+    JSON string for machine-readable payloads."""
+    safe = payload.replace("\n", " ").replace("\r", " ")
+    return f"event: {name}\ndata: {safe}\n\n".encode("utf-8")
+
+
+# ====================================================================
+# streaming response helpers
+# ====================================================================
+
+_META_MARKER = "\n===META==="
+
+
+async def _fake_stream_body(body, ct: str, shape: str, gpu_fp: str, send):
+    """Cache-hit streaming path: wrap a fully-assembled body as one
+    SSE `data:` frame + terminal `event: done`.
+
+    The SLM wasn't consulted for this request (cache hit), so there
+    is nothing to actually stream — but the client asked for
+    text/event-stream so its SSE consumer expects frames, not a raw
+    body. Fake-streaming keeps the consumer-side parser uniform
+    between hit and miss.
+
+    Caller guarantees send is non-None (validated in handle()).
+    Returns None to signal 'plugin streamed its own response'
+    (server.py:765)."""
+    body_str = body.decode("utf-8", "replace") if isinstance(body, (bytes, bytearray)) else str(body)
+    meta_payload = json.dumps({"ct": ct, "shape": shape, "cache": "hit"},
+                              ensure_ascii=False)
+    await send({
+        "type": "http.response.start",
+        "status": 200,
+        "headers": [
+            [b"content-type", b"text/event-stream; charset=utf-8"],
+            [b"cache-control", b"no-cache"],
+            [b"x-semantic-cache", b"hit"],
+            [b"x-semantic-shape", shape.encode("utf-8")],
+            [b"x-semantic-render", RENDER_FINGERPRINT.encode("utf-8")],
+            [b"x-semantic-gpu", gpu_fp.encode("utf-8")],
+            [b"x-semantic-inner-ct", ct.encode("utf-8")],
+        ],
+    })
+    if body_str:
+        await send({"type": "http.response.body",
+                    "body": _sse_data(body_str),
+                    "more_body": True})
+    await send({"type": "http.response.body",
+                "body": _sse_event("done", meta_payload),
+                "more_body": True})
+    await send({"type": "http.response.body",
+                "body": b"",
+                "more_body": False})
+    return None
+
+
+async def _stream_shape(prompt: str, scope, cache_key: str, gpu_fp: str,
+                        accept_list, required_ct: str, send):
+    """Cache-miss streaming path: /dev/gpu/stream → SSE frames →
+    cache write → event: done.
+
+    Flow:
+      1. Acquire async iterator (in-process bridge). Init errors
+         raise _SLMUnavailable BEFORE http.response.start — caller
+         takes normal _accept_gated_fallback path, status code is
+         still negotiable.
+      2. Peek first chunk. If iterator is empty (no yields), same
+         failure mode as init error — raise _SLMUnavailable.
+      3. Commit http.response.start with 200 + SSE headers. From
+         here on, status code is frozen. Errors can only be surfaced
+         as `event: error` frames.
+      4. Forward each chunk as a `data:` frame. Hold back the last
+         |_META_MARKER| chars so a '\\n===META===' split across
+         chunks still matches. On match: stop forwarding, start
+         accumulating META JSON tail.
+      5. On clean generator exit: parse META, validate content-
+         type against Accept. If slm_ct is admissible, write cache
+         and emit `event: done` with {shape, ct}. Else emit
+         `event: error` and skip cache (no silent caching of output
+         the client explicitly refused).
+
+    Returns None to signal 'plugin streamed its own response'."""
+    try:
+        chunks = await _call_gpu_stream(prompt, scope)
+    except _SLMUnavailable:
+        raise                           # bubble to handle() pre-commit
+
+    # Peek for first token. An empty iterator maps to 'no data', treat
+    # it the same way an upstream error would — _SLMUnavailable, caller
+    # falls back through the usual gate.
+    iterator = chunks.__aiter__()
+    try:
+        first_chunk = await iterator.__anext__()
+    except StopAsyncIteration:
+        raise _SLMUnavailable("gpu stream yielded no tokens")
+    except _SLMUnavailable:
+        raise
+    except Exception as e:
+        raise _SLMUnavailable(f"gpu stream init: {e}")
+
+    # Response is committed from here on. Status cannot change.
+    await send({
+        "type": "http.response.start",
+        "status": 200,
+        "headers": [
+            [b"content-type", b"text/event-stream; charset=utf-8"],
+            [b"cache-control", b"no-cache"],
+            [b"x-semantic-cache", b"generated"],
+            [b"x-semantic-render", RENDER_FINGERPRINT.encode("utf-8")],
+            [b"x-semantic-gpu", gpu_fp.encode("utf-8")],
+        ],
+    })
+
+    # Framing loop with sliding META-marker detection.
+    #
+    # `pending`: content we've seen but not yet emitted, because the
+    # last |_META_MARKER|-1 chars might be the start of a marker
+    # that completes on the next chunk. We emit pending[:-HOLD] and
+    # keep pending[-HOLD:] between chunks.
+    # `full`: everything we've seen (for cache body + post-hoc META
+    # parse). Emitted OR held, either way it's in full.
+    # `meta_tail`: once we detect the marker, we stop forwarding
+    # content and accumulate here. None = still in content phase.
+    HOLD = len(_META_MARKER) - 1
+    pending = first_chunk
+    full = first_chunk
+    meta_tail = None
+    stream_errored = False
+
+    async def _maybe_forward():
+        """Emit pending[:-HOLD] as a data frame. Trims the buffer."""
+        nonlocal pending
+        if len(pending) > HOLD:
+            to_emit = pending[:-HOLD]
+            await send({"type": "http.response.body",
+                        "body": _sse_data(to_emit),
+                        "more_body": True})
+            pending = pending[-HOLD:]
+
+    # Scan the first chunk for marker before forwarding anything.
+    idx = pending.find(_META_MARKER)
+    if idx >= 0:
+        if idx > 0:
+            await send({"type": "http.response.body",
+                        "body": _sse_data(pending[:idx]),
+                        "more_body": True})
+        meta_tail = pending[idx + len(_META_MARKER):]
+        pending = ""
+    else:
+        await _maybe_forward()
+
+    try:
+        async for tok in iterator:
+            if not tok:
+                continue
+            full += tok
+            if meta_tail is not None:
+                meta_tail += tok
+                continue
+            pending += tok
+            idx = pending.find(_META_MARKER)
+            if idx >= 0:
+                if idx > 0:
+                    await send({"type": "http.response.body",
+                                "body": _sse_data(pending[:idx]),
+                                "more_body": True})
+                meta_tail = pending[idx + len(_META_MARKER):]
+                pending = ""
+                continue
+            await _maybe_forward()
+    except Exception as e:
+        stream_errored = True
+        await send({"type": "http.response.body",
+                    "body": _sse_event("error", f"stream failed: {e}"),
+                    "more_body": True})
+
+    # Drain remaining pending (no marker was ever found, or we were
+    # still in content phase when iterator exited).
+    if meta_tail is None and pending:
+        await send({"type": "http.response.body",
+                    "body": _sse_data(pending),
+                    "more_body": True})
+
+    # Parse META if found. SLM produces {"content_type": "...",
+    # "shape": "..."}; META-parse failure falls back to the same
+    # defaults _parse_slm_output uses (text/plain, shape=unknown).
+    slm_ct, shape = "text/plain", "unknown"
+    if meta_tail is not None:
+        meta_str = meta_tail.strip()
+        try:
+            meta = json.loads(meta_str)
+            slm_ct = str(meta.get("content_type") or "text/plain")
+            shape = str(meta.get("shape") or "unknown")
+        except (ValueError, TypeError):
+            pass
+
+    # Extract the cache body = everything before the marker. If no
+    # marker was ever seen, the whole stream counts as content.
+    if _META_MARKER in full:
+        body_out = full[:full.index(_META_MARKER)]
+    else:
+        body_out = full
+
+    # Validate against Accept. SLM output-mismatch (the 406 case in
+    # non-stream) cannot change status mid-stream — emit an error
+    # event instead, no cache write.
+    if not stream_errored and body_out and _accept_allows(accept_list, slm_ct):
+        try:
+            _write_cached(cache_key, body_out, slm_ct, shape)
+            _evict_if_over_cap()
+        except Exception:
+            pass
+        done_payload = json.dumps(
+            {"ct": slm_ct, "shape": shape, "cache": "generated"},
+            ensure_ascii=False)
+        await send({"type": "http.response.body",
+                    "body": _sse_event("done", done_payload),
+                    "more_body": True})
+    else:
+        if not stream_errored:
+            await send({
+                "type": "http.response.body",
+                "body": _sse_event(
+                    "error",
+                    f"slm output {slm_ct!r} violates Accept; shape={shape}"),
+                "more_body": True,
+            })
+        # Still emit done so clients have a structural terminal.
+        await send({"type": "http.response.body",
+                    "body": _sse_event("done", "{}"),
+                    "more_body": True})
+
+    await send({"type": "http.response.body",
+                "body": b"",
+                "more_body": False})
+    return None
+
+
 def _build_prompt(source_body, intent_hint: str, required_ct: str,
                   source_ct: str) -> str:
     """SYSTEM_PROMPT + user frame, inlined into a single blob for
@@ -827,9 +1139,27 @@ async def handle(method, body, params):
     if not world_name or not server._valid_name(world_name):
         return {"_status": 400, "error": "bad world path"}
 
-    # 2. Negotiation inputs.
+    # 2. Negotiation inputs. text/event-stream is transport, not
+    #    shape — strip it out before computing accept_canon and
+    #    required_ct so the SLM never sees it as REQUIRED_CONTENT_TYPE
+    #    and the cache key stays identical across stream/non-stream
+    #    requests for the same inner shape.
     ua, accept_hdr = _read_headers(scope)
-    accept_list = _parse_accept(accept_hdr)
+    accept_list_raw = _parse_accept(accept_hdr)
+    streaming = _accept_wants_stream(accept_list_raw)
+    accept_list = [(m, q) for m, q in accept_list_raw
+                   if m != "text/event-stream"]
+    if streaming and not accept_list:
+        # Client asked for a stream but didn't declare an inner
+        # shape. We would have no REQUIRED_CONTENT_TYPE to pass the
+        # SLM. Refuse cleanly rather than guess — the consumer needs
+        # to say what shape they want INSIDE the SSE envelope.
+        return {
+            "_status": 400,
+            "error": "text/event-stream is transport, not shape; "
+                     "add an inner MIME (e.g. "
+                     "Accept: text/event-stream, text/html)",
+        }
     accept_canon = _canonicalise_accept(accept_list)
 
     # 3. Source must resolve. _read_source dispatches between the
@@ -863,6 +1193,16 @@ async def handle(method, body, params):
     hit = _read_cached(key)
     if hit is not None:
         body_c, ct, shape = hit
+        if streaming:
+            # Fake-stream: one data frame + event: done. Keeps the
+            # client's SSE consumer uniform across hit/miss without
+            # actually dispatching to /dev/gpu.
+            send_fn = params.get("_send")
+            if send_fn is not None:
+                return await _fake_stream_body(body_c, ct, shape,
+                                               gpu_fp, send_fn)
+            # No raw send available (shouldn't happen in practice) —
+            # fall through to the one-shot envelope.
         return {
             "_body": body_c,
             "_ct": ct,
@@ -887,6 +1227,31 @@ async def handle(method, body, params):
     #    cleared our own dispatcher-level AUTH="auth" gate.
     required_ct = _pick_required_ct(accept_list)
     prompt = _build_prompt(body_src, ua, required_ct, source_ct)
+
+    # 6a. Streaming branch. Pre-first-chunk errors propagate as
+    #     _SLMUnavailable here and fall back through the standard
+    #     accept-gated path below — status is still negotiable until
+    #     _stream_shape emits http.response.start. Once committed,
+    #     mid-stream errors become `event: error` frames with 200
+    #     headers already on the wire.
+    if streaming:
+        send_fn = params.get("_send")
+        if send_fn is not None:
+            try:
+                return await _stream_shape(
+                    prompt, scope, key, gpu_fp,
+                    accept_list, required_ct, send_fn)
+            except _SLMUnavailable as e:
+                return _accept_gated_fallback(
+                    body_src, accept_list,
+                    tag_ok="fallback-raw",
+                    tag_block="fallback-503",
+                    error_detail=str(e),
+                    block_status=503,
+                    retry_after="5",
+                    gpu_fp=gpu_fp,
+                )
+
     try:
         raw_text = await _call_gpu_device(prompt, scope)
     except _SLMUnavailable as e:
