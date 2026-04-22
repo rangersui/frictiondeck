@@ -514,10 +514,28 @@ def run_layer2():
         test("SLM-down + no Accept -> 200 fallback-raw",
              s == 200 and h.get("X-Semantic-Cache") == "fallback-raw")
 
+        # --- regression: localhost + no Authorization header reaches the
+        #     handler (was 403 before the _check_auth localhost bypass;
+        #     was an auto man-page before the base_path == matched guard
+        #     on the dispatcher). Both fixes must hold for this to pass.
+        s, h, body = _http(
+            "GET", "/shaped/home/smoke", token="",
+            headers={"Accept": "text/html", "User-Agent": "grandma/1.0 (big-font)"},
+        )
+        test("localhost no-auth GET /shaped/<world> is NOT 403",
+             s != 403, f"got HTTP {s} -- localhost bypass missing?")
+        test("localhost no-auth GET /shaped/<world> reaches plugin (X-Semantic-Cache set)",
+             bool(h.get("X-Semantic-Cache")),
+             f"handler did not run; headers={list(h.keys())} body={body[:150]!r}")
+        test("localhost /shaped/<subpath> does NOT serve auto man-page",
+             'action="/shaped"' not in body,
+             "dispatcher man-page leaked into subpath response")
+
         # --- unauthenticated request -> 403 (AUTH='auth', non-local proxy sim) --
-        # Note: localhost on 127.0.0.1 is always allowed, so we can't test
-        # the 403 branch without impersonating a remote client. Skip for now
-        # (the contract is verified by test_plugins.py's general auth suite).
+        # Note: localhost on 127.0.0.1 is always allowed (public_gate +
+        # _check_auth localhost bypass). Testing the 403 branch requires
+        # impersonating a remote client via X-Forwarded-For + TRUST_PROXY
+        # env; covered by test_plugins.py's general auth suite, not here.
 
         # --- X-Semantic-Render header is populated ---
         s, h, _ = _http(

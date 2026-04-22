@@ -303,11 +303,11 @@ def _check_auth(scope):
                 tok = a[7:]
                 if "." in tok:
                     cap = _verify_cap(tok)
-                    if cap is None: return None
+                    if cap is None: break
                     prefix, _exp, mode = cap
                     if _path_in_scope(scope.get("path", "/"), prefix):
                         return f"cap:{mode}:{prefix}"
-                    return None
+                    break
                 if APPROVE_TOKEN and _hmac.compare_digest(tok, APPROVE_TOKEN): return "approve"
                 if AUTH_TOKEN and _hmac.compare_digest(tok, AUTH_TOKEN): return "auth"
             elif a.startswith("Basic "):
@@ -317,7 +317,12 @@ def _check_auth(scope):
                     if AUTH_TOKEN and _hmac.compare_digest(pwd, AUTH_TOKEN): return "auth"
                     return _lookup_etc_auth(user, pwd)
                 except (ValueError, UnicodeDecodeError): pass
-            return None
+            break
+    # Localhost inherits the public gate's trust model: if the request
+    # originates on the machine, treat it as T2 even without a header.
+    ip = _real_ip(scope)
+    if ip.startswith("127.") or ip == "::1":
+        return "auth"
     return None
 
     # _check_url_auth — injected by url_auth plugin if installed.
@@ -668,8 +673,9 @@ async def app(scope, receive, send):
         b = body_raw.decode("utf-8", "replace")
         qs = scope.get("query_string", b"").decode()
         params = _parse_qs(qs)
-        # Man page: browser GET, no query params, handler has docstring → show form
-        if method == "GET" and not qs:
+        # Man page: browser GET to the route root, no query params,
+        # handler has docstring → show form. Subpaths should dispatch.
+        if method == "GET" and not qs and base_path == matched:
             accept = ""
             for k, v in scope.get("headers", []):
                 if k == b"accept": accept = v.decode(); break
