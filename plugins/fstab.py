@@ -79,75 +79,11 @@ class _TraversalError(Exception):
 
 
 # ====================================================================
-# fstab parsing
+# fstab parsing — shared with /dev/db via server._parse_fstab_line /
+# server._read_fstab. Grammar invariants (rsplit(None, 2), file-kind
+# default, comma-delimited opts in the mode column) live there now;
+# this plugin only defines the adapter behaviour per scheme.
 # ====================================================================
-
-def _parse_fstab_line(line):
-    """Parse one fstab line into an entry dict, or None if malformed.
-
-    Syntax (three whitespace-separated fields, right-biased):
-
-        <source>  <mount_point>  <mode>[,opt=val[,opt=val...]]
-
-    Right-bias (rsplit) preserves spaces in local source paths — e.g.
-    `/Users/ranger/Library/Application Support/Brave/Default  /mnt/brave  ro`
-    must not be mangled into "/Users/ranger/Library/Application" +
-    "Support/Brave/Default". Opts fold into the mode field via comma
-    so the parse stays three-column.
-
-    Returns:
-      {"kind":   "file" | "https" | "http" | ...,
-       "source": str,          # local path or URI body (after scheme://)
-       "name":   str,          # the "/mnt/<name>" segment, no slashes
-       "mode":   "ro" | "rw",
-       "opts":   list[str]}    # e.g. ["bearer=xyz"]; empty list if none
-    """
-    line = line.strip()
-    if not line or line.startswith("#"):
-        return None
-    parts = line.rsplit(None, 2)
-    if len(parts) != 3:
-        return None
-    source, mount, mode_with_opts = parts
-
-    mode_tokens = mode_with_opts.split(",")
-    mode = mode_tokens[0].strip().lower()
-    opts = [t.strip() for t in mode_tokens[1:] if t.strip()]
-    if mode not in ("ro", "rw"):
-        mode = "ro"
-
-    if not mount.startswith("/mnt/"):
-        return None
-    name = mount[len("/mnt/"):].strip("/")
-    if not name:
-        return None
-
-    if "://" in source:
-        scheme, rest = source.split("://", 1)
-        return {"kind": scheme.lower(), "source": rest,
-                "name": name, "mode": mode, "opts": opts}
-    # backwards-compat: absolute local path → file kind
-    return {"kind": "file", "source": source,
-            "name": name, "mode": mode, "opts": opts}
-
-
-def _read_conf():
-    """Return list of mount entries from etc/fstab."""
-    try:
-        raw = server.conn("etc/fstab").execute(
-            "SELECT stage_html FROM stage_meta WHERE id=1"
-        ).fetchone()["stage_html"]
-    except Exception:
-        return []
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", "replace")
-    entries = []
-    for line in (raw or "").splitlines():
-        e = _parse_fstab_line(line)
-        if e is not None:
-            entries.append(e)
-    return entries
-
 
 def _find_mount(entries, name):
     """Return entry by mount name, or None."""
@@ -372,7 +308,7 @@ async def handle(method, body, params):
     path = scope.get("path", "/mnt")
     rest = path[len("/mnt"):].strip("/")
 
-    entries = _read_conf()
+    entries = server._read_fstab()
 
     # /mnt/ (no tail) — listing. Shape preserved from v0.1 exactly.
     if not rest:

@@ -66,6 +66,7 @@ def _logical_name(disk):
     """Filesystem dir name → world name. %2F → /."""
     return disk.replace("%2F", "/")
 _CT = {"html":"text/html","htm":"text/html","txt":"text/plain","plain":"text/plain",
+       "csv":"text/csv","tsv":"text/tab-separated-values",
        "css":"text/css","js":"text/javascript","json":"application/json",
        "png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg","gif":"image/gif",
        "svg":"image/svg+xml","webp":"image/webp","ico":"image/x-icon",
@@ -505,6 +506,98 @@ def conn(name):
         _db[name] = c
     return _db[name]
 
+
+# ── /etc/fstab shared parsing ──────────────────────────────────
+#
+# Lifted up from plugins/fstab.py so /dev/db and any future consumer
+# (e.g. /shaped/mnt/* pre-validation) can eat the same entry shape
+# the /mnt/ plugin produces. Grammar invariants are load-bearing and
+# must not change without bumping the fstab contract across ALL
+# consumers at once:
+#
+#   - rsplit(None, 2) for three-field parsing — source paths with
+#     spaces (Brave profile path) depend on this.
+#   - Source with "://" is scheme-tagged; source without is "file"
+#     (backwards-compat with pre-sidecar fstab lines).
+#   - mode column folds comma-delimited opts so each adapter reads
+#     its own (bearer=xyz etc.) without widening the grammar.
+#
+# Entry shape matches the dict plugins/fstab.py already emits so
+# existing callers don't have to be rewritten.
+
+def _parse_fstab_line(line):
+    """Parse one /etc/fstab line into an entry dict, or None.
+
+    Returns:
+      {"kind":   "file" | "http" | "https" | ...,
+       "source": str,              # local path OR scheme-body after `://`
+       "name":   str,              # /mnt/<name> suffix, slashes stripped
+       "mode":   "ro" | "rw",
+       "opts":   list[str]}        # e.g. ["bearer=xyz"]
+
+    Returns None for blank lines, comment lines (`#` prefix), and
+    malformed lines. mode defaults to "ro" if the token isn't one
+    of ro/rw. Mount points that don't start with `/mnt/` are
+    rejected (None).
+    """
+    line = line.strip()
+    if not line or line.startswith("#"):
+        return None
+    parts = line.rsplit(None, 2)
+    if len(parts) != 3:
+        return None
+    source, mount, mode_with_opts = parts
+
+    mode_tokens = mode_with_opts.split(",")
+    mode = mode_tokens[0].strip().lower()
+    opts = [t.strip() for t in mode_tokens[1:] if t.strip()]
+    if mode not in ("ro", "rw"):
+        mode = "ro"
+
+    if not mount.startswith("/mnt/"):
+        return None
+    name = mount[len("/mnt/"):].strip("/")
+    if not name:
+        return None
+
+    if "://" in source:
+        scheme, rest = source.split("://", 1)
+        return {"kind": scheme.lower(), "source": rest,
+                "name": name, "mode": mode, "opts": opts}
+    return {"kind": "file", "source": source,
+            "name": name, "mode": mode, "opts": opts}
+
+
+def _read_fstab():
+    """Return the full list of parsed fstab entries.
+
+    Reads the etc/fstab world's stage_html column and runs every
+    non-blank non-comment line through _parse_fstab_line. Invalid
+    lines drop silently — same forgiving-on-read policy /mnt/ has
+    always had; the permission model is "who can PUT /etc/fstab",
+    not "who can pass a grammar check."
+
+    Returns [] if etc/fstab doesn't exist yet, is unreadable, or
+    contains only blank/comment/malformed lines. Callers treat an
+    empty list the same way they'd treat a missing fstab — "no
+    mounts are defined" — so no separate signalling is needed.
+    """
+    try:
+        raw = conn("etc/fstab").execute(
+            "SELECT stage_html FROM stage_meta WHERE id=1"
+        ).fetchone()["stage_html"]
+    except Exception:
+        return []
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    entries = []
+    for line in (raw or "").splitlines():
+        e = _parse_fstab_line(line)
+        if e is not None:
+            entries.append(e)
+    return entries
+
+
 def log_event(name, etype, payload=None):
     c = conn(name); p = json.dumps(payload or {}, ensure_ascii=False)
     row = c.execute("SELECT hmac FROM events ORDER BY id DESC LIMIT 1").fetchone()
@@ -869,8 +962,10 @@ async def app(scope, receive, send):
             for d in sorted(DATA.iterdir()):
                 if d.is_dir() and (d / "universe.db").exists():
                     name = _logical_name(d.name)
-                    r = conn(name).execute("SELECT version,updated_at,state FROM stage_meta WHERE id=1").fetchone()
-                    entry = {"name": name, "version": r["version"], "updated_at": r["updated_at"]}
+                    r = conn(name).execute("SELECT version,updated_at,state,ext FROM stage_meta WHERE id=1").fetchone()
+                    entry = {"name": name, "version": r["version"],
+                             "updated_at": r["updated_at"],
+                             "ext": r["ext"] or "plain"}
                     # state is /lib-scoped semantics (pending/active/disabled).
                     # Non-lib worlds have the column (default 'pending') but
                     # the field is meaningless outside /lib — don't surface it

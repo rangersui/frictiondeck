@@ -57,60 +57,34 @@ def _resolve_mnt(file_path):
 
     Returns a (status, value) pair:
       ("ok",        Path)        — file mount, path resolved
-      ("unknown",   None)        — no /mnt/<name> in fstab
-      ("no_fstab",  None)        — /etc/fstab world not created yet
+      ("unknown",   None)        — no /mnt/<name> in fstab (or fstab
+                                   empty / missing — same meaning to
+                                   the caller: "that mount isn't there")
       ("wrong_kind", kind_str)   — mount exists but kind != "file"
       ("traversal", None)        — resolved path escaped mount root
-    """
-    # Read etc/fstab for mount definitions
-    fstab_db = _DATA / "etc%2Ffstab" / "universe.db"
-    if not fstab_db.exists():
-        return ("no_fstab", None)
-    try:
-        c = sqlite3.connect(str(fstab_db))
-        c.row_factory = sqlite3.Row
-        raw = c.execute("SELECT stage_html FROM stage_meta WHERE id=1").fetchone()["stage_html"]
-        c.close()
-    except Exception:
-        return ("no_fstab", None)
-    if isinstance(raw, bytes):
-        raw = raw.decode("utf-8", "replace")
 
+    Grammar parsing is delegated to server._read_fstab so /dev/db and
+    /mnt/ always agree on what an fstab line means. No private copy
+    of rsplit(None, 2) / scheme-detection / comma-opt handling lives
+    here anymore — if the contract changes, one place changes.
+    """
     # First segment of file_path is the mount name — same segmentation
-    # rule fstab uses (/mnt/<name>/<rest_path>).
+    # rule /mnt/ uses (/mnt/<name>/<rest_path>).
     first_slash = file_path.find("/")
     if first_slash < 0:
         want_name, want_rest = file_path, ""
     else:
         want_name, want_rest = file_path[:first_slash], file_path[first_slash + 1:]
 
-    # Parse fstab: <source>  /mnt/<name>  <mode>[,opts...]
-    # Match on name first so we can return wrong_kind vs unknown
-    # accurately — a bare startswith-scan on the original string would
-    # let a file mount partially shadow a similarly-named http mount.
-    for line in (raw or "").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
+    # Match on name first so wrong_kind vs unknown stays accurate — a
+    # bare startswith-scan on the raw source string would let a file
+    # mount partially shadow a similarly-named http mount.
+    for entry in server._read_fstab():
+        if entry["name"] != want_name:
             continue
-        parts = line.rsplit(None, 2)
-        if len(parts) < 3:
-            continue
-        source, mount_point, _mode = parts
-        name = mount_point.replace("/mnt/", "").strip("/")
-        if not name or name != want_name:
-            continue
-
-        # Found the mount by name. Determine kind.
-        if "://" in source:
-            kind = source.split("://", 1)[0].lower()
-        else:
-            kind = "file"
-
-        if kind != "file":
-            return ("wrong_kind", kind)
-
-        # file-kind: resolve with traversal guard.
-        local_path = source
+        if entry["kind"] != "file":
+            return ("wrong_kind", entry["kind"])
+        local_path = entry["source"]
         full = os.path.normpath(os.path.join(local_path, want_rest))
         try:
             if os.path.commonpath([full, os.path.normpath(local_path)]) != os.path.normpath(local_path):
@@ -192,8 +166,9 @@ async def handle_db(method, body, params):
         elif status == "traversal":
             return {"error": f"path traversal: {file_path}", "_status": 403}
         else:
-            # "unknown" or "no_fstab" — both "the mount isn't there"
-            # from the caller's perspective.
+            # "unknown" — mount name not in /etc/fstab (or fstab empty,
+            # which server._read_fstab reports as an empty list — same
+            # meaning to the caller).
             return {"error": (f"mount not found: "
                               f"'{file_path.split('/', 1)[0]}'. "
                               f"Check /etc/fstab."),
