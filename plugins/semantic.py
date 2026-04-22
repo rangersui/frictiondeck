@@ -1038,7 +1038,18 @@ async def _stream_shape(prompt: str, scope, cache_key: str, gpu_fp: str,
     # Validate against Accept. SLM output-mismatch (the 406 case in
     # non-stream) cannot change status mid-stream — emit an error
     # event instead, no cache write.
-    if not stream_errored and body_out and _accept_allows(accept_list, slm_ct):
+    #
+    # An empty body_out with an Accept-admissible slm_ct is a
+    # legitimate success: SYSTEM_PROMPT explicitly permits 'empty
+    # body + text/plain + shape unrenderable' when the model cannot
+    # render the source into the requested shape. Caching that empty
+    # result is correct — it short-circuits future identical
+    # requests instead of re-prompting the SLM for the same
+    # impossible render. _read_cached already distinguishes an
+    # empty-body cache hit from the default empty-row miss via its
+    # updated_at check, so the write side is safe. Only
+    # stream_errored and Accept-admissibility gate the success path.
+    if not stream_errored and _accept_allows(accept_list, slm_ct):
         try:
             _write_cached(cache_key, body_out, slm_ct, shape)
             _evict_if_over_cap()

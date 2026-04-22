@@ -99,6 +99,14 @@ _CANNED = {
     ],
     # Tokens that contain embedded newlines (for multi-line data: framing)
     "newlines": ["row1\nrow2", "\nrow3"],
+    # Empty shaped output: SYSTEM_PROMPT lets the SLM return an empty
+    # body when the source cannot be rendered into REQUIRED_CONTENT_TYPE.
+    # The tokens here declare text/plain + shape=unrenderable with
+    # zero content bytes. Expected: /shaped/* treats this as success,
+    # caches the empty body, event: done carries meta, NO event: error.
+    "unrenderable": [
+        '\n===META===\n{"content_type":"text/plain","shape":"unrenderable"}',
+    ],
 }
 
 
@@ -453,6 +461,49 @@ def run():
         test("/shaped/* done event carries parsed meta JSON",
              len(done) == 1 and "text/plain" in done[0]["data"],
              f"done={done}")
+
+        # ---- empty-body shape is valid success --------------------
+        # SYSTEM_PROMPT explicitly permits 'empty body + text/plain
+        # + shape=unrenderable' as a legitimate response when the
+        # source cannot be rendered into the requested shape. A
+        # previous bug in _stream_shape forced this through the
+        # error branch because `body_out and ...` required body
+        # truthiness — an empty but Accept-admissible shape was
+        # treated as a mismatch. Regression guard: the response
+        # must be success (event: done with meta, no event: error)
+        # AND the empty body must reach the cache so a second
+        # request short-circuits instead of re-prompting the SLM.
+        test("seed /home/empty-shape",
+             _write_world("/home/empty-shape", "unrenderable",
+                          ext="plain"))
+        s, h, raw = _http(
+            "GET", "/shaped/home/empty-shape", token=TOKEN,
+            headers={"Accept": "text/event-stream, text/plain"},
+            timeout=20)
+        frames = _parse_sse(raw)
+        err = [f for f in frames if f["event"] == "error"]
+        done = [f for f in frames if f["event"] == "done"]
+        data = [f for f in frames if f["event"] == "message"]
+        test("/shaped/* empty-body shape -> 200 generated (not error)",
+             s == 200
+             and (h.get("x-semantic-cache") or "") == "generated"
+             and len(err) == 0,
+             f"s={s} x-sem-cache={h.get('x-semantic-cache')!r} err={err}")
+        test("/shaped/* empty-body shape: zero data frames",
+             len(data) == 0, f"data={data}")
+        test("/shaped/* empty-body shape: done carries parsed meta",
+             len(done) == 1 and "unrenderable" in done[0]["data"],
+             f"done={done}")
+        # Second hit must be cache-hit — proves the empty body was
+        # written to cache, not dropped.
+        s, h, _ = _http(
+            "GET", "/shaped/home/empty-shape", token=TOKEN,
+            headers={"Accept": "text/event-stream, text/plain"},
+            timeout=20)
+        test("/shaped/* empty-body shape: second hit is cached",
+             s == 200
+             and (h.get("x-semantic-cache") or "") == "hit",
+             f"s={s} x-sem-cache={h.get('x-semantic-cache')!r}")
 
         # ---- cache hit fake-stream --------------------------------
         # Hit /shaped/home/with-meta again: should now be cache-hit
