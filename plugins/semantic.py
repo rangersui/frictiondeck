@@ -296,18 +296,46 @@ def _ext_to_ct(ext: str) -> str:
     return server._CT.get(ext or "plain", "text/plain")
 
 
+class _MountAdapterError(Exception):
+    """The /mnt adapter returned a non-2xx status for a mounted source.
+    Carries the original status so handle() can surface the real cause
+    instead of collapsing to a misleading 404 'world not found'.
+
+    Distinguishes three things that used to all look the same to
+    /shaped/ callers:
+      - "mount not in fstab"           -> 404 via mount handler
+      - "file/object not in mount"     -> 404 via adapter
+      - "adapter reached but failed"   -> 413/500/501/502/503 via adapter
+
+    All three previously collapsed to None -> 'world not found' 404
+    at the /shaped/ boundary; the adapter's status is now preserved."""
+    def __init__(self, status: int, error: str = ""):
+        super().__init__(error or f"mount adapter returned {status}")
+        self.status = status
+        self.error = error or f"mount adapter returned {status}"
+
+
 async def _read_via_fstab(mnt_path: str):
     """In-process call into /mnt/<mnt_path>. No HTTP loopback.
 
-    Returns (body_bytes, version_token, source_ct) on success, else
-    None (treated as 404 upstream). Uses server._plugins to locate the
-    fstab handler — same pattern _call_gpu_device uses for /dev/gpu.
+    Success: returns (body_bytes, version_token, source_ct). Version
+    token is "mount:<X-Mount-Version>" when the adapter sets that
+    header (file: mtime:<ns>, https: etag:<val> or len=...;head=);
+    fallback is "mount:unknown" for adapters that don't carry a
+    version.
 
-    Version token is "mount:<X-Mount-Version>" when the adapter sets
-    that header (file: mtime:<ns>, https: etag:<val> or len=...;head=).
-    Fallback is "mount:unknown" for adapters that don't carry a
-    version — the cache key then pins on body-hash inside the adapter
-    response rather than a stable token.
+    Adapter failure (status >= 400): raises _MountAdapterError with
+    the original status + fstab's error message. Caller (handle())
+    surfaces both via the /shaped/ response so a 413 stays 413, a 501
+    stays 501, and "upstream exploded" doesn't read as "world not
+    found." Codex actually reproduced the old flatten-to-404
+    behaviour against /mnt/remote/boom, /big, and /unk/anything —
+    this path used to hide all three.
+
+    None return is reserved for cases where we genuinely cannot
+    produce a status code: fstab plugin not installed, mount handler
+    returned a non-dict, or returned 200 with no body. Those fall
+    through to the /shaped/ handler's generic 404.
     """
     mnt_handler = server._plugins.get("/mnt")
     if mnt_handler is None:
@@ -321,13 +349,16 @@ async def _read_via_fstab(mnt_path: str):
     }
     try:
         result = await mnt_handler("GET", "", {"_scope": fake_scope})
-    except Exception:
-        return None
+    except Exception as e:
+        # Handler crashed. Surface as 500 so /shaped/ doesn't pretend
+        # the source is missing — it's the dispatcher that misbehaved.
+        raise _MountAdapterError(500, f"mount handler crashed: {e}")
     if not isinstance(result, dict):
         return None
     status = result.get("_status", 200)
     if status >= 400:
-        return None                           # 404 / 501 / 502 / 413
+        raise _MountAdapterError(
+            status, str(result.get("error") or f"adapter returned {status}"))
     body = result.get("_body")
     if body is None:
         return None
@@ -805,7 +836,18 @@ async def handle(method, body, params):
     #    world store (existing behaviour) and /mnt/* mounts declared
     #    in /etc/fstab (sidecar Phase 1). Same (body, version, ct)
     #    shape both ways, so the rest of handle() stays source-agnostic.
-    src = await _read_source(world_name)
+    #
+    #    _MountAdapterError is the adapter's way of saying "source
+    #    exists but I couldn't fetch it" (upstream 500, cap trip 413,
+    #    unknown scheme 501, etc.). We surface the original status
+    #    instead of collapsing to a generic 404 — the distinction
+    #    between "path does not exist" and "source resolution failed"
+    #    is load-bearing for /shaped/ debugging.
+    try:
+        src = await _read_source(world_name)
+    except _MountAdapterError as e:
+        return {"_status": e.status,
+                "error": f"mount adapter: {e.error}"}
     if src is None:
         return {"_status": 404, "error": f"world not found: {world_name}"}
     body_src, version_token, source_ct = src

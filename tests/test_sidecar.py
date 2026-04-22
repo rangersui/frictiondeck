@@ -522,6 +522,41 @@ def run():
                  s == 200, f"got {s}")
             test("/shaped/mnt/<http>/* delivers upstream bytes",
                  body == b"pong", f"body={body!r}")
+
+            # ---- adapter-failure status propagation (P2 regression) --
+            # The old _read_via_fstab flattened every non-2xx adapter
+            # result into None, which handle() then turned into a 404
+            # "world not found". Codex reproduced this against the
+            # three endpoints below — all three used to surface as
+            # 404 even though the underlying failure was 500 / 413 /
+            # 501. With _MountAdapterError in place, each adapter
+            # status propagates through /shaped/ unchanged.
+            s, _, body = _http(
+                "GET", "/shaped/mnt/remote/boom", token=TOKEN,
+                headers={"Accept": "text/plain"})
+            test("/shaped/mnt/* preserves upstream 500 (not 404)",
+                 s == 500, f"got {s} body={body[:160]!r}")
+
+            s, _, body = _http(
+                "GET", "/shaped/mnt/remote/big", token=TOKEN,
+                headers={"Accept": "text/plain"})
+            test("/shaped/mnt/* preserves adapter 413 (not 404)",
+                 s == 413, f"got {s} body={body[:160]!r}")
+
+            s, _, body = _http(
+                "GET", "/shaped/mnt/unk/anything", token=TOKEN,
+                headers={"Accept": "text/plain"})
+            test("/shaped/mnt/* preserves unknown-scheme 501 (not 404)",
+                 s == 501, f"got {s} body={body[:160]!r}")
+
+            # Unknown mount name still 404s — that IS a legitimate
+            # "path does not resolve" case, not an adapter failure,
+            # so the generic 404 branch (src is None) still fires.
+            s, _, body = _http(
+                "GET", "/shaped/mnt/not-a-mount/x", token=TOKEN,
+                headers={"Accept": "text/plain"})
+            test("/shaped/mnt/<unknown>/* -> 404 (unknown mount)",
+                 s == 404, f"got {s} body={body[:160]!r}")
     finally:
         _stop_elastik(proc, tmp_root)
         try: upstream.shutdown()
