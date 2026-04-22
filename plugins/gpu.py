@@ -408,8 +408,23 @@ async def handle(method, body, params):
         return {"error": "no /etc/gpu.conf — write one: scheme://endpoint",
                 "_status": 503}
 
+    # _dispatch is sync and spends most of its wall-clock inside
+    # _post_json's blocking urllib.request.urlopen + full-body read.
+    # Awaiting it directly in this async handler (the pre-refactor
+    # shape) stalled the event loop for the entire model round-trip —
+    # no other request could be served while the SLM was thinking.
+    # asyncio.to_thread runs the sync call on the loop's default thread
+    # pool and yields back here when the backend returns. Zero
+    # protocol change: _dispatch itself, _post_json's urllib usage,
+    # the response-envelope shape, the audit event, and the
+    # 502-on-exception mapping all stay byte-for-byte the same.
+    # Exceptions propagate out of the thread and are caught here as
+    # if _dispatch had raised synchronously (asyncio.to_thread does
+    # the right thing there). /dev/gpu/stream is untouched — its
+    # blocking is already wrapped per-readline inside the streamers.
     try:
-        text = _dispatch(scheme, endpoint, prompt, params.get("model"))
+        text = await asyncio.to_thread(
+            _dispatch, scheme, endpoint, prompt, params.get("model"))
     except urllib.error.HTTPError as e:
         try:
             detail = e.read().decode("utf-8", "replace")[:300]
