@@ -38,10 +38,12 @@ bus.key
 
 # Local-only
 openapi.json
+semantic-results.md
 
 # Binaries
 *.exe
 *.exe~
+*.pdf
 
 # mini.py test worlds
 examples/worlds/

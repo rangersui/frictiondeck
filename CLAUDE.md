@@ -366,3 +366,162 @@ A system that stores strings and renders them in a browser
 can be both a toy and an operating system.
 
 Shannon would understand.
+
+# HTTP — The Craft of Building
+
+Read the engineering manual:
+
+  HTTP The Definitive Guide.pdf
+
+Philosophy tells you what to remove.
+Shannon tells you what can be transmitted.
+HTTP tells you how systems meet.
+
+This is the engineering layer.
+
+## On methods
+
+Method is meaning.
+
+GET is retrieval.
+PUT is replacement.
+POST is mutation when the shape of the mutation matters more than the final state.
+DELETE is deletion.
+HEAD is stat().
+
+Do not tunnel actions through nouns if the method already says the action.
+
+`PUT /home/work` is correct.
+`POST /api/v2/upsertWorkItem` is fear disguised as design.
+
+## On status codes
+
+The status code is part of the interface, not decoration.
+
+200 means the thing happened.
+206 means only part of it happened.
+304 means nothing changed.
+400 means the request is malformed.
+403 means the request is understood and refused.
+404 means there is no resource there.
+406 means the representation could not satisfy the request.
+409 means state conflict.
+412 means a precondition failed.
+429 means the protocol must slow down.
+503 means the service cannot do the work right now.
+
+Do not collapse different failures into one status because the body can explain it.
+The code is for machines. The body is for humans.
+
+## On headers
+
+Headers are not side chatter. They are the protocol surface.
+
+`Content-Type` tells the receiver what this is.
+`Content-Length` tells the receiver how much it is.
+`Range` and `Content-Range` let transfer be partial without lying.
+`WWW-Authenticate` teaches the client how to come back.
+`Retry-After` teaches the client when to come back.
+`Vary` tells caches what actually changes the representation.
+
+If the body does all the talking, your protocol is mute.
+
+## On representation
+
+A resource is not its representation.
+
+The thing stored is one thing.
+The bytes served to this client, in this moment, under these headers, are another.
+
+This is why `/home/x?raw`, `/home/x`, `/stream/x`, and `/shaped/x`
+can all be honest at once.
+One world. Many representations.
+
+Do not confuse the stored bytes with the served shape.
+That confusion is the source of most bad API design.
+
+## On content negotiation
+
+Content negotiation is where the server proves it understands HTTP.
+
+The client asks for a representation.
+The server either provides one or says no.
+
+`Accept` is not a suggestion.
+It is a constraint.
+
+If the server can satisfy it, return the representation.
+If it cannot, return 406.
+If the renderer is down, return 503.
+If the caller is too fast, return 429.
+
+Do not silently return "close enough."
+That is how protocols rot.
+
+## On intermediaries
+
+The Web is not client and server. It is clients, servers, proxies, gateways,
+caches, tunnels, and things pretending to be all five.
+
+Build so intermediaries can survive.
+
+If a proxy sees your response, it should still make sense.
+If a cache sees your validator, it should still make sense.
+If a gateway translates your bytes, the semantics should still hold.
+
+This is why HTTP outlived so many more elegant systems:
+it assumes the middle exists.
+
+## On caching
+
+Caching is not an optimization. It is part of the protocol.
+
+If the same request under the same representation inputs returns the same thing,
+that is cacheable knowledge.
+
+If a changed input does not change the cache key, the bug is semantic.
+If an unchanged input misses cache, the bug is waste.
+
+Do not cache only by URL when headers shape the answer.
+This is how one client receives another client's reality.
+
+## On transfer
+
+Do not know the length? Stream.
+Know the length? Say it.
+
+If the response is live, use a live transfer surface.
+If the response is complete, use a complete response.
+
+Chunked transfer is honesty.
+`Content-Length` is honesty.
+Lying about either is how clients hang.
+
+## On authoring
+
+WebDAV was right about one thing:
+HTTP is not only for reading pages.
+It is also for editing worlds.
+
+The filesystem and the protocol are not enemies.
+They are two views of the same machine.
+
+This is why `/dav/` belongs here.
+And this is why "pastebin plus WebDAV plus AI" is still one system,
+not three products awkwardly taped together.
+
+## On engineering taste
+
+Good engineering is not adding intelligence everywhere.
+It is putting semantics in the one place where they can stay coherent.
+
+In elastik:
+
+- storage stays dumb
+- devices stay blind
+- auth stays at the gate
+- HTTP carries the contract
+- representation is where thought enters
+
+That is not minimalism as aesthetics.
+It is minimalism as protocol hygiene.
