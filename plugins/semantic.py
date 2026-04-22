@@ -13,8 +13,15 @@ Full design + rationale: PLAN-semantic-http.md at repo root.
 
     SLM unavailable (/dev/gpu not installed / /etc/gpu.conf missing /
     backend unreachable):
-      * Accept permits text/plain (incl "*/*") -> 200 fallback-raw, no cache
-      * Accept excludes text/plain             -> 406 fallback-406, no cache
+      * text/plain is top-q preference (or wildcard) -> 200 fallback-raw,
+                                                        no cache
+      * text/plain NOT top-q                         -> 503 fallback-503
+                                                        + Retry-After, no cache
+
+    Both branches keep the 406 output-mismatch semantics above — 503
+    specifically means "the renderer can't serve this right now";
+    406 specifically means "the renderer ran but produced a MIME you
+    refused." Distinct status codes for distinct failure modes.
 
     Rate cap (SEMANTIC_GEN_CAP_PER_MIN, default 60, sliding 60s window):
       * Exhausted + Accept permits text/plain -> 200 ratelimit-raw, no cache
@@ -696,9 +703,18 @@ def _cache_key(world_name: str, version: int, ua: str,
 
 class _SLMUnavailable(Exception):
     """Raised when /dev/gpu is not registered, /etc/gpu.conf is missing,
-    or the configured backend returns an error. Caller decides whether
-    this degrades to 200 fallback-raw or 406 fallback-406 based on
-    Accept."""
+    or the configured backend returns an error. Caller degrades via
+    _accept_gated_fallback, which picks the response based on whether
+    text/plain is the client's top-q preference:
+
+      * text/plain top-q (incl wildcards) -> 200 fallback-raw, raw
+                                             source bytes, no cache
+      * otherwise                         -> 503 fallback-503,
+                                             Retry-After, no cache
+
+    503 is distinct from the SLM-ran-but-output-mismatched-Accept
+    case (which stays 406) — service availability vs content
+    negotiation are genuinely different failure modes."""
 
 
 def _safe_source(body) -> str:

@@ -271,8 +271,8 @@ $env:ELASTIK_APPROVE_TOKEN="your-t3-token"
 | `plugins/example.py` | `/example` | 13-line template — `AUTH`, `ROUTES`, `handle()` contract |
 | `plugins/reality.py` | `/__reality__`, `/self` | self-replicator — data tar.gz + source tar.gz |
 | `plugins/gpu.py` | `/dev/gpu` | AI as a device. Backend from `/etc/gpu.conf` (ollama / openai / claude / deepseek / vast) |
-| `plugins/fstab.py` | `/mnt/*` | Mount local directories under `/mnt/`. Mount table in `/etc/fstab`. |
-| `plugins/db.py` | `/dev/db` | Read-only SQL over worlds or `/mnt/`-mounted SQLite files |
+| `plugins/fstab.py` | `/mnt/*` | Mount local directories AND external sources (https, http) under `/mnt/`. Mount table in `/etc/fstab`. Per-scheme adapters in the plugin. |
+| `plugins/db.py` | `/dev/db` | Read-only SQL over worlds or **file-kind** `/mnt/*` mounts. http(s) mounts reject with 400. |
 | `plugins/fanout.py` | `/dev/fanout` | Broadcast one write to N worlds. Target list in `/etc/fanout.conf` |
 | `plugins/semantic.py` | `/shaped/*` | Accept / User-Agent driven shape renderer. Delegates to `/dev/gpu`. See `PLAN-semantic-http.md`. |
 
@@ -293,10 +293,12 @@ rather than being part of the minimal blind primitive base.
 
 ### Mount anything
 
-`plugins/fstab.py` mounts local directories under `/mnt/*`, so files
-that live outside elastik (your projects folder, a browser history
-SQLite, Excel `.xlsm`, images, a music library) become readable via
-elastik's HTTP surface.
+`plugins/fstab.py` mounts **any URI scheme with a registered adapter**
+under `/mnt/*`. Phase 1 ships `file` (local directories) and `http` /
+`https` (remote HTTP endpoints). Files that live outside elastik —
+your projects folder, a browser history SQLite, an internal JSON API,
+Excel `.xlsm`, images, a music library — all become readable through
+elastik's HTTP surface via one uniform `/mnt/<name>/<path>` form.
 
 Install first (it is a plugin, not core):
 
@@ -304,31 +306,61 @@ Install first (it is a plugin, not core):
 ./plugins/install.sh fstab
 ```
 
-Then write `/etc/fstab` — one line per mount, `local_path /mnt/name mode`:
+Then write `/etc/fstab` — one line per mount, `source  /mnt/name  mode[,opts]`:
 
 ```bash
 curl -X PUT http://localhost:3005/etc/fstab \
   -H "Authorization: Bearer $ELASTIK_APPROVE_TOKEN" \
   --data-binary @- <<'EOF'
-/Users/ranger/projects  /mnt/work  rw
-/home/ranger/docs       /mnt/docs  ro
+/Users/ranger/projects  /mnt/work   rw
+/home/ranger/docs       /mnt/docs   ro
 /Users/ranger/Library/Application Support/BraveSoftware/Brave-Browser/Default  /mnt/brave  ro
+https://api.example.com  /mnt/api   ro,bearer=xyz
+http://10.0.0.5:8080     /mnt/intra ro
 EOF
 ```
+
+Source column syntax:
+- **absolute local path** → `file` adapter (backwards-compatible with pre-v0.2 fstab)
+- **`scheme://endpoint`** → looked up in fstab's adapter table (`https`, `http` today; `postgres` / `s3` / `redis` in later phases)
+
+Mode column accepts comma-delimited opts. `ro` / `rw` is the mode;
+anything after the first comma is adapter-specific. The https adapter
+reads `bearer=<value>` and attaches it as the upstream `Authorization`
+header so `/mnt/api` can front an authenticated API without leaking
+the token to clients.
+
+Path with spaces (load-bearing example — Brave's profile path): the
+parser right-biases on `rsplit(None, 2)` so the mount-point and mode
+fields are always the last two whitespace-separated tokens; everything
+before them is one source path regardless of internal whitespace.
 
 Once mounted:
 
 ```bash
-curl http://localhost:3005/mnt/                  # list mounts
-curl http://localhost:3005/mnt/work/             # directory listing
-curl http://localhost:3005/mnt/brave/History     # read a file (Brave's SQLite history)
+curl http://localhost:3005/mnt/                  # list mounts (all kinds)
+curl http://localhost:3005/mnt/work/             # directory listing (file)
+curl http://localhost:3005/mnt/brave/History     # read a file (file, raw bytes)
+curl http://localhost:3005/mnt/api/users/42      # proxy GET to https upstream
 ```
 
-`rw` mounts accept POST; `ro` mounts are GET-only. Writing to
-`/etc/fstab` requires T3 (approve) — that IS the permission model:
-what can enter the tree is decided by who can write the mount table.
+Response headers:
+- `Content-Type` — inferred from extension for file mounts; proxied from upstream for http(s)
+- `X-Mount-Version` — `mtime:<ns>` for file; `etag:<value>` or `len=N;head=<hex>` for http(s)
 
-**Composes with `/dev/db`** for SQL over any external SQLite:
+`rw` mounts accept POST (file-kind only, write requires T2 auth);
+`ro` mounts are GET-only. https mounts are read-only in Phase 1
+regardless of mode (a POST to an http mount rejects with 405 before
+the upstream is contacted). http(s) reads are capped at 5 MB per
+response — /mnt/ is an unauthenticated surface (`AUTH="none"`) and
+an uncapped proxy would let any declared remote mount pull arbitrary
+bytes into memory.
+
+Writing to `/etc/fstab` requires T3 (approve) — that IS the permission
+model: what can enter the tree is decided by who can write the mount
+table.
+
+**Composes with `/dev/db`** for SQL over any file-kind external SQLite:
 
 ```bash
 ./plugins/install.sh db
@@ -340,6 +372,16 @@ curl -X POST "http://localhost:3005/dev/db?file=brave/History" \
 `?file=brave/History` resolves against the mount table: `brave/...`
 means "the file at this path under whatever local directory `/mnt/brave`
 points to." Read-only connection enforced at the SQLite layer.
+
+**`/dev/db` only accepts file-kind mounts.** SQLite can only open local
+files; an https mount pointed at `?file=api/whatever` rejects with a
+clean 400 naming the scheme — use `/mnt/<name>/<path>` for raw bytes
+over the adapter instead. Status matrix:
+
+- `?file=<file-mount>/<path>` → `200` if path exists, `404` if not
+- `?file=<http-mount>/<path>` → `400` wrong kind
+- `?file=<unknown-mount>/...` → `404` mount missing
+- path traversal (`..`) → `403`
 
 Any source-changing PUT resets `state=pending`, so approval re-binds to
 the new source hash. The chain records `stage_written` (with

@@ -22,11 +22,11 @@ Rule of thumb:
 |---|---|---|
 | `example.py` | `/example` | smallest Tier 1 specimen; template for a route plugin |
 | `reality.py` | `/__reality__`, `/self` | self-replication — data tar.gz + source tar.gz |
-| `gpu.py` | `/dev/gpu` | blind AI device; backend from `/etc/gpu.conf` |
-| `fstab.py` | `/mnt/*` | blind mount of local directories; mount table in `/etc/fstab` |
-| `db.py` | `/dev/db` | read-only SQL over worlds or fstab-mounted SQLite files |
+| `gpu.py` | `/dev/gpu`, `/dev/gpu/stream` | blind AI device + SSE streaming sibling; backend from `/etc/gpu.conf`; three wire formats (ollama NDJSON / openai-compat SSE / claude named-event SSE) unified behind one token-iterator contract |
+| `fstab.py` | `/mnt/*` | blind mount of **any registered URI scheme** (file + http/https in Phase 1; postgres/s3/redis in later phases); mount table in `/etc/fstab`; per-scheme adapters in the plugin |
+| `db.py` | `/dev/db` | read-only SQL over worlds or **file-kind** fstab mounts; non-file mounts (http/https/…) reject with 400 — use `/mnt/<name>/<path>` for raw bytes |
 | `fanout.py` | `/dev/fanout` | broadcast one write to N worlds; target list in `/etc/fanout.conf` |
-| `semantic.py` | `/shaped/*` | Accept/User-Agent driven shape renderer; delegates to `/dev/gpu` |
+| `semantic.py` | `/shaped/*` | Accept/User-Agent driven shape renderer; `text/event-stream` in Accept triggers SSE outer transport with inner MIME picked from the rest of the list; delegates to `/dev/gpu` (one-shot) or `/dev/gpu/stream` |
 
 `gpu` / `fstab` / `db` / `fanout` form a **machine-primitives set** —
 blind device, blind mount, blind query, blind broadcast. Each has a
