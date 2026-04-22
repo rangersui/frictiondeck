@@ -426,10 +426,17 @@ def _parse_accept(hdr: str):
         part = part.strip()
         if not part:
             continue
+        # RFC 7231 §5.3.2 says the wildcard form is */*, not bare *.
+        # Clients occasionally send *; treat it as */* so we don't 406
+        # on something everyone agrees means "give me anything."
+        if part == "*":
+            part = "*/*"
         mime, q = part, 1.0
         if ";" in part:
             bits = part.split(";")
             mime = bits[0].strip()
+            if mime == "*":
+                mime = "*/*"
             for b in bits[1:]:
                 b = b.strip()
                 if b.startswith("q="):
@@ -460,6 +467,35 @@ def _accept_allows(accept_list, candidate_ct: str) -> bool:
             if mime[:-2] == cand_family:
                 return True
     return False
+
+
+def _text_plain_is_top(accept_list) -> bool:
+    """Is text/plain the client's top-ranked admissible preference?
+
+    True iff one of:
+      - accept_list empty (missing Accept parses to [("*/*", 1.0)])
+      - top entry is */* (wildcard always admits text/plain at top)
+      - top entry is text/* (family wildcard covering text/plain)
+      - top entry is literal text/plain
+
+    False iff the client expressed a stronger preference first (e.g.
+    image/png, application/json) — even if text/plain appears later
+    with q > 0. Used by _accept_gated_fallback to decide whether
+    raw text/plain is an honest fallback or a preference-violating
+    substitute. _accept_allows is too lenient for that gate: it
+    returns True whenever text/plain appears with any q > 0, which
+    means `Accept: image/png, text/plain;q=0.8` + SLM down used to
+    serve plain silently, burying the client's stated preference for
+    PNG. The top-q gate respects the ordering.
+
+    Tie-break on equal q: first occurrence wins (_parse_accept's sort
+    is stable over input order)."""
+    if not accept_list:
+        return True
+    top_mime, top_q = accept_list[0]
+    if top_q <= 0:
+        return False
+    return top_mime in ("*/*", "text/*", "text/plain")
 
 
 def _pick_required_ct(accept_list) -> str:
@@ -708,12 +744,18 @@ async def handle(method, body, params):
     try:
         raw_text = await _call_gpu_device(prompt, scope)
     except _SLMUnavailable as e:
+        # v0.2: SLM-infra failure is a service-availability problem,
+        # not an Accept-compatibility problem. 503 distinguishes it
+        # from the SLM-ran-but-output-mismatched-Accept case below
+        # (which stays 406). Retry-After nudges well-behaved clients
+        # to back off briefly rather than hammer.
         return _accept_gated_fallback(
             body_src, accept_list,
             tag_ok="fallback-raw",
-            tag_block="fallback-406",
+            tag_block="fallback-503",
             error_detail=str(e),
-            block_status=406,
+            block_status=503,
+            retry_after="5",
             gpu_fp=gpu_fp,
         )
     shaped, slm_ct, shape = _parse_slm_output(raw_text)
@@ -776,18 +818,24 @@ def _accept_gated_fallback(
     retry_after: str = "",
     gpu_fp: str = "",
 ):
-    """PLAN §6 / §9 / §11: Accept-gated fallback shared by SLM-unavailable
-    and rate-limited paths.
+    """PLAN §6 / §9 / §11 + v0.2 hardening: Accept-gated fallback
+    shared by SLM-unavailable and rate-limited paths.
 
-    * Accept permits text/plain -> 200 + raw body as text/plain,
-      cache tag = tag_ok.
-    * Accept excludes text/plain -> block_status (406 for SLM-down,
-      429 for rate-limited) + cache tag = tag_block. retry_after
-      adds a Retry-After header (useful for 429).
+    * text/plain is the client's top-q preference  -> 200 + raw body
+      as text/plain, cache tag = tag_ok.
+    * otherwise -> block_status (503 for SLM-down, 429 for
+      rate-limited) + cache tag = tag_block. retry_after adds a
+      Retry-After header.
+
+    v0.1 used _accept_allows here, which returned True for any q>0
+    on text/plain — so `Accept: image/png, text/plain;q=0.8` on an
+    SLM-down 503 path quietly served plain, violating the client's
+    stated preference for PNG. v0.2 uses _text_plain_is_top: raw is
+    honest only when the client actually asked for text first.
 
     Neither branch caches. The caller reading X-Semantic-Cache can
     distinguish fallback-raw vs ratelimit-raw vs hit vs generated."""
-    if _accept_allows(accept_list, "text/plain"):
+    if _text_plain_is_top(accept_list):
         raw = body_src.decode("utf-8", "replace") if isinstance(body_src, (bytes, bytearray)) else str(body_src)
         hdrs = [
             ("X-Semantic-Cache", tag_ok),

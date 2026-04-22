@@ -487,16 +487,23 @@ def run_layer2():
              "revenue,1200000" in body,
              f"body={body[:100]!r}")
 
-        # --- SLM-down + Accept excludes text/plain -> 406 fallback-406 --
+        # --- SLM-down + text/plain not top -> 503 fallback-503 (v0.2) --
+        # Pre-v0.2 this was 406/fallback-406. Track A moved the
+        # SLM-infra-failure path to 503 + Retry-After so clients can
+        # distinguish "service unavailable" from "Accept unsatisfiable"
+        # (the latter stays 406 on SLM-output-mismatch, tested elsewhere).
         s, h, body = _http(
             "GET", "/shaped/home/smoke", token=TOKEN,
             headers={"Accept": "text/csv", "User-Agent": "smoke/1.0"},
         )
-        test("SLM-down + Accept=text/csv -> 406", s == 406,
+        test("SLM-down + Accept=text/csv -> 503", s == 503,
              f"got {s}, body={body[:100]!r}")
-        test("SLM-down + fallback-406 cache tag",
-             h.get("X-Semantic-Cache") == "fallback-406",
+        test("SLM-down + fallback-503 cache tag",
+             h.get("X-Semantic-Cache") == "fallback-503",
              f"headers={h}")
+        test("SLM-down 503 carries Retry-After: 5",
+             h.get("Retry-After") == "5",
+             f"Retry-After={h.get('Retry-After')!r}")
 
         # --- wildcard Accept takes SLM-down fallback path too ---
         s, h, _ = _http(
@@ -537,6 +544,60 @@ def run_layer2():
         # impersonating a remote client via X-Forwarded-For + TRUST_PROXY
         # env; covered by test_plugins.py's general auth suite, not here.
 
+        # --- v0.2 regressions: fallback-raw gated by top-q + Accept `*` ---
+        # These test the semantic v0.2 hardening: raw-fallback is only
+        # offered when text/plain is the client's top preference (not
+        # merely admissible), and bare `*` in Accept is treated as */*.
+
+        # v0.2 #1: stronger preference than text/plain + SLM down -> 503
+        #          with fallback-503 tag + Retry-After: 5.
+        s, h, _ = _http(
+            "GET", "/shaped/home/smoke", token=TOKEN,
+            headers={"Accept": "image/png, text/plain;q=0.8",
+                     "User-Agent": "mixed/1.0"},
+        )
+        test("v0.2: image/png top, SLM down -> 503 fallback-503",
+             s == 503 and h.get("X-Semantic-Cache") == "fallback-503",
+             f"got HTTP {s} cache={h.get('X-Semantic-Cache')}")
+        test("v0.2: 503 carries Retry-After: 5",
+             h.get("Retry-After") == "5",
+             f"Retry-After={h.get('Retry-After')!r}")
+
+        # v0.2 #2: text/plain as top preference + SLM down -> 200 raw.
+        s, h, _ = _http(
+            "GET", "/shaped/home/smoke", token=TOKEN,
+            headers={"Accept": "text/plain, text/csv;q=0.5",
+                     "User-Agent": "plain-top/1.0"},
+        )
+        test("v0.2: text/plain top, SLM down -> 200 fallback-raw",
+             s == 200 and h.get("X-Semantic-Cache") == "fallback-raw",
+             f"got HTTP {s} cache={h.get('X-Semantic-Cache')}")
+
+        # v0.2 #3: Accept: `*` (malformed per RFC 7231 but user-friendly
+        #         to fold to */*). Request must reach the handler;
+        #         presence of X-Semantic-Cache proves dispatch happened.
+        s, h, body = _http(
+            "GET", "/shaped/home/smoke", token=TOKEN,
+            headers={"Accept": "*", "User-Agent": "malformed/1.0"},
+        )
+        test("v0.2: Accept `*` treated as */*, reaches handler",
+             bool(h.get("X-Semantic-Cache")),
+             f"no X-Semantic-Cache header -> request never dispatched; "
+             f"status={s} body={body[:120]!r}")
+
+        # v0.2 #4: text/plain;q=0 exclusion + SLM down. q=0 is stricter
+        #         than "just not top" and lands in the same 503 bucket.
+        #         The 406 branch (SLM-output-mismatch) is tested
+        #         elsewhere by design.
+        s, h, _ = _http(
+            "GET", "/shaped/home/smoke", token=TOKEN,
+            headers={"Accept": "image/png, text/plain;q=0",
+                     "User-Agent": "strict/1.0"},
+        )
+        test("v0.2: text/plain;q=0 + SLM down -> 503 (same bucket as top-q mismatch)",
+             s == 503 and h.get("X-Semantic-Cache") == "fallback-503",
+             f"got HTTP {s} cache={h.get('X-Semantic-Cache')}")
+
         # --- X-Semantic-Render header is populated ---
         s, h, _ = _http(
             "GET", "/shaped/home/smoke", token=TOKEN,
@@ -569,17 +630,18 @@ def run_layer2_ratecap():
         test("seed source (cap=1)", _seed_source())
 
         # First request with Accept=text/csv: cache miss, _may_generate
-        # burns the single budget entry, SLM call fails, returns
-        # fallback-406 (because Accept excludes text/plain). Note this
-        # IS a path where _may_generate passes -- the rate cap doesn't
-        # fire until SECOND request. So first req is a plain SLM-down
-        # fallback-406.
+        # passes (budget was 1, we just burned it), SLM call fails,
+        # returns fallback-503 (Accept=text/csv excludes text/plain,
+        # and Track A made SLM-infra-failure a 503 path). Note this
+        # IS NOT the rate-limit path -- the rate cap doesn't fire
+        # until the SECOND request. First req is a plain SLM-down
+        # fallback-503, identical to Layer 2's main block.
         s1, h1, _ = _http(
             "GET", "/shaped/home/smoke", token=TOKEN,
             headers={"Accept": "text/csv", "User-Agent": "rc1/1.0"},
         )
-        test("rate-cap burn 1: first req -> 406 (fallback-406, SLM down)",
-             s1 == 406 and h1.get("X-Semantic-Cache") == "fallback-406",
+        test("rate-cap burn 1: first req -> 503 (fallback-503, SLM down)",
+             s1 == 503 and h1.get("X-Semantic-Cache") == "fallback-503",
              f"s={s1} h={h1}")
 
         # Second request with DIFFERENT UA (so cache key differs, forces
