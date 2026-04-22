@@ -66,7 +66,6 @@ def _logical_name(disk):
     """Filesystem dir name → world name. %2F → /."""
     return disk.replace("%2F", "/")
 _CT = {"html":"text/html","htm":"text/html","txt":"text/plain","plain":"text/plain",
-       "csv":"text/csv","tsv":"text/tab-separated-values",
        "css":"text/css","js":"text/javascript","json":"application/json",
        "png":"image/png","jpg":"image/jpeg","jpeg":"image/jpeg","gif":"image/gif",
        "svg":"image/svg+xml","webp":"image/webp","ico":"image/x-icon",
@@ -978,10 +977,8 @@ async def app(scope, receive, send):
             for d in sorted(DATA.iterdir()):
                 if d.is_dir() and (d / "universe.db").exists():
                     name = _logical_name(d.name)
-                    r = conn(name).execute("SELECT version,updated_at,state,ext FROM stage_meta WHERE id=1").fetchone()
-                    entry = {"name": name, "version": r["version"],
-                             "updated_at": r["updated_at"],
-                             "ext": r["ext"] or "plain"}
+                    r = conn(name).execute("SELECT version,updated_at,state FROM stage_meta WHERE id=1").fetchone()
+                    entry = {"name": name, "version": r["version"], "updated_at": r["updated_at"]}
                     # state is /lib-scoped semantics (pending/active/disabled).
                     # Non-lib worlds have the column (default 'pending') but
                     # the field is meaningless outside /lib — don't surface it
