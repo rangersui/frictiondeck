@@ -131,6 +131,8 @@ _CANNED = {
     "not-quite-sales": "MATCH: sales-report",
     # MULTI — two /home/-backed world names, no prefix
     "report-dup":      "MULTI: sales-report, sales/summary",
+    # MULTI with a Unicode name — verifies Link header encoding
+    "multi-accent":    "MULTI: sales-report, café",
     # NONE
     "absolutely-nothing-like-a-world":
         "NONE: Nothing on this machine resembles that path.",
@@ -159,6 +161,10 @@ _CANNED = {
     # regardless of caller tier. Used to surface pool debug
     # headers for the Codex P2 regression test.
     "probe-var-cache": "MATCH: var/cache/router/fake",
+    # Unicode target for the header-encoding regression (Codex P3).
+    # Distinct ASCII needle so there's no substring collision with
+    # the "café" needle above (which maps to the plain "cafe" world).
+    "accent-target":   "MATCH: café",
 }
 
 
@@ -417,6 +423,8 @@ def run():
              _write_world("/home/scratch/notes", "notes body"))
         test("seed /home/cafe",
              _write_world("/home/cafe", "cafe body"))
+        test("seed /home/café (accented, for header-encoding test)",
+             _write_world("/home/café", "cafe body (accented)"))
         test("seed /home/mixed-case",
              _write_world("/home/mixed-case", "mixed body"))
         test("seed /home/other",
@@ -513,6 +521,24 @@ def run():
               and "home/sales/summary" in link),
              f"link={link[:300]!r}")
 
+        # §7b. MULTI with a Unicode candidate -> Link: URIs are
+        # percent-encoded per RFC 7230 (Codex P3). The HTML body
+        # keeps the accent in display text but the href attribute
+        # and Link header value are both encoded.
+        s, h, body = _http("GET", "/multi-accent-typo", token=TOKEN)
+        link = h.get("link") or ""
+        test("MULTI with UTF-8 candidate -> 300",
+             s == 300, f"got {s}")
+        test("Link header is percent-encoded for Unicode targets",
+             ("/home/sales-report" in link
+              and "/home/caf%C3%A9" in link
+              and "/home/café" not in link),
+             f"link={link[:300]!r}")
+        test("MULTI HTML body keeps human-readable accent "
+             "in display text",
+             b"caf\xc3\xa9" in body,    # UTF-8 bytes of café
+             f"body={body[:200]!r}")
+
         # §8: NONE
         s, h, body = _http("GET", "/absolutely-nothing-like-a-world",
                            token=TOKEN)
@@ -593,6 +619,25 @@ def run():
              f"got {s} loc={h.get('location')} "
              f"cache={h.get('x-semantic-route-cache')} "
              f"body={body[:120]!r}")
+
+        # §22b. Location header is RFC 7230 percent-encoded when
+        # the resolved world name contains non-ASCII characters.
+        # Codex P3: the earlier implementation emitted raw Unicode
+        # in Location / Link headers, which strict proxies reject.
+        # The canned reply for "accent-target" substring resolves
+        # to the seeded /home/café world; the Location header must
+        # be percent-encoded (/home/caf%C3%A9), while the body
+        # prose stays human-readable (text/plain; charset=utf-8
+        # permits raw UTF-8).
+        s, h, body = _http("GET", "/accent-target-typo", token="")
+        loc = h.get("location") or ""
+        test("UTF-8 resolved target -> Location is percent-encoded",
+             s == 303 and loc == "/home/caf%C3%A9",
+             f"got {s} loc={loc!r} "
+             f"cache={h.get('x-semantic-route-cache')}")
+        test("UTF-8 body stays human-readable (not encoded)",
+             "café" in body.decode("utf-8", "replace"),
+             f"body={body[:160]!r}")
 
         # Mixed-case should lowercase for cache key; same URL twice
         # with different case should share a cache entry.

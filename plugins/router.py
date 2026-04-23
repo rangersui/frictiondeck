@@ -958,16 +958,25 @@ _FHS_PREFIXES = (
 
 
 def _name_to_url(name: str) -> str:
-    """Convert an internal world name to a URL path.
+    """Convert an internal world name to a human-readable URL path.
 
       "sales-report"          -> "/home/sales-report"
       "home/sales-report"     -> "/home/sales-report"   (idempotent)
       "etc/gpu.conf"          -> "/etc/gpu.conf"
       "lib/router"            -> "/lib/router"
+      "café"                  -> "/home/café"           (raw Unicode)
 
     Matches server.py's URL-to-name canonicalisation in reverse:
     names without a known FHS prefix live in the /home/ namespace
-    and need the prefix restored for a working redirect."""
+    and need the prefix restored for a working redirect.
+
+    Return value may contain raw non-ASCII characters — use this
+    form for HTML body text and diagnostic display. For HTTP
+    header values (Location, Link, etc.), pass through
+    `_url_header_quote` so the URI gets percent-encoded per
+    RFC 7230; raw Unicode in a header URI breaks stricter proxies
+    and clients.
+    """
     clean = name.lstrip("/")
     for pfx in _FHS_PREFIXES:
         if clean == pfx.rstrip("/") or clean.startswith(pfx):
@@ -975,21 +984,42 @@ def _name_to_url(name: str) -> str:
     return "/home/" + clean
 
 
-def _response_single(target: str, cache_status: str) -> dict:
-    """303 See Other → Location: <URL path>.
+def _url_header_quote(url: str) -> str:
+    """Percent-encode a URL path for use in an HTTP header value.
 
-    Short prose body so curl users without -L see the decision;
-    Location header is what followers use. Location is a URL path
-    (FHS-restored), not the internal world name."""
-    loc = _name_to_url(target)
-    prose = (f"Redirecting to {loc} (router decided this is the "
-             f"closest match).")
+    Preserves `/` as a structural separator and `%` in case the
+    input is already partially encoded. Non-ASCII characters and
+    unsafe ASCII get UTF-8 percent-encoded via stdlib
+    urllib.parse.quote.
+
+    Header value ASCII-safety is RFC 7230's requirement; raw
+    Unicode in a `Location` or `Link` header is a standards
+    violation that strict proxies will reject. Browsers tend to
+    forgive it, but router's output shouldn't depend on browser
+    leniency.
+    """
+    import urllib.parse
+    return urllib.parse.quote(url, safe="/%")
+
+
+def _response_single(target: str, cache_status: str) -> dict:
+    """303 See Other → Location: <percent-encoded URL path>.
+
+    Body: short prose so curl users without `-L` see the decision.
+    The prose URL stays human-readable (raw Unicode OK — prose is
+    text/plain with charset=utf-8). The `Location` HEADER value
+    goes through `_url_header_quote` so non-ASCII characters get
+    percent-encoded per RFC 7230."""
+    loc_readable = _name_to_url(target)
+    loc_header   = _url_header_quote(loc_readable)
+    prose = (f"Redirecting to {loc_readable} (router decided this "
+             f"is the closest match).")
     return {
         "_status": 303,
         "_body":   prose,
         "_ct":     "text/plain; charset=utf-8",
         "_headers": [
-            ("Location", loc),
+            ("Location", loc_header),
             ("X-Semantic-Route-Cache",  cache_status),
             ("X-Semantic-Route-Source", "slm"),
         ],
@@ -1002,18 +1032,23 @@ def _response_multi(candidates, cache_status: str) -> dict:
     header per candidate so machine clients can parse without
     rendering the HTML. Max 5 candidates.
 
-    Link / href values go through `_name_to_url` so /home/-backed
-    names get their prefix restored for a routable URL."""
+    Link URI values and `<a href=...>` targets both get percent-
+    encoded via `_url_header_quote` — the href attribute is also
+    parsed as a URI reference, so the same encoding rules apply
+    there. Display text in `<li>` shows the human-readable form."""
     cut = candidates[:5]
-    links = [("Link", f'<{_name_to_url(c)}>; rel="alternate"')
-             for c in cut]
+    links = [
+        ("Link",
+         f'<{_url_header_quote(_name_to_url(c))}>; rel="alternate"')
+        for c in cut
+    ]
     html_lines = ['<!doctype html><meta charset="utf-8">',
                   '<title>Multiple Choices</title>',
                   '<h1>Multiple matches</h1>',
                   '<p>Router found more than one candidate. Pick one:</p>',
                   '<ul>']
     for c in cut:
-        href = _name_to_url(c)
+        href = _url_header_quote(_name_to_url(c))
         # escape minimal HTML specials in display text
         display = (c.replace("&", "&amp;")
                     .replace("<", "&lt;")
