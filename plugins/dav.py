@@ -1,9 +1,8 @@
-"""Built-in WebDAV surface for elastik.
+"""Opt-in WebDAV surface for elastik.
 
-This lives in plugins/ even though it is auto-registered at boot,
-because it is a server-side behaviour layer rather than core dispatch
-plumbing. Keeping it here shrinks server.py and makes the future step
-("DAV becomes fully opt-in /lib plugin") much easier.
+Install it into /lib/dav and activate it when you want /dav/*.
+Keeping DAV here, rather than in server.py core, makes the world/view
+boundary explicit and keeps the main dispatcher smaller.
 """
 
 import hashlib

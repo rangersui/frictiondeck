@@ -101,6 +101,19 @@ def http_post(port, path, body="", token="", approve="", headers=None):
         return 0, str(e)
 
 
+def install_lib_plugin(port, name, token, approve):
+    """Upload plugins/<name>.py to /lib/<name> and activate it."""
+    src_path = os.path.join(ROOT, "plugins", f"{name}.py")
+    with open(src_path, "rb") as f:
+        src = f.read()
+    st, _ = http_method(port, f"/lib/{name}", method="PUT", body=src, token=token)
+    ok_upload = st in (200, 201)
+    st2, body2 = http_method(port, f"/lib/{name}/state", method="PUT",
+                             body="active", token=approve)
+    ok_activate = st2 == 200
+    return ok_upload and ok_activate, (st, st2, body2[:120] if isinstance(body2, str) else body2)
+
+
 def wait_for_server(port, timeout=10):
     """Wait until server responds on port."""
     deadline = time.time() + timeout
@@ -230,13 +243,9 @@ def test_cgi():
 def test_python():
     print("\n=== Layer 2: Python HTTP Integration ===")
 
-    # v4.5.0 microkernel cut: no more disk plugin preinstall. The disk
-    # loader (load_plugins / _verify_plugin / plugins.lock) is gone; /lib/*
-    # is the only loader. sse + dav are now inline core routes, public_gate
-    # is inlined into server.py, and the remaining Tier 1 candidates were
-    # removed from plugins/available/ (see logs/plugins-backup/ for source).
-    # Legacy per-plugin test helpers were retired with the cut — see
-    # commit fix(tests): retire legacy Tier 1 plugin test helpers.
+    # v4.5.0 microkernel cut: no more disk plugin preinstall. /lib/* is
+    # the only loader for opt-in plugins such as dav; stream remains a
+    # built-in helper surface and public_gate is inlined into server.py.
     py_port = 13007
     py_token = "test-py-token"
     py_approve = "test-py-approve"
@@ -268,6 +277,8 @@ def test_python():
             test("Python server starts", False, "timeout waiting for server")
             return
         test("Python server starts", True)
+        ok_dav, detail_dav = install_lib_plugin(py_port, "dav", py_token, py_approve)
+        test("python plugin: install + activate /lib/dav", ok_dav, f"detail={detail_dav}")
 
         _run_auth_tests(py_port, "python", py_token, py_approve)
         _run_blob_ext_tests(py_port, "python", py_token, py_approve)

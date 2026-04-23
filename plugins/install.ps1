@@ -15,10 +15,6 @@
 #   1. PUT plugins/<name>.py  ->  /lib/<name>          (upload source)
 #   2. PUT "active"           ->  /lib/<name>/state    (activate)
 #
-# Built-in plugins are the exception:
-#   - dav is auto-registered at boot and already live at /dav/*
-#   - install.ps1 dav prints a note and does NOT upload/activate /lib/dav
-#
 # Idempotent: re-running overwrites the source + re-activates. Server
 # hot-swaps the plugin; no restart needed.
 #
@@ -118,11 +114,6 @@ function Show-PostInstallHint {
     }
 }
 
-function Test-BuiltInPlugin {
-    param([string]$Name)
-    return $Name -in @('dav')
-}
-
 function Install-One {
     param([string]$Name)
 
@@ -141,13 +132,6 @@ function Install-One {
         Write-Host "  auth:   (no token -- works only on localhost with no server token)"
     }
     Write-Host ""
-
-    if (Test-BuiltInPlugin -Name $Name) {
-        Write-Host "'$Name' is a built-in plugin and is auto-registered at boot." -ForegroundColor Yellow
-        Write-Host "No /lib upload or activation is needed; the live route already comes from server source." -ForegroundColor Yellow
-        Write-Host ""
-        return
-    }
 
     $srcBytes = [System.IO.File]::ReadAllBytes($src)
     $ok1 = Invoke-Step -Label "1/2  PUT $src -> $ElastikHost/lib/$Name" `

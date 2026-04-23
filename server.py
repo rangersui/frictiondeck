@@ -2097,9 +2097,6 @@ def register_plugin_routes():
     _plugins["/plugins/approve"] = handle_approve
     _plugins["/stream"] = _core_sse_handle
     _plugin_auth["/stream"] = "none"
-    from plugins import dav as _dav_plugin
-    _plugins["/dav"] = _dav_plugin.handle
-    _plugin_auth["/dav"] = getattr(_dav_plugin, "AUTH", "none")
 
 
 async def cron_loop():
