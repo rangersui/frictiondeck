@@ -168,6 +168,12 @@ _CANNED = {
     # Distinct ASCII needle so there's no substring collision with
     # the "café" needle above (which maps to the plain "cafe" world).
     "accent-target":   "MATCH: café",
+    # Unicode cap-prefix probe. Needle is plain ASCII ("cafe-cap")
+    # to avoid substring collision with "café" / "accent-target".
+    # Target is the accented world so we can verify in-prefix cap
+    # routing succeeds even when the cap was minted with a
+    # percent-encoded Unicode prefix.
+    "cafe-cap":        "MATCH: café",
 }
 
 
@@ -764,6 +770,80 @@ def run():
             test("cap cache does NOT serve T1 anonymous caller",
                  h.get("x-semantic-route-cache") == "generated",
                  f"cache={h.get('x-semantic-route-cache')}")
+
+        # ---------------------------------------------------------
+        # §28d. Unicode-prefix capability token (Codex P2).
+        #
+        # A real browser or urllib client that mints a cap for
+        # /home/café percent-encodes the prefix on the wire — the
+        # /auth/mint POST arrives with prefix="/home/caf%C3%A9" and
+        # server signs that verbatim. Earlier router code then
+        # compared that literal encoded prefix against
+        # _name_to_url("café") -> "/home/café" — they never matched,
+        # so cap-scoped Unicode routing never worked even though
+        # the ASCII case did.
+        #
+        # _cap_tag now decodes prefix via urllib.parse.unquote so
+        # both fast-path and slow-path produce canonical decoded
+        # form. This test exercises the full /auth/mint -> router
+        # path with a non-ASCII prefix, which _http percent-encodes
+        # exactly the way a browser would.
+        # ---------------------------------------------------------
+        cap_cafe = _mint_cap("/home/café", mode="rw", ttl=3600)
+        test("mint cap for /home/café (unicode prefix)",
+             cap_cafe and "." in cap_cafe,
+             f"token={cap_cafe!r}")
+
+        if cap_cafe:
+            # §28d-i. In-prefix typo resolves to the Unicode world.
+            # Needle "cafe-cap" is plain ASCII (no accent collision
+            # with the earlier "café" / "accent-target" entries).
+            # SLM replies MATCH: café; cap pool = {café} so the
+            # match is in-scope; router 303s to /home/caf%C3%A9
+            # (percent-encoded per P3 Location-header rule).
+            s, h, body = _http("GET", "/cafe-cap-probe-typo",
+                               token=cap_cafe)
+            test("cap /home/café + in-prefix typo -> 303 (unicode)",
+                 s == 303
+                 and h.get("location") == "/home/caf%C3%A9",
+                 f"got {s} loc={h.get('location')!r} "
+                 f"cache={h.get('x-semantic-route-cache')} "
+                 f"discard={h.get('x-router-debug-discard')} "
+                 f"pool={h.get('x-router-debug-pool')} "
+                 f"body={body[:160]!r}")
+
+            # §28d-ii. Out-of-prefix target gets discarded.
+            # Needle "salse-report" maps to MATCH: sales-report.
+            # Cap pool = {café}, so sales-report is out-of-pool
+            # -> discarded -> 404. Leak check: response body must
+            # not mention /home/sales-report or "sales-report".
+            s, h, body = _http("GET", "/salse-report-cap-out-typo",
+                               token=cap_cafe)
+            test("cap /home/café + out-of-prefix target -> not 303",
+                 s != 303,
+                 f"got {s} loc={h.get('location')} "
+                 f"cache={h.get('x-semantic-route-cache')} "
+                 f"body={body[:160]!r}")
+            test("unicode-cap out-of-prefix leak check",
+                 b"sales-report" not in body,
+                 f"body={body[:200]!r}")
+
+            # §28d-iii. Debug-pool confirms cap actually narrowed
+            # the candidate set. When the out-of-pool discard above
+            # fires, SEMANTIC_ROUTE_DEBUG=1 exposes pool_set. The
+            # pool should contain only names under the cap prefix
+            # — i.e. café — and explicitly NOT contain any non-
+            # café /home/* worlds like sales-report.
+            # Unquote because the plugin percent-encodes the header
+            # to survive Latin-1 round-trips through urllib; decoded
+            # form is the canonical UTF-8 for comparison.
+            pool_dbg = urllib.parse.unquote(
+                h.get("x-router-debug-pool") or "")
+            test("unicode cap narrows pool to /home/café only",
+                 ("café" in pool_dbg
+                  and "sales-report" not in pool_dbg
+                  and "scratch/notes" not in pool_dbg),
+                 f"pool={pool_dbg[:300]!r}")
 
         # ---------------------------------------------------------
         # §26. Anonymous T1 caller: T3-only world name must never

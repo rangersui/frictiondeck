@@ -237,6 +237,32 @@ def _scan_world_recency(max_entries: int):
     return entries
 
 
+def _cap_tag(mode: str, prefix: str) -> str:
+    """Canonicalise a cap tag so equivalent cap tokens in different
+    percent-encoded forms produce the SAME tag string.
+
+    Example:
+      prefix "/home/caf%C3%A9"  (what the browser mints)
+      prefix "/home/café"       (already-decoded form)
+    Both collapse to "cap:<mode>:/home/café" here.
+
+    Decoded UTF-8 URL form is the space `_name_to_url` produces, so
+    downstream `_caller_can_read` compares apples-to-apples without
+    having to re-decode. Cache keys also unify: one cap = one tag =
+    one cache entry, regardless of how any given client chose to
+    encode the prefix at `/auth/mint` time.
+
+    Codex P2: before this canonicalisation, a cap minted with a
+    non-ASCII prefix like "/home/café" was signed verbatim as
+    "/home/caf%C3%A9" (the query-string form server.py sees), and
+    _caller_can_read compared that literal percent-encoded string
+    against _name_to_url's decoded form — they never matched.
+    """
+    import urllib.parse
+    decoded = urllib.parse.unquote(prefix or "")
+    return f"cap:{mode}:{decoded}"
+
+
 def _auth_scope_tag(scope) -> str:
     """Short stable tag for cache-key axis and pool filtering.
 
@@ -248,7 +274,12 @@ def _auth_scope_tag(scope) -> str:
       "T1"                — anonymous / no auth
       "T2"                — auth token (or localhost bypass)
       "T3"                — approve token
-      "cap:<mode>:<pfx>"  — capability token, HMAC-verified
+      "cap:<mode>:<pfx>"  — capability token, HMAC-verified. The
+                             prefix is always returned in DECODED
+                             UTF-8 URL form (via `_cap_tag`) so two
+                             clients minting the same cap with
+                             different percent-encoding choices get
+                             the same scope-tag and the same pool.
 
     Cap-token handling is **router-specific**, not a straight
     passthrough of server._check_auth:
@@ -280,7 +311,15 @@ def _auth_scope_tag(scope) -> str:
     if level == "approve":
         return "T3"
     if isinstance(level, str) and level.startswith("cap:"):
-        # Cap that WAS in scope for this request. Keep as-is.
+        # Cap that WAS in scope for this request. _check_auth
+        # returns "cap:<mode>:<prefix>" where <prefix> is verbatim
+        # from _verify_cap (still percent-encoded in the common
+        # browser case). Re-canonicalise through _cap_tag so the
+        # downstream comparison space matches _name_to_url's
+        # decoded form.
+        parts = level.split(":", 2)
+        if len(parts) == 3:
+            return _cap_tag(parts[1], parts[2])
         return level
 
     # level is None. Could be genuinely anonymous, OR a cap token
@@ -308,7 +347,7 @@ def _auth_scope_tag(scope) -> str:
             # than silently succeeding.
             break
         prefix, _exp, mode = cap
-        return f"cap:{mode}:{prefix}"
+        return _cap_tag(mode, prefix)
     return "T1"
 
 
@@ -407,31 +446,31 @@ def _caller_can_read(scope_tag: str, world_name: str) -> bool:
             return False
         return True
     if scope_tag.startswith("cap:"):
-        # scope_tag = "cap:<mode>:<url-prefix>", where <url-prefix>
-        # is exactly what /auth/mint minted — i.e. URL form
-        # ("/home/scratch"), NOT internal-name form ("scratch").
+        # scope_tag = "cap:<mode>:<decoded-url-prefix>".
         #
-        # Codex P1: the earlier implementation compared the URL-form
-        # prefix directly against internal world names. For a cap
-        # like "/home/scratch" and a world stored as "scratch/notes"
-        # on disk, the check returned False because the world name
-        # doesn't start with "home/scratch". Cap-scoped callers
-        # therefore never matched any /home/-defaulted world and
-        # router always returned empty-pool-static-404.
+        # `_auth_scope_tag` + `_cap_tag` guarantee the prefix is in
+        # DECODED UTF-8 URL form (same space `_name_to_url`
+        # produces), so the comparison here is purely
+        # prefix-in-prefix on equivalent strings.
         #
-        # Fix: convert the world's INTERNAL name to URL form via
-        # _name_to_url (which knows about the /home/-strip rule)
-        # and compare prefixes in URL-space. That's the same space
-        # /auth/mint uses when it signs the cap, so the comparison
-        # is apples-to-apples.
+        # Two earlier bugs are closed here:
+        #   Codex P1: previous code compared URL-form prefix
+        #     against disk-form world names ("scratch/notes" vs
+        #     "/home/scratch"); fixed by routing through
+        #     _name_to_url.
+        #   Codex P2: percent-encoded cap prefixes like
+        #     "/home/caf%C3%A9" didn't match their decoded
+        #     equivalents; fixed by centralising canonicalisation
+        #     in _cap_tag so both fast- and slow-path produce
+        #     decoded prefixes only.
         parts = scope_tag.split(":", 2)
         if len(parts) < 3:
             return False
-        prefix_raw = parts[2]
-        if not prefix_raw:
+        prefix_decoded = parts[2]
+        if not prefix_decoded:
             return False
         # Normalise: ensure leading slash, strip trailing slash.
-        prefix_url = "/" + prefix_raw.lstrip("/").rstrip("/")
+        prefix_url = "/" + prefix_decoded.lstrip("/").rstrip("/")
         if prefix_url == "/":
             return False
         name_url = _name_to_url(world_name)
@@ -1292,10 +1331,22 @@ async def handle(method, body, params):
     resp = _response_none_prose(decision.get("prose") or "not found",
                                 "generated")
     if SEMANTIC_ROUTE_DEBUG and discard_reason:
-        resp["_headers"].append(("X-Router-Debug-Discard",
-                                 discard_reason[:400]))
-        resp["_headers"].append(("X-Router-Debug-Pool",
-                                 ",".join(sorted(pool_set))[:400]))
+        # HTTP header values are defined as Latin-1 by RFC 7230.
+        # A raw UTF-8 string like "café" (c3 a9) emitted verbatim
+        # gets decoded on the client side as Latin-1 -> "cafÃ©"
+        # mojibake, which breaks test assertions that compare
+        # against the canonical Unicode form. Percent-encode both
+        # debug values so the wire is ASCII-safe; readers
+        # (tests, curl -v) can urllib.parse.unquote to recover
+        # the original strings.
+        import urllib.parse
+        resp["_headers"].append((
+            "X-Router-Debug-Discard",
+            urllib.parse.quote(discard_reason[:400], safe="/,-_.:=' ")))
+        pool_joined = ",".join(sorted(pool_set))[:400]
+        resp["_headers"].append((
+            "X-Router-Debug-Pool",
+            urllib.parse.quote(pool_joined, safe="/,-_.:")))
     return resp
 
 
