@@ -308,8 +308,10 @@ def _path_in_scope(path, prefix):
     without this step, '/home/dreams/../etc/shadow' would pass a naive
     startswith on '/home/dreams'. Boundary-sensitive: '/home/dre' must
     not match '/home/dreams'."""
-    import posixpath
-    cleaned = posixpath.normpath("/" + path.lstrip("/"))
+    import posixpath, unicodedata
+    from urllib.parse import unquote
+    cleaned = unicodedata.normalize("NFC", unquote(path or "/"))
+    cleaned = posixpath.normpath("/" + cleaned.lstrip("/"))
     p = prefix.rstrip("/") or "/"
     if p == "/":
         return True  # root scope covers everything
