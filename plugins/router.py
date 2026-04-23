@@ -73,6 +73,7 @@ SEMANTIC_ROUTE_TOPK          = int(os.environ.get("SEMANTIC_ROUTE_TOPK",        
 SEMANTIC_ROUTE_TTL_SEC       = int(os.environ.get("SEMANTIC_ROUTE_TTL_SEC",       "3600"))
 SEMANTIC_ROUTE_LOCAL_ONLY    = os.environ.get("SEMANTIC_ROUTE_LOCAL_ONLY", "1") == "1"
 SEMANTIC_ROUTE_EXTERNAL_OK   = os.environ.get("SEMANTIC_ROUTE_EXTERNAL_OK", "0") == "1"
+SEMANTIC_ROUTE_DEBUG         = os.environ.get("SEMANTIC_ROUTE_DEBUG", "0") == "1"
 
 ROUTE_CACHE_PREFIX = "var/cache/router/"
 GPU_ROUTE          = "/dev/gpu"
@@ -263,11 +264,26 @@ def _auth_scope_tag(scope) -> str:
     return "T1"
 
 
+#
+# /home/-backed worlds are stored WITHOUT the /home/ prefix on disk
+# (elastik's canonicalisation strips it at write time — see
+# server.py's URL-to-world mapping). So an internal world name like
+# "sales-report" is reachable by URL /home/sales-report, and a name
+# like "etc/gpu.conf" is reachable by URL /etc/gpu.conf. Read-auth
+# predicates here work on the internal form.
+
+_T1_BLOCKED_PREFIXES = (
+    "etc/", "lib/", "usr/", "var/", "boot/",
+    "dev/", "dav/", "auth/", "shaped/",
+)
+
+
 def _caller_can_read(scope_tag: str, world_name: str) -> bool:
     """Read-auth predicate that mirrors server.py's direct-navigation
     gate. Router does not invent new ACLs.
 
-    Rules (match elastik's current surface):
+    Rules (match elastik's current surface, applied to INTERNAL
+    world names as found on disk):
       T3              — can read everything
       T2              — can read everything T1 can + /var/*, /lib/*
                         (T2 matches the /home write tier; for READ
@@ -275,23 +291,36 @@ def _caller_can_read(scope_tag: str, world_name: str) -> bool:
                         current code — but we still keep the tier
                         tag in the cache key so behaviour upgrades
                         later do not silently poison cache)
-      T1              — can read /home/*, /proc/*, /bin/*, /mnt/*
-                        (the existing AUTH="none" readable surface)
+      T1              — can read /home/*-backed worlds (names
+                        WITHOUT an FHS prefix, because /home/ is
+                        stripped on storage) plus explicit proc/
+                        / bin/ / mnt/. Cannot read etc/* / lib/* /
+                        usr/* / var/* / boot/* / dev/* / dav/* /
+                        auth/* / shaped/*.
       cap:<mode>:<pfx>— can read ONLY names starting with <pfx>.
-                        Mode r / rw both grant read; this check is
-                        about candidate visibility, not write.
+                        Prefix applies to the internal form (so
+                        cap scoped to 'scratch/' covers /home/scratch
+                        URL-side).
     """
     if scope_tag in ("T2", "T3"):
         return True
     if scope_tag == "T1":
-        # Names stored without leading slash in stage_meta — match
-        # prefixes similarly.
-        for allow in ("home/", "proc/", "bin/", "mnt/"):
-            if world_name == allow.rstrip("/") or world_name.startswith(allow):
-                return True
-        return False
+        # Explicit T1-blocked prefixes first. A world whose name
+        # starts with any of these lives outside the public read
+        # surface.
+        for blocked in _T1_BLOCKED_PREFIXES:
+            if world_name == blocked.rstrip("/"):
+                return False
+            if world_name.startswith(blocked):
+                return False
+        # Everything else — including names without an FHS prefix
+        # (home/-defaulted) and explicit proc/ / bin/ / mnt/ — is
+        # T1-readable. Covers the case `conn("etc/fstab")` would
+        # store as "etc/fstab" AND the case `conn("sales-report")`
+        # would store as "sales-report" (URL /home/sales-report).
+        return True
     if scope_tag.startswith("cap:"):
-        # "cap:<mode>:<prefix>" — strip the cap: and mode:
+        # "cap:<mode>:<prefix>"
         parts = scope_tag.split(":", 2)
         if len(parts) < 3:
             return False
@@ -788,13 +817,44 @@ def _parse_slm_reply(text: str) -> dict:
 
 _HEADERS_GENERATED = [("X-Semantic-Route-Source", "slm")]
 
+# FHS prefixes that elastik's URL-to-world mapping preserves
+# verbatim. Anything not starting with one of these (e.g. the
+# internal name "sales-report") is a `/home/*` world whose `/home/`
+# prefix was stripped on storage — see server.py's canonicalisation.
+# Router reverses this for the Location header so clients actually
+# land on a routable URL. Mirrors index.html's `_fhs` array.
+_FHS_PREFIXES = (
+    "home/", "etc/", "usr/", "var/", "boot/",
+    "mnt/", "proc/", "lib/", "shaped/", "dev/",
+    "bin/", "dav/", "auth/",
+)
+
+
+def _name_to_url(name: str) -> str:
+    """Convert an internal world name to a URL path.
+
+      "sales-report"          -> "/home/sales-report"
+      "home/sales-report"     -> "/home/sales-report"   (idempotent)
+      "etc/gpu.conf"          -> "/etc/gpu.conf"
+      "lib/router"            -> "/lib/router"
+
+    Matches server.py's URL-to-name canonicalisation in reverse:
+    names without a known FHS prefix live in the /home/ namespace
+    and need the prefix restored for a working redirect."""
+    clean = name.lstrip("/")
+    for pfx in _FHS_PREFIXES:
+        if clean == pfx.rstrip("/") or clean.startswith(pfx):
+            return "/" + clean
+    return "/home/" + clean
+
 
 def _response_single(target: str, cache_status: str) -> dict:
-    """303 See Other → Location: /<target>.
+    """303 See Other → Location: <URL path>.
 
     Short prose body so curl users without -L see the decision;
-    Location header is what followers use."""
-    loc = "/" + target.lstrip("/")
+    Location header is what followers use. Location is a URL path
+    (FHS-restored), not the internal world name."""
+    loc = _name_to_url(target)
     prose = (f"Redirecting to {loc} (router decided this is the "
              f"closest match).")
     return {
@@ -813,9 +873,12 @@ def _response_multi(candidates, cache_status: str) -> dict:
     """300 Multiple Choices + a minimal HTML body listing the
     alternatives as clickable links. One `Link: rel="alternate"`
     header per candidate so machine clients can parse without
-    rendering the HTML. Max 5 candidates."""
+    rendering the HTML. Max 5 candidates.
+
+    Link / href values go through `_name_to_url` so /home/-backed
+    names get their prefix restored for a routable URL."""
     cut = candidates[:5]
-    links = [("Link", f'</{c.lstrip("/")}>; rel="alternate"')
+    links = [("Link", f'<{_name_to_url(c)}>; rel="alternate"')
              for c in cut]
     html_lines = ['<!doctype html><meta charset="utf-8">',
                   '<title>Multiple Choices</title>',
@@ -823,7 +886,7 @@ def _response_multi(candidates, cache_status: str) -> dict:
                   '<p>Router found more than one candidate. Pick one:</p>',
                   '<ul>']
     for c in cut:
-        href = "/" + c.lstrip("/")
+        href = _name_to_url(c)
         # escape minimal HTML specials in display text
         display = (c.replace("&", "&amp;")
                     .replace("<", "&lt;")
@@ -960,9 +1023,12 @@ async def handle(method, body, params):
     #    CANDIDATES" gets its answer discarded. See PLAN §3.0
     #    closing test (P1 regression).
     kind = decision.get("kind")
+    discard_reason = ""
     if kind == "single":
         target = (decision.get("target") or "").lstrip("/")
         if target not in pool_set:
+            discard_reason = (f"target={target!r} not in "
+                              f"pool_set ({len(pool_set)} members)")
             decision = {"kind": "none",
                         "prose": "no safe match in readable pool"}
             kind = "none"
@@ -971,6 +1037,8 @@ async def handle(method, body, params):
         safe = [c.lstrip("/") for c in cands_raw
                 if c.lstrip("/") in pool_set]
         if not safe:
+            discard_reason = (f"all of {cands_raw!r} rejected by "
+                              f"pool_set ({len(pool_set)} members)")
             decision = {"kind": "none",
                         "prose": "no safe match in readable pool"}
             kind = "none"
@@ -990,8 +1058,14 @@ async def handle(method, body, params):
         return _response_single(decision["target"], "generated")
     if kind == "multi":
         return _response_multi(decision["candidates"], "generated")
-    return _response_none_prose(decision.get("prose") or "not found",
+    resp = _response_none_prose(decision.get("prose") or "not found",
                                 "generated")
+    if SEMANTIC_ROUTE_DEBUG and discard_reason:
+        resp["_headers"].append(("X-Router-Debug-Discard",
+                                 discard_reason[:400]))
+        resp["_headers"].append(("X-Router-Debug-Pool",
+                                 ",".join(sorted(pool_set))[:400]))
+    return resp
 
 
 ROUTES = ["/_router_fallback"]
