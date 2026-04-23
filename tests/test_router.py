@@ -147,7 +147,10 @@ _CANNED = {
     "head-echo":       "MATCH: sales-report",
     # Cap-scoped caller test — scratch/notes is /home/-backed.
     "scratchy":        "MATCH: scratch/notes",
-    "scratchy-out":    "MATCH: other",
+    # Out-of-cap-prefix target. Needle MUST NOT contain "scratchy"
+    # because dict iteration stops at first substring match; the
+    # test URL is /exit-scope-typo to avoid collision entirely.
+    "exit-scope":      "MATCH: other",
     # UTF-8 round trip.
     "café":            "MATCH: cafe",
     # Normalization — mixed case should collapse
@@ -686,6 +689,81 @@ def run():
         test("T2 call after T1 cache write -> separate cache entry",
              h_t3.get("x-semantic-route-cache") == "generated",
              f"cache={h_t3.get('x-semantic-route-cache')}")
+
+        # ---------------------------------------------------------
+        # §28. Capability-token routing (Codex P1 + P2).
+        #
+        # Two bugs stacked in the earlier implementation:
+        #   (a) server._check_auth validates caps against the
+        #       CURRENT request path. Router's current path is the
+        #       unmatched typo (e.g. /scratchy), which is always
+        #       out of any cap's scope — so cap callers silently
+        #       degraded to T1. A cap meant to NARROW visibility
+        #       ended up WIDENING it to the whole T1 pool.
+        #   (b) _caller_can_read compared the cap's URL-form prefix
+        #       ("/home/scratch") against internal name form
+        #       ("scratch/notes"), which never matched because
+        #       elastik strips /home/ at write time.
+        #
+        # Both halves need regression coverage. _mint_cap() was
+        # defined in this file but never used — that gap is also
+        # closed here.
+        # ---------------------------------------------------------
+        cap_scratch = _mint_cap("/home/scratch", mode="rw", ttl=3600)
+        test("mint cap for /home/scratch",
+             cap_scratch and "." in cap_scratch,
+             f"token={cap_scratch!r}")
+
+        if cap_scratch:
+            # §28a. In-prefix typo resolves.
+            # "scratchy" substring maps to canned "MATCH:
+            # scratch/notes". Cap scope = /home/scratch. Internal
+            # name scratch/notes -> URL /home/scratch/notes, which
+            # is under the cap's prefix. Pool filter passes; SLM
+            # match accepted; 303 to /home/scratch/notes.
+            s, h, body = _http("GET", "/scratchy-typo",
+                               token=cap_scratch)
+            test("cap /home/scratch + in-prefix typo -> 303",
+                 s == 303
+                 and h.get("location") == "/home/scratch/notes",
+                 f"got {s} loc={h.get('location')} "
+                 f"cache={h.get('x-semantic-route-cache')} "
+                 f"discard={h.get('x-router-debug-discard')} "
+                 f"body={body[:160]!r}")
+
+            # §28b. Out-of-prefix typo stays blocked.
+            # "exit-scope" substring (distinct from "scratchy" to
+            # avoid first-match ambiguity in the fake ollama's
+            # canned dict) maps to canned "MATCH: other". Cap scope
+            # = /home/scratch. Target /home/other is NOT under the
+            # cap's prefix -> not in pool -> router returns
+            # empty-pool-static-404 (or out-of-pool discard if the
+            # hallucination defence at step 8 catches it). Either
+            # path, the cap caller must NOT get a 303 to /home/other.
+            s, h, body = _http("GET", "/exit-scope-typo",
+                               token=cap_scratch)
+            test("cap /home/scratch + out-of-prefix typo -> not 303",
+                 s != 303,
+                 f"got {s} loc={h.get('location')} "
+                 f"cache={h.get('x-semantic-route-cache')} "
+                 f"body={body[:160]!r}")
+            test("cap out-of-prefix response body does NOT mention "
+                 "the out-of-scope world name",
+                 b"/home/other" not in body
+                 and b"\"other\"" not in body,
+                 f"body={body[:200]!r}")
+
+            # §28c. auth_scope_tag reflects the cap, so cache is
+            # keyed per-cap. A later T1 call for the same typo
+            # must NOT serve the cap caller's cached decision
+            # (and vice versa).
+            _http("GET", "/scratchy-cache-probe",
+                  token=cap_scratch)              # cap writes cache
+            s, h, _ = _http("GET", "/scratchy-cache-probe",
+                            token="")             # T1 sees no cap hit
+            test("cap cache does NOT serve T1 anonymous caller",
+                 h.get("x-semantic-route-cache") == "generated",
+                 f"cache={h.get('x-semantic-route-cache')}")
 
         # ---------------------------------------------------------
         # §26. Anonymous T1 caller: T3-only world name must never

@@ -238,7 +238,7 @@ def _scan_world_recency(max_entries: int):
 
 
 def _auth_scope_tag(scope) -> str:
-    """Short stable tag derived from server._check_auth(scope).
+    """Short stable tag for cache-key axis and pool filtering.
 
     Participates in the cache key so two callers at different tiers
     never share cache entries even when their normalized paths
@@ -246,21 +246,69 @@ def _auth_scope_tag(scope) -> str:
 
     Return values:
       "T1"                — anonymous / no auth
-      "T2"                — auth token
+      "T2"                — auth token (or localhost bypass)
       "T3"                — approve token
-      "cap:<prefix>:<m>"  — capability token, prefix + mode captured
-                            verbatim (already scope-limited)
+      "cap:<mode>:<pfx>"  — capability token, HMAC-verified
+
+    Cap-token handling is **router-specific**, not a straight
+    passthrough of server._check_auth:
+
+    server._check_auth validates a cap against the CURRENT request
+    path — if the cap is `/home/scratch` and the URL is `/scratchy`
+    (an unmatched typo, which is the only way router gets invoked),
+    the path-in-scope check fails and _check_auth returns None.
+    Router would then degrade the caller to T1 and serve them the
+    WHOLE T1 pool, which is BROADER than the cap's intended scope.
+    That's a silent permissions loosening at routing time.
+
+    Router's correct behaviour: verify the cap HMAC + expiration
+    (via server._verify_cap, which does NOT do path scoping), then
+    use the cap's prefix to FILTER the candidate pool instead. The
+    request path being out of cap scope is the whole reason router
+    is running — the user typo'd into territory their cap doesn't
+    cover, and router's job is to steer them back inside the cap's
+    real prefix.
+
+    Codex P1 found both halves of this (the fast-path degrade here
+    and the URL-vs-internal prefix mismatch in _caller_can_read).
     """
+    # Fast path — opaque tokens, Basic auth, localhost bypass all
+    # return concrete non-None levels from _check_auth.
     level = server._check_auth(scope)
-    if level is None:
-        return "T1"
     if level == "auth":
         return "T2"
     if level == "approve":
         return "T3"
-    # cap:<mode>:<prefix> from server._check_auth — keep as-is.
     if isinstance(level, str) and level.startswith("cap:"):
+        # Cap that WAS in scope for this request. Keep as-is.
         return level
+
+    # level is None. Could be genuinely anonymous, OR a cap token
+    # whose scope excludes the current (typo) path. Router cares
+    # about the second case — grab the cap's real prefix and use it
+    # to scope the pool, independent of the request path.
+    for k, v in scope.get("headers", []) or []:
+        if k != b"authorization":
+            continue
+        a = v.decode("utf-8", "replace")
+        if not a.startswith("Bearer "):
+            break
+        tok = a[7:]
+        if "." not in tok:
+            # Opaque token that failed _check_auth would have hit
+            # the fast path already; if we're here, the opaque
+            # token was wrong (mismatched constant-time compare).
+            break
+        try:
+            cap = server._verify_cap(tok)
+        except Exception:
+            cap = None
+        if cap is None:
+            # Invalid or expired cap — treat as anonymous rather
+            # than silently succeeding.
+            break
+        prefix, _exp, mode = cap
+        return f"cap:{mode}:{prefix}"
     return "T1"
 
 
@@ -359,15 +407,36 @@ def _caller_can_read(scope_tag: str, world_name: str) -> bool:
             return False
         return True
     if scope_tag.startswith("cap:"):
-        # "cap:<mode>:<prefix>"
+        # scope_tag = "cap:<mode>:<url-prefix>", where <url-prefix>
+        # is exactly what /auth/mint minted — i.e. URL form
+        # ("/home/scratch"), NOT internal-name form ("scratch").
+        #
+        # Codex P1: the earlier implementation compared the URL-form
+        # prefix directly against internal world names. For a cap
+        # like "/home/scratch" and a world stored as "scratch/notes"
+        # on disk, the check returned False because the world name
+        # doesn't start with "home/scratch". Cap-scoped callers
+        # therefore never matched any /home/-defaulted world and
+        # router always returned empty-pool-static-404.
+        #
+        # Fix: convert the world's INTERNAL name to URL form via
+        # _name_to_url (which knows about the /home/-strip rule)
+        # and compare prefixes in URL-space. That's the same space
+        # /auth/mint uses when it signs the cap, so the comparison
+        # is apples-to-apples.
         parts = scope_tag.split(":", 2)
         if len(parts) < 3:
             return False
-        prefix = parts[2].lstrip("/").rstrip("/")
-        if not prefix:
+        prefix_raw = parts[2]
+        if not prefix_raw:
             return False
-        return (world_name == prefix
-                or world_name.startswith(prefix + "/"))
+        # Normalise: ensure leading slash, strip trailing slash.
+        prefix_url = "/" + prefix_raw.lstrip("/").rstrip("/")
+        if prefix_url == "/":
+            return False
+        name_url = _name_to_url(world_name)
+        return (name_url == prefix_url
+                or name_url.startswith(prefix_url + "/"))
     return False
 
 
