@@ -729,6 +729,14 @@ MAX_URL = 8192  # URL length cap — DoS protection for the 8K–65K range.
                 # truncated) path the router uses — no smuggling. See
                 # logs/redteam_uint16.py for the full claim set and proofs.
 
+# Stricter cap that fires ONLY at the semantic-router fallback hook,
+# not on every request. An unmatched GET URL over this size short-
+# circuits to 414 before the router plugin can turn it into an SLM
+# prompt. Normal plugin / world dispatch still honours MAX_URL above
+# (URLs 4K..8K that match a real handler continue to work). See
+# PLAN-semantic-router.md §2.1.
+_MAX_ROUTE_URL_BYTES = 4096
+
 async def app(scope, receive, send):
     if scope["type"] != "http": return
     _raw_path = scope["path"]; trailing_slash = _raw_path.endswith("/") and len(_raw_path) > 1
@@ -796,6 +804,16 @@ async def app(scope, receive, send):
         base_path_override = None
     # Plugin dispatch — exact or prefix match, server gates auth centrally.
     base_path = base_path_override or path.split("?")[0]
+    # Route-reservation for /_router_fallback — hook-only plugin route
+    # reachable ONLY via the server-side fallback hook below. Direct
+    # external requests (including `/bin/_router_fallback`, which the
+    # /bin/ rewrite normalises into base_path) must 404 before the
+    # matcher can dispatch. The hook sets scope["_router_triggered"]=True
+    # to bypass this gate on internal re-entry. See
+    # PLAN-semantic-router.md §1.2.
+    if (base_path == "/_router_fallback"
+            and not scope.get("_router_triggered")):
+        return await send_r(send, 404, '{"error":"not found"}')
     handler, matched = _match_plugin(base_path)
     if handler:
         level = _plugin_auth.get(matched, "none")
@@ -1464,6 +1482,51 @@ async def app(scope, receive, send):
             })
             return await send_r(send, 200, json.dumps({"version": r2["version"]}))
 
+    # Semantic-router fallback hook. Fires only if:
+    #   - method is GET or HEAD (router never resolves state mutations)
+    #   - the /_router_fallback plugin is registered (no-op otherwise
+    #     — so the default elastik install without /lib/router is
+    #     byte-for-byte identical to pre-hook behaviour)
+    #   - the request is not already a router-triggered re-entry
+    #     (scope["_router_triggered"] sentinel breaks recursion)
+    #   - raw_path fits under _MAX_ROUTE_URL_BYTES (long URLs cannot
+    #     be turned into SLM prompts via the router)
+    # See PLAN-semantic-router.md §1.1 and §8.1.
+    if (method in ("GET", "HEAD")
+            and not scope.get("_router_triggered")):
+        _router_handler = _plugins.get("/_router_fallback")
+        if _router_handler is not None:
+            _rp_len = len(scope.get("raw_path", b"")) or len(_raw_path)
+            if _rp_len > _MAX_ROUTE_URL_BYTES:
+                return await send_r(send, 414,
+                                    '{"error":"URI too long for router"}')
+            _router_scope = dict(scope)
+            _router_scope["_router_triggered"] = True
+            _router_result = await _router_handler(method, "", {
+                "_scope":    _router_scope,
+                "_body_raw": b"",
+                "_send":     send,
+            })
+            if _router_result is None:
+                return                        # plugin streamed its own response
+            if isinstance(_router_result, dict):
+                # Mirror the plugin-dispatch envelope emission. Scoped
+                # subset: router plugins return {_status, _body, _ct,
+                # _headers}; no cookies / redirect / html contract.
+                _rstat = _router_result.pop("_status", 200)
+                _rct   = _router_result.pop("_ct", "application/json")
+                _rbody = _router_result.pop("_body", None)
+                _rhdrs = _router_result.pop("_headers", [])
+                _rextr = [[str(k).encode(), str(v).encode()]
+                          for k, v in _rhdrs] if _rhdrs else None
+                if _rbody is not None:
+                    return await send_r(send, _rstat, _rbody, ct=_rct,
+                                        extra_headers=_rextr,
+                                        head_only=(method == "HEAD"))
+                return await send_r(send, _rstat,
+                                    json.dumps(_router_result),
+                                    extra_headers=_rextr,
+                                    head_only=(method == "HEAD"))
     if method == "GET": return await send_r(send, 200, INDEX, "text/html", csp=True)
     await send_r(send, 404, '{"error":"not found"}')
 
