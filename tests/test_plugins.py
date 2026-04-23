@@ -326,6 +326,8 @@ def _run_proc_tests(port, label):
 def _run_auth_tests(port, label, token, approve):
     """Auth enforcement tests — server.py core write gate."""
 
+    from urllib.parse import quote
+
     # GET always open
     st, _ = http_get(port, "/proc/worlds")
     test(f"{label} auth: GET /proc/worlds open", st == 200, f"status={st}")
@@ -380,6 +382,28 @@ def _run_auth_tests(port, label, token, approve):
 
     # ── CSRF gate: sync/result/clear reject cross-origin ──
 
+    encoded_prefix = quote("/home/café", safe="/")
+    st, body = http_post(port, f"/auth/mint?prefix={encoded_prefix}&ttl=600&mode=rw", approve=approve)
+    if st == 200:
+        try:
+            cap_doc = json.loads(body)
+            cap = cap_doc["token"]
+            test(f"{label} auth: unicode cap mint canonicalizes prefix",
+                 cap_doc.get("prefix") == "/home/café",
+                 f"prefix={cap_doc.get('prefix')!r}")
+            st, _ = http_method(port, "/home/caf%C3%A9", method="PUT", body="bonjour", token=cap)
+            test(f"{label} auth: unicode cap write in-scope -> 200",
+                 st in (200, 201), f"status={st}")
+            st, body = http_get(port, "/home/caf%C3%A9")
+            test(f"{label} auth: unicode cap target persisted",
+                 st == 200 and "bonjour" in body, f"status={st} body={body[:60]}")
+            st, _ = http_method(port, "/home/other-unicode-cap", method="PUT", body="pwnd", token=cap)
+            test(f"{label} auth: unicode cap out-of-scope -> 403", st == 403, f"status={st}")
+        except (KeyError, json.JSONDecodeError) as e:
+            test(f"{label} auth: unicode cap mint parseable", False, str(e))
+    else:
+        test(f"{label} auth: unicode cap mint -> 200", False, f"status={st} body={body[:80]}")
+
     st, _ = http_method(port, "/home/authtest/sync", method="POST", body="x",
                         headers={"Origin": "http://evil.com"})
     test(f"{label} csrf: sync cross-origin -> 403", st == 403, f"status={st}")
@@ -404,7 +428,17 @@ def _run_auth_tests(port, label, token, approve):
 
 def _run_blob_ext_tests(port, label, token, approve):
     """Tests for BLOB storage, ext column, 304, /raw, fake directories."""
-    import hashlib
+    import http.client as _hc
+
+    def _raw_bytes(path, headers=None):
+        c = _hc.HTTPConnection("127.0.0.1", port, timeout=10)
+        c.request("GET", path, headers=headers or {})
+        r = c.getresponse()
+        body = r.read()
+        hdrs = {k.lower(): v for k, v in r.getheaders()}
+        st = r.status
+        c.close()
+        return st, hdrs, body
 
     # ── 304 version comparison ──
     http_method(port, "/home/work", method="PUT", body="hello", token=token)  # ensure world exists
@@ -443,6 +477,22 @@ def _run_blob_ext_tests(port, label, token, approve):
     test(f"{label} blob: binary read ext=png", d.get("ext") == "png", f"ext={d.get('ext')}")
     test(f"{label} blob: binary read stage_html empty", d.get("stage_html") == "", f"stage={d.get('stage_html','?')[:20]}")
 
+    # ── Binary append via POST ?ext=png ──
+    split = len(png_bytes) // 2
+    first = png_bytes[:split]
+    second = png_bytes[split:]
+    st, _ = http_method(port, "/home/blob-bin-append?ext=png", method="PUT", body=first, token=token)
+    test(f"{label} blob: binary append seed PUT -> 200", st == 200, f"status={st}")
+    st, _ = http_method(port, "/home/blob-bin-append?ext=png", method="POST", body=second, token=token)
+    test(f"{label} blob: binary append POST -> 200", st == 200, f"status={st}")
+    st, hdrs, body_raw = _raw_bytes("/home/blob-bin-append?raw")
+    test(f"{label} blob: binary append raw GET -> 200", st == 200, f"status={st}")
+    test(f"{label} blob: binary append raw CT=png",
+         (hdrs.get("content-type") or "").startswith("image/png"),
+         f"ct={hdrs.get('content-type')}")
+    test(f"{label} blob: binary append body preserved",
+         body_raw == png_bytes, f"len={len(body_raw)} expected={len(png_bytes)}")
+
     # ── Fake directories ──
     st, _ = http_method(port, "/home/fakedir/child1?ext=txt", method="PUT", body="hello child1", token=token)
     test(f"{label} blob: write fakedir/child1 -> 200", st == 200, f"status={st}")
@@ -458,6 +508,15 @@ def _run_blob_ext_tests(port, label, token, approve):
     d = json.loads(body)
     test(f"{label} blob: fakedir/child1 ext=txt", d.get("ext") == "txt", f"ext={d.get('ext')}")
     test(f"{label} blob: fakedir/child1 content", "hello child1" in d.get("stage_html", ""), f"body={d.get('stage_html','')[:20]}")
+    st, body = http_get(port, "/home/fakedir")
+    test(f"{label} blob: pure-dir API fallback -> 200", st == 200, f"status={st}")
+    test(f"{label} blob: pure-dir API fallback lists children",
+         "child1" in body and "child2" in body, f"body={body[:80]}")
+    st, body = http_get(port, "/home/fakedir?raw")
+    test(f"{label} blob: pure-dir ?raw -> 404", st == 404, f"status={st}")
+    test(f"{label} blob: pure-dir ?raw explains object/collection split",
+         "raw requires object" in body and "/home/fakedir/" in body,
+         f"body={body[:120]}")
 
     # ── DAV ext mapping ──
     st, _ = http_method(port, "/dav/home/ext-blob-test.css", basic_auth=approve)
@@ -1144,17 +1203,21 @@ def _run_head_tests(port, label, token, approve):
     test(f"{label} head: internal op -> 405", hst == 405, f"status={hst}")
     test(f"{label} head: 405 body is empty", len(hbody) == 0, f"len={len(hbody)}")
 
-    # 7. HEAD /home/<nonexistent-but-has-children> — 302 redirect to ls
+    # 7. HEAD /home/<nonexistent-but-has-children> — pure-dir ls fallback
     # Seed a child so /home/head-redirect-prefix has existing children
     http_method(port, f"/home/head-redirect-prefix/child", method="PUT",
                 body="c", token=token)
+    gst, ghdrs, gbody = _get("/home/head-redirect-prefix")
     hst, hhdrs, hbody = _head("/home/head-redirect-prefix")
-    test(f"{label} head: missing world w/ children -> 302",
-         hst == 302, f"status={hst}")
-    test(f"{label} head: 302 has Location header",
-         hhdrs.get("location") == "/home/head-redirect-prefix/",
-         f"location={hhdrs.get('location')}")
-    test(f"{label} head: 302 body is empty", len(hbody) == 0, f"len={len(hbody)}")
+    test(f"{label} head: missing world w/ children -> 200 ls fallback",
+         hst == gst == 200, f"head={hst} get={gst}")
+    test(f"{label} head: pure-dir fallback Content-Type matches GET",
+         hhdrs.get("content-type") == ghdrs.get("content-type"),
+         f"head={hhdrs.get('content-type')} get={ghdrs.get('content-type')}")
+    test(f"{label} head: pure-dir fallback body is empty", len(hbody) == 0, f"len={len(hbody)}")
+    hst, hhdrs, hbody = _head("/home/head-redirect-prefix?raw")
+    test(f"{label} head: pure-dir ?raw -> 404", hst == 404, f"status={hst}")
+    test(f"{label} head: pure-dir ?raw body is empty", len(hbody) == 0, f"len={len(hbody)}")
 
     # 8. HEAD /home/<truly-missing> — 404, body empty
     hst, hhdrs, hbody = _head("/home/this-world-definitely-does-not-exist-xyzzy")

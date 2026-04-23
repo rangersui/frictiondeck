@@ -394,7 +394,27 @@ async def handle(method, body, params):
                 "_status": 405}
     # POST is the mutating action — costs API $. Gate inline so browser GET
     # can still render the man page (plugin AUTH="none").
-    if not server._check_auth(scope):
+    #
+    # Trusted-loopback bypass: an in-process plugin (today router.py;
+    # future readers of /dev/gpu as infrastructure) may stamp
+    # scope["_internal_caller"] = "<plugin>" to signal "this is a
+    # server-side loopback call, not an external user request." The
+    # sentinel is a top-level ASGI scope key, which the server builds;
+    # external HTTP clients cannot set it (their headers land in
+    # scope["headers"], never as top-level scope keys), so it is not
+    # forgeable from the wire. Same non-forgeability the
+    # `_router_triggered` sentinel in server.py relies on.
+    #
+    # Why this is necessary: router.py's whole purpose is resolving
+    # typo / natural-language URLs for anonymous (T1) callers. Those
+    # callers are not directly authorised for /dev/gpu and never will
+    # be — but the router legitimately uses the SLM as internal
+    # infrastructure on their behalf, behind its own rate cap and
+    # caller-scoped pool. Without this bypass, the T1 branch — the
+    # most important one router exists for — would never reach the
+    # model and would always degrade to slm-unavailable-static-404.
+    internal_caller = scope.get("_internal_caller")
+    if not internal_caller and not server._check_auth(scope):
         return {"error": "auth required — T2 token or cap token scoped to /dev/gpu",
                 "_status": 401,
                 "_headers": [["www-authenticate", 'Basic realm="elastik"']]}
@@ -435,7 +455,9 @@ async def handle(method, body, params):
         return {"error": f"{scheme} error: {e}", "_status": 502}
 
     server.log_event("dev/gpu", "gpu_call",
-                     {"scheme": scheme, "prompt_len": len(prompt), "reply_len": len(text)})
+                     {"scheme": scheme, "prompt_len": len(prompt),
+                      "reply_len": len(text),
+                      "caller": internal_caller or "external"})
     return {"_body": text, "_ct": "text/plain"}
 
 
@@ -465,7 +487,15 @@ async def _handle_stream(method, body, params):
         return {"error": "POST only — body=prompt, response=text/event-stream",
                 "_status": 405}
     scope = params.get("_scope", {})
-    if not server._check_auth(scope):
+    # Trusted-loopback bypass — see matching comment in handle() above.
+    # Streaming path is reachable both via external POST /dev/gpu/stream
+    # AND via semantic.py's _call_gpu_stream in-process bridge. The
+    # latter already exits this handler early via _stream_in_process,
+    # so the bypass here mainly covers a hypothetical future in-process
+    # caller that WANTS the SSE framing (e.g. a router variant that
+    # streams suggestions). Keep parity with handle().
+    internal_caller = scope.get("_internal_caller")
+    if not internal_caller and not server._check_auth(scope):
         return {"error": "auth required — T2 token or cap token scoped to /dev/gpu",
                 "_status": 401,
                 "_headers": [["www-authenticate", 'Basic realm="elastik"']]}
@@ -544,7 +574,8 @@ async def _handle_stream(method, body, params):
     server.log_event(
         "dev/gpu", "gpu_stream_call",
         {"scheme": scheme, "prompt_len": len(prompt),
-         "reply_len": total_len, "errored": errored})
+         "reply_len": total_len, "errored": errored,
+         "caller": internal_caller or "external"})
     return None
 
 

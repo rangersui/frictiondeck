@@ -88,7 +88,7 @@ FHS layout:
 
 ```
 GET    /home/{name}       read (JSON)
-GET    /home/{name}?raw   raw bytes
+GET    /home/{name}?raw   raw bytes (objects only)
 HEAD   /home/{name}       stat — same headers as GET, no body
 PUT    /home/{name}       overwrite
 POST   /home/{name}       append
@@ -104,6 +104,19 @@ GET    /bin               list all active routes
 HTTP method IS the action. No `/read` `/write` suffixes. Trailing `/` = ls.
 
 Content negotiation: browser gets HTML, curl gets JSON, pipes get plain text.
+
+Object / collection rules:
+
+- bare path = object view if an exact world exists
+- trailing slash = collection view
+- a path may be both object and collection if both `/foo` and `/foo/*` exist
+- a pure prefix with children but no exact world is collection-only
+- `?raw` belongs only to objects; it never turns a pure collection prefix into a hidden file
+
+Reason: elastik is flexible enough to look S3-like, but the URL contract still
+has to match human directory intuition. Cool tricks are allowed only after a
+path has first been promoted to an object. A pure collection prefix must stay a
+collection.
 
 ## Auth
 
@@ -315,6 +328,7 @@ $env:ELASTIK_APPROVE_TOKEN="your-t3-token"
 | `plugins/db.py` | `/dev/db` | Read-only SQL over worlds or **file-kind** `/mnt/*` mounts. http(s) mounts reject with 400. |
 | `plugins/fanout.py` | `/dev/fanout` | Broadcast one write to N worlds. Target list in `/etc/fanout.conf` |
 | `plugins/semantic.py` | `/shaped/*` | Accept-driven shape renderer. `text/event-stream` in Accept turns on SSE outer transport; `X-Semantic-Intent` is the browser-safe hint override when you cannot set `User-Agent`. Delegates to `/dev/gpu` or `/dev/gpu/stream`. |
+| `plugins/router.py` | `/_router_fallback` (hook-only) | **opt-in** SLM-assisted resolver for unmatched paths. Converts "no such world" into `303`/`300`/`404-with-prose` based on the caller's readable pool. Caller-scoped candidates, separate rate cap, local-only backend by default. Covers top-level natural-language URLs (`/salse-report`, `/帮我画销售饼图`); `/home/<typo>` requires follow-up server.py plumbing. See `plugins/README.md` for the install + safety posture. |
 
 `gpu / fstab / db / fanout` form a **machine-primitives set** — blind
 device, blind mount, blind query, blind broadcast. Each has a config
@@ -329,7 +343,13 @@ The `primitives` install target expands exactly to:
 - `fanout`
 
 `semantic` is left opt-in because it composes on top of `/dev/gpu`
-rather than being part of the minimal blind primitive base.
+rather than being part of the minimal blind primitive base. `router`
+is also opt-in, for the same reason plus its distinct safety
+posture — see `plugins/README.md` § "Semantic router" for the full
+install + backend-policy + URL-privacy notes. Short version: router
+turns elastik's default 404 into a SLM-assisted resolver that
+respects the caller's auth-scoped pool and refuses to call
+non-local backends unless explicitly opted in.
 
 ### `/shaped/*` today
 

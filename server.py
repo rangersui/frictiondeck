@@ -260,12 +260,20 @@ def _b64e(b):
 def _b64d(s):
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
+def _canonical_cap_prefix(prefix):
+    """Canonical URL-space prefix used for capability tokens and scope checks."""
+    import posixpath, unicodedata
+    from urllib.parse import unquote
+    prefix = unicodedata.normalize("NFC", unquote(prefix or "/"))
+    prefix = prefix if prefix.startswith("/") else "/" + prefix
+    prefix = posixpath.normpath("/" + prefix.lstrip("/"))
+    return prefix.rstrip("/") or "/"
+
 def _mint_cap(prefix, ttl_sec=3600, mode="rw"):
     """Issue a capability token: <b64url(payload)>.<b64url(hmac)>.
     payload = `<prefix>|<exp_sec>|<mode>`. HMAC-SHA256 over payload with KEY.
     prefix is normalized — leading "/", no trailing "/" unless root."""
-    prefix = prefix if prefix.startswith("/") else "/" + prefix
-    prefix = prefix.rstrip("/") or "/"
+    prefix = _canonical_cap_prefix(prefix)
     if mode not in ("r", "rw"):
         raise ValueError("mode must be 'r' or 'rw'")
     exp = int(time.time()) + int(ttl_sec)
@@ -289,6 +297,7 @@ def _verify_cap(token):
         exp = int(exp_s)
     except Exception:
         return None
+    prefix = _canonical_cap_prefix(prefix)
     if mode not in ("r", "rw"): return None
     if exp < int(time.time()): return None
     return prefix, exp, mode
@@ -707,6 +716,31 @@ def _ls(prefix):
             children[rest] = False                 # file
     return sorted(children.items())
 
+async def _send_ls_response(send, parts, accept, head_only=False):
+    """Render the existing ls surface for a FHS prefix.
+
+    Used by both canonical trailing-slash listings (`/home/foo/`) and by
+    the API fallback when `/home/foo` is a pure directory prefix with
+    children but no exact world. Browser navigations keep their existing
+    slash-canonicalizing redirect; curl / API callers get the listing
+    directly instead of a 302 detour.
+    """
+    if parts[0] == "home":
+        ls_prefix = "/".join(parts[1:])  # "home" → "", "home/photos" → "photos"
+        entries = [(n, d) for n, d in _ls(ls_prefix)
+                   if n not in ("etc", "usr", "var", "boot")]
+    else:
+        ls_prefix = "/".join(parts)  # "etc" → "etc", "usr/lib" → "usr/lib"
+        entries = _ls(ls_prefix)
+    if accept.startswith("text/html"):
+        return await send_r(send, 200, INDEX, "text/html", csp=True, head_only=head_only)
+    if "json" in accept:
+        return await send_r(send, 200, json.dumps([{"name": n, "dir": d} for n, d in entries]),
+                            head_only=head_only)
+    lines = [(n + "/" if d else n) for n, d in entries]
+    return await send_r(send, 200, "\n".join(lines) + "\n" if lines else "",
+                        "text/plain", head_only=head_only)
+
 def _match_plugin(base_path):
     """Exact match first, then prefix match (longest wins).
     Returns (handler, matched_route) or (None, None)."""
@@ -728,6 +762,14 @@ MAX_URL = 8192  # URL length cap — DoS protection for the 8K–65K range.
                 # is a byte-level check, and cap scope uses the same (possibly
                 # truncated) path the router uses — no smuggling. See
                 # logs/redteam_uint16.py for the full claim set and proofs.
+
+# Stricter cap that fires ONLY at the semantic-router fallback hook,
+# not on every request. An unmatched GET URL over this size short-
+# circuits to 414 before the router plugin can turn it into an SLM
+# prompt. Normal plugin / world dispatch still honours MAX_URL above
+# (URLs 4K..8K that match a real handler continue to work). See
+# PLAN-semantic-router.md §2.1.
+_MAX_ROUTE_URL_BYTES = 4096
 
 async def app(scope, receive, send):
     if scope["type"] != "http": return
@@ -796,6 +838,16 @@ async def app(scope, receive, send):
         base_path_override = None
     # Plugin dispatch — exact or prefix match, server gates auth centrally.
     base_path = base_path_override or path.split("?")[0]
+    # Route-reservation for /_router_fallback — hook-only plugin route
+    # reachable ONLY via the server-side fallback hook below. Direct
+    # external requests (including `/bin/_router_fallback`, which the
+    # /bin/ rewrite normalises into base_path) must 404 before the
+    # matcher can dispatch. The hook sets scope["_router_triggered"]=True
+    # to bypass this gate on internal re-entry. See
+    # PLAN-semantic-router.md §1.2.
+    if (base_path == "/_router_fallback"
+            and not scope.get("_router_triggered")):
+        return await send_r(send, 404, '{"error":"not found"}')
     handler, matched = _match_plugin(base_path)
     if handler:
         level = _plugin_auth.get(matched, "none")
@@ -1041,8 +1093,8 @@ async def app(scope, receive, send):
         if _check_auth(scope) != "approve":
             return await send_r(send, 403, '{"error":"approve required to mint"}')
         qs = scope.get("query_string", b"").decode()
-        p = dict(x.split("=", 1) for x in qs.split("&") if "=" in x) if qs else {}
-        prefix = p.get("prefix", "/home")
+        p = _parse_qs(qs)
+        prefix = _canonical_cap_prefix(p.get("prefix", "/home"))
         mode = p.get("mode", "rw")
         try:
             ttl = int(p.get("ttl", "3600"))
@@ -1107,24 +1159,10 @@ async def app(scope, receive, send):
     if method in ("GET", "HEAD") and len(parts) >= 1 and parts[0] in _FHS and trailing_slash:
         # Determine world-name prefix for ls
         ho = (method == "HEAD")
-        if parts[0] == "home":
-            ls_prefix = "/".join(parts[1:])  # "home" → "", "home/photos" → "photos"
-            # Only show non-system worlds
-            entries = [(n, d) for n, d in _ls(ls_prefix)
-                       if n not in ("etc","usr","var","boot")]
-        else:
-            ls_prefix = "/".join(parts)  # "etc" → "etc", "usr/lib" → "usr/lib"
-            entries = _ls(ls_prefix)
         accept = ""
         for k, v in scope.get("headers", []):
             if k == b"accept": accept = v.decode(); break
-        if accept.startswith("text/html"):
-            return await send_r(send, 200, INDEX, "text/html", csp=True, head_only=ho)
-        if "json" in accept:
-            return await send_r(send, 200, json.dumps([{"name": n, "dir": d} for n, d in entries]), head_only=ho)
-        # plain text — one per line. dirs get trailing /
-        lines = [(n + "/" if d else n) for n, d in entries]
-        return await send_r(send, 200, "\n".join(lines) + "\n" if lines else "", "text/plain", head_only=ho)
+        return await _send_ls_response(send, parts, accept, head_only=ho)
 
     # /lib/<name>/state — plugin lifecycle transition (Phase 0 of
     # plugin-as-world). Separated from _INTERNAL ops because the
@@ -1205,13 +1243,19 @@ async def app(scope, receive, send):
             "state": target_state, "version": ver, "changed": False,
             "reloaded": True}))
 
-    # World routes — HTTP method IS the action.
-    #   GET    /home/foo       → read content (no trailing slash)
-    #   GET    /home/foo?raw   → raw bytes
+    # World routes – HTTP method IS the action.
+    #   GET    /home/foo       → object read (JSON view)
+    #   GET    /home/foo?raw   → object's raw bytes
     #   PUT    /home/foo       → overwrite
     #   POST   /home/foo       → append
     #   DELETE /home/foo       → handled above
-    # If world doesn't exist but children do → 302 redirect to path/
+    #
+    # URL semantics are intentionally biased toward object/collection clarity:
+    # - bare path = object view if an exact world exists
+    # - trailing slash = collection view
+    # - a pure prefix with children but no exact world is collection-only
+    # - ?raw belongs only to objects; it never turns a pure collection
+    #   prefix into a hidden file
     if len(parts) >= 2 and parts[0] in _FHS:
         # Parse: is last segment an internal op, or part of the world name?
         if len(parts) >= 3 and parts[-1] in _INTERNAL:
@@ -1269,21 +1313,32 @@ async def app(scope, receive, send):
             accept = ""
             for k, v in scope.get("headers", []):
                 if k == b"accept": accept = v.decode(); break
+            is_raw = ("raw" in params or "raw" in qs.split("&"))
             is_browser = accept.startswith("text/html")
             # Browser always gets the app shell — auth errors show inside iframe
-            if is_browser: return await send_r(send, 200, INDEX, "text/html", csp=True, head_only=ho)
+            if is_browser and not is_raw:
+                return await send_r(send, 200, INDEX, "text/html", csp=True, head_only=ho)
             # Sensitive-read gate (API only — browser handled above)
             if name == "etc/shadow" or name.startswith("boot/"):
                 if _check_auth(scope) != "approve":
                     return await send_r(send, 403, '{"error":"read requires approve"}', head_only=ho)
             if not (DATA / _disk_name(name) / "universe.db").exists():
-                # World doesn't exist — check if it's a prefix with children → 302 to ls
+                # No exact world. If children exist, this path is a pure
+                # collection prefix, not a hidden object. Bare GET/HEAD may
+                # list it for API callers, but ?raw must fail closed so a
+                # collection never gains accidental object semantics.
                 children = _ls(name if parts[0] != "home" else "/".join(parts[1:]))
                 if children:
-                    return await send_r(send, 302, "", extra_headers=[[b"location", (path + "/").encode()]], head_only=ho)
+                    if is_raw:
+                        return await send_r(send, 404, json.dumps({
+                            "error": "raw requires object",
+                            "collection": path + "/"}), head_only=ho)
+                    if is_browser:
+                        return await send_r(send, 302, "", extra_headers=[[b"location", (path + "/").encode()]], head_only=ho)
+                    return await _send_ls_response(send, parts, accept, head_only=ho)
                 return await send_r(send, 404, '{"error":"world not found"}', head_only=ho)
             # ?raw → raw bytes with correct Content-Type
-            if "raw" in params or "raw" in qs.split("&"):
+            if is_raw:
                 c = conn(name)
                 r = c.execute("SELECT stage_html,ext,headers FROM stage_meta WHERE id=1").fetchone()
                 body = r["stage_html"] or b""
@@ -1416,14 +1471,16 @@ async def app(scope, receive, send):
             c = conn(name)
             try: body_bytes = await recv(receive)
             except ValueError: return await send_r(send, 413, '{"error":"body too large"}')
-            b = body_bytes.decode("utf-8", "replace")
             if iop == "sync":
+                b = body_bytes.decode("utf-8", "replace")
                 c.execute("UPDATE stage_meta SET stage_html=?,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
                 return await send_r(send, 200, '{"ok":true}')
             if iop == "pending":
+                b = body_bytes.decode("utf-8", "replace")
                 c.execute("UPDATE stage_meta SET pending_js=?,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
                 return await send_r(send, 200, '{"ok":true}')
             if iop == "result":
+                b = body_bytes.decode("utf-8", "replace")
                 c.execute("UPDATE stage_meta SET js_result=?,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
                 return await send_r(send, 200, '{"ok":true}')
             if iop == "clear":
@@ -1434,6 +1491,7 @@ async def app(scope, receive, send):
             if req_ext and req_ext in _BINARY_EXT:
                 b = body_bytes
             else:
+                b = body_bytes.decode("utf-8", "replace")
                 b = _extract(b, "append")
             cur = c.execute("SELECT ext FROM stage_meta WHERE id=1").fetchone()
             cur_ext = (cur["ext"] if cur else "plain") or "plain"
@@ -1444,7 +1502,23 @@ async def app(scope, receive, send):
             # binary payloads.
             append_bytes_for_hash = b if isinstance(b, bytes) else b.encode("utf-8")
             append_hash = hashlib.sha256(append_bytes_for_hash).hexdigest()
-            c.execute("UPDATE stage_meta SET stage_html=stage_html||?,version=version+1,updated_at=datetime('now') WHERE id=1",(b,)); c.commit()
+            if req_ext and req_ext in _BINARY_EXT:
+                c.execute(
+                    "UPDATE stage_meta "
+                    "SET stage_html=CAST("
+                    "CAST(COALESCE(stage_html, X'') AS BLOB) || CAST(? AS BLOB) "
+                    "AS BLOB),"
+                    "version=version+1,updated_at=datetime('now') WHERE id=1",
+                    (sqlite3.Binary(b),),
+                )
+            else:
+                c.execute(
+                    "UPDATE stage_meta "
+                    "SET stage_html=stage_html||?,version=version+1,"
+                    "updated_at=datetime('now') WHERE id=1",
+                    (b,),
+                )
+            c.commit()
             # Phase 2.5 audit binding: append-level provenance.
             # append_sha256 pins the delta; body_sha256_after pins the resulting
             # full state. meta_headers is intentionally empty — append does not
@@ -1464,6 +1538,52 @@ async def app(scope, receive, send):
             })
             return await send_r(send, 200, json.dumps({"version": r2["version"]}))
 
+    # Semantic-router fallback hook. Fires only if:
+    #   - method is GET or HEAD (router never resolves state mutations)
+    #   - the /_router_fallback plugin is registered (no-op otherwise
+    #     — so the default elastik install without /lib/router is
+    #     byte-for-byte identical to pre-hook behaviour)
+    #   - the request is not already a router-triggered re-entry
+    #     (scope["_router_triggered"] sentinel breaks recursion)
+    #   - raw_path fits under _MAX_ROUTE_URL_BYTES (long URLs cannot
+    #     be turned into SLM prompts via the router)
+    # See PLAN-semantic-router.md §1.1 and §8.1.
+    if (path != "/"
+            and method in ("GET", "HEAD")
+            and not scope.get("_router_triggered")):
+        _router_handler = _plugins.get("/_router_fallback")
+        if _router_handler is not None:
+            _rp_len = len(scope.get("raw_path", b"")) or len(_raw_path)
+            if _rp_len > _MAX_ROUTE_URL_BYTES:
+                return await send_r(send, 414,
+                                    '{"error":"URI too long for router"}')
+            _router_scope = dict(scope)
+            _router_scope["_router_triggered"] = True
+            _router_result = await _router_handler(method, "", {
+                "_scope":    _router_scope,
+                "_body_raw": b"",
+                "_send":     send,
+            })
+            if _router_result is None:
+                return                        # plugin streamed its own response
+            if isinstance(_router_result, dict):
+                # Mirror the plugin-dispatch envelope emission. Scoped
+                # subset: router plugins return {_status, _body, _ct,
+                # _headers}; no cookies / redirect / html contract.
+                _rstat = _router_result.pop("_status", 200)
+                _rct   = _router_result.pop("_ct", "application/json")
+                _rbody = _router_result.pop("_body", None)
+                _rhdrs = _router_result.pop("_headers", [])
+                _rextr = [[str(k).encode(), str(v).encode()]
+                          for k, v in _rhdrs] if _rhdrs else None
+                if _rbody is not None:
+                    return await send_r(send, _rstat, _rbody, ct=_rct,
+                                        extra_headers=_rextr,
+                                        head_only=(method == "HEAD"))
+                return await send_r(send, _rstat,
+                                    json.dumps(_router_result),
+                                    extra_headers=_rextr,
+                                    head_only=(method == "HEAD"))
     if method == "GET": return await send_r(send, 200, INDEX, "text/html", csp=True)
     await send_r(send, 404, '{"error":"not found"}')
 
@@ -2005,11 +2125,25 @@ def _dav_world_name(path):
     return rest
 
 def _dav_read(name):
-    c = conn(name)
-    r = c.execute("SELECT stage_html,ext FROM stage_meta WHERE id=1").fetchone()
+    # DAV must be able to enumerate and serve historical binary worlds
+    # even if they were written before the BLOB append fix and now trip
+    # sqlite's default UTF-8 text decode on read. Use a one-off bytes-
+    # oriented connection instead of the shared conn() cache so PROPFIND
+    # over /dav/home/ cannot be taken down by one bad binary row.
+    db_path = DATA / _disk_name(name) / "universe.db"
+    c = sqlite3.connect(str(db_path))
+    c.row_factory = sqlite3.Row
+    c.text_factory = bytes
+    try:
+        r = c.execute("SELECT stage_html,ext FROM stage_meta WHERE id=1").fetchone()
+    finally:
+        c.close()
     raw = r["stage_html"] if r and r["stage_html"] else b""
-    if isinstance(raw, str): raw = raw.encode("utf-8")
-    ext = (r["ext"] if r else "html") or "html"
+    if isinstance(raw, str):
+        raw = raw.encode("utf-8")
+    ext = (r["ext"] if r else b"html") or b"html"
+    if isinstance(ext, bytes):
+        ext = ext.decode("utf-8", "replace")
     return raw, ext
 
 def _dav_prop(href, restype, ct, size, mod):
@@ -2055,9 +2189,9 @@ async def _core_dav_handle(method, body, params):
         is_top_ns = (dav_prefix in ("", "home") or dav_prefix in (p.rstrip("/") for p in _DAV_TOP_NAMESPACES))
         if world and not is_world and not has_children and not is_top_ns:
             return {"error":"not found", "_status":404}
-        if is_world:
+        if is_world and not has_children:
             raw, ext = _dav_read(world)
-            is_dir = ext == "dir" or has_children
+            is_dir = ext == "dir"
             if not is_dir:
                 dav_href = f"/dav/home/{world}" if not world.startswith(_DAV_TOP_NAMESPACES) else f"/dav/{world}"
                 xml = ('<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">'
@@ -2110,13 +2244,16 @@ async def _core_dav_handle(method, body, params):
 
     if method in ("GET", "HEAD"):
         name = _dav_world_name(path)
-        if not name:
+        all_worlds = []
+        if DATA.exists():
+            all_worlds = [_logical_name(d.name) for d in sorted(DATA.iterdir())
+                          if d.is_dir() and (d / "universe.db").exists()]
+        has_children = bool(name) and any(w.startswith(name + "/") for w in all_worlds)
+        if not name or has_children:
             listing = (f'<h1>elastik WebDAV — /{dav_prefix or ""}</h1>'
                     '<p style="background:#fee;padding:.5em;border:1px solid #c00">'
                     'AI-generated content -- treat all links as hostile.</p><ul>')
             if DATA.exists():
-                all_worlds = [_logical_name(d.name) for d in sorted(DATA.iterdir())
-                              if d.is_dir() and (d / "universe.db").exists()]
                 if dav_prefix == "":
                     if any(not w.startswith(_DAV_TOP_NAMESPACES) for w in all_worlds):
                         listing += '<li><a href="/dav/home/">home/</a></li>'
