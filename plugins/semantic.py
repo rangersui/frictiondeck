@@ -277,7 +277,7 @@ def _world_exists(name: str) -> bool:
 
 
 def _read_world(name: str):
-    """Return (body_bytes, version, ext) for an existing world, or None.
+    """Return (body_bytes, version, ext, source_meta) for a world, or None.
 
     Unlike server.conn(name), this never creates a new world. Callers
     rely on that -- we don't want a typo'd GET /shaped/foo to instantiate
@@ -287,11 +287,16 @@ def _read_world(name: str):
         return None
     c = server.conn(name)
     row = c.execute(
-        "SELECT stage_html, version, ext FROM stage_meta WHERE id=1"
+        "SELECT stage_html, version, ext, headers FROM stage_meta WHERE id=1"
     ).fetchone()
     if not row:
         return None
-    return (row["stage_html"] or b"", row["version"] or 0, row["ext"] or "plain")
+    return (
+        row["stage_html"] or b"",
+        row["version"] or 0,
+        row["ext"] or "plain",
+        _source_meta_from_headers(row["headers"]),
+    )
 
 
 def _ext_to_ct(ext: str) -> str:
@@ -301,6 +306,27 @@ def _ext_to_ct(ext: str) -> str:
     server._ext_to_ct's application/octet-stream. The result is fed
     to the prompt as SOURCE_CONTENT_TYPE — see _build_prompt."""
     return server._CT.get(ext or "plain", "text/plain")
+
+
+def _source_meta_from_headers(stored) -> dict:
+    """Extract the semantic-relevant X-Meta-* slice from stored headers JSON."""
+    try:
+        pairs = json.loads(stored or "[]")
+    except (TypeError, ValueError):
+        return {}
+    out = {}
+    if not isinstance(pairs, list):
+        return out
+    for item in pairs:
+        if not (isinstance(item, list) and len(item) == 2):
+            continue
+        k, v = item
+        if not (isinstance(k, str) and isinstance(v, str)):
+            continue
+        kl = k.lower()
+        if kl.startswith("x-meta-"):
+            out[kl] = v
+    return out
 
 
 class _MountAdapterError(Exception):
@@ -325,7 +351,7 @@ class _MountAdapterError(Exception):
 async def _read_via_fstab(mnt_path: str):
     """In-process call into /mnt/<mnt_path>. No HTTP loopback.
 
-    Success: returns (body_bytes, version_token, source_ct). Version
+    Success: returns (body_bytes, version_token, source_ct, source_meta). Version
     token is "mount:<X-Mount-Version>" when the adapter sets that
     header (file: mtime:<ns>, https: etag:<val> or len=...;head=);
     fallback is "mount:unknown" for adapters that don't carry a
@@ -371,17 +397,20 @@ async def _read_via_fstab(mnt_path: str):
         return None
     ct = result.get("_ct", "application/octet-stream")
     ver = "mount:unknown"
+    meta = {}
     for k, v in result.get("_headers") or []:
-        if str(k).lower() == "x-mount-version":
+        kl = str(k).lower()
+        if kl == "x-mount-version":
             ver = "mount:" + str(v)
-            break
-    return body, ver, ct
+        elif kl.startswith("x-meta-"):
+            meta[kl] = str(v)
+    return body, ver, ct, meta
 
 
 async def _read_source(name: str):
     """Dispatch world-backed vs mount-backed sources.
 
-    Returns (body_bytes, version_token, source_content_type), or None
+    Returns (body_bytes, version_token, source_content_type, source_meta), or None
     if the source doesn't resolve either way.
 
     Dispatch:
@@ -405,8 +434,8 @@ async def _read_source(name: str):
     got = _read_world(name)
     if got is None:
         return None
-    body, version, ext = got
-    return body, f"world:v{version}", _ext_to_ct(ext)
+    body, version, ext, meta = got
+    return body, f"world:v{version}", _ext_to_ct(ext), meta
 
 
 def _read_cached(key: str):
@@ -1108,7 +1137,7 @@ async def _stream_shape(prompt: str, scope, cache_key: str, gpu_fp: str,
 
 
 def _build_prompt(source_body, intent_hint: str, required_ct: str,
-                  source_ct: str) -> str:
+                  source_ct: str, source_meta: dict | None = None) -> str:
     """SYSTEM_PROMPT + user frame, inlined into a single blob for
     /dev/gpu. Most gpu backends don't expose the system-role
     distinction (ollama's `prompt` field, openai-compat's single-user-
@@ -1122,12 +1151,17 @@ def _build_prompt(source_body, intent_hint: str, required_ct: str,
     JSON source reshaped as CSV is a different job from a plain-text
     source reshaped as CSV, and the SLM only knows which path it's on
     if we say so here."""
+    meta_lines = []
+    for k, v in sorted((source_meta or {}).items()):
+        meta_lines.append(f"{k}={v}")
+    meta_block = "\n".join(meta_lines) if meta_lines else "(none)"
     return (
         SYSTEM_PROMPT
         + "\n\n---\n\n"
         + f"REQUIRED_CONTENT_TYPE: {required_ct}\n"
         + f"SOURCE_CONTENT_TYPE: {source_ct}\n"
         + f"INTENT_HINT: {intent_hint or '(none)'}\n"
+        + f"SOURCE_METADATA:\n{meta_block}\n"
         + f"<<<SOURCE CONTENT>>>\n{_safe_source(source_body)}\n<<<END SOURCE>>>\n"
     )
 
@@ -1217,7 +1251,7 @@ async def handle(method, body, params):
                 "error": f"mount adapter: {e.error}"}
     if src is None:
         return {"_status": 404, "error": f"world not found: {world_name}"}
-    body_src, version_token, source_ct = src
+    body_src, version_token, source_ct, source_meta = src
 
     # 4. Cache key. version_token is the per-source bump signal —
     #    "world:v<N>" for world-backed sources, "mount:<token>" for
@@ -1263,7 +1297,7 @@ async def handle(method, body, params):
     #    POST auth check sees the same Authorization header that
     #    cleared our own dispatcher-level AUTH="auth" gate.
     required_ct = _pick_required_ct(accept_list)
-    prompt = _build_prompt(body_src, ua, required_ct, source_ct)
+    prompt = _build_prompt(body_src, ua, required_ct, source_ct, source_meta)
 
     # 6a. Streaming branch. Pre-first-chunk errors propagate as
     #     _SLMUnavailable here and fall back through the standard

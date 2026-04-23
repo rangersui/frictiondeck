@@ -174,6 +174,10 @@ _CANNED = {
     # routing succeeds even when the cap was minted with a
     # percent-encoded Unicode prefix.
     "cafe-cap":        "MATCH: café",
+    # Request-hint routing: same path, different intent/accept
+    # chooses different targets.
+    "hinted-report|dashboard|text/html": "MATCH: sales/summary",
+    "hinted-report|answer|text/plain":   "MATCH: sales-report",
 }
 
 
@@ -190,18 +194,27 @@ class _FakeOllama(http.server.BaseHTTPRequestHandler):
             req = {}
         prompt = (req.get("prompt") or "").strip()
 
-        # Extract REQUEST_PATH line from router prompt.
+        # Extract REQUEST_PATH / REQUEST_HINTS from router prompt.
         query = ""
+        intent = ""
+        accept = ""
         for line in prompt.splitlines():
             if line.startswith("REQUEST_PATH:"):
                 query = line[len("REQUEST_PATH:"):].strip()
-                break
+            elif line.startswith("  intent="):
+                intent = line[len("  intent="):].strip()
+            elif line.startswith("  accept="):
+                accept = line[len("  accept="):].strip()
 
-        # Match canned substring. First match wins; tests name their
+        # Match canned substring. First try the full
+        # query|intent|accept triple so request-hint tests can steer
+        # the same path to different targets; then fall back to
+        # query-only matching. First match wins; tests name their
         # typo targets precisely to avoid collisions.
         reply = None
+        query_hint = f"{query}|{intent}|{accept}"
         for needle, canned_reply in _CANNED.items():
-            if needle in query:
+            if needle in query_hint:
                 reply = canned_reply
                 break
         if reply is None:
@@ -454,6 +467,15 @@ def run():
              s in (200,) and not h.get("x-semantic-route-source"),
              f"got s={s} route-source={h.get('x-semantic-route-source')}")
 
+        s, h, body = _http("GET", "/", token="")
+        test("root GET still serves app shell (router stays out)",
+             s == 200
+             and (h.get("content-type") or "").startswith("text/html")
+             and not h.get("x-semantic-route-source"),
+             f"got s={s} ct={h.get('content-type')} "
+             f"route-source={h.get('x-semantic-route-source')} "
+             f"body={body[:120]!r}")
+
         # ---------------------------------------------------------
         # §2. Unknown top-level GET → router fires (MATCH path)
         # ---------------------------------------------------------
@@ -586,6 +608,33 @@ def run():
              s == 303 and h.get("x-semantic-route-cache") == "hit",
              f"got {s} cache={h.get('x-semantic-route-cache')} "
              f"body={body[:120]!r}")
+
+        # §11d. Request-side semantic hints participate in router
+        # resolution and cache identity: same path, different
+        # intent/Accept should steer to different worlds and not
+        # cross-hit each other's cache entries.
+        s, h, _ = _http("GET", "/hinted-report", token=TOKEN, headers={
+            "X-Semantic-Intent": "dashboard",
+            "Accept": "text/html",
+        })
+        test("same path + dashboard/html hint -> sales summary",
+             s == 303 and h.get("location") == "/home/sales/summary",
+             f"got {s} loc={h.get('location')} cache={h.get('x-semantic-route-cache')}")
+        s, h, _ = _http("GET", "/hinted-report", token=TOKEN, headers={
+            "X-Semantic-Intent": "answer",
+            "Accept": "text/plain",
+        })
+        test("same path + answer/plain hint -> sales report",
+             s == 303 and h.get("location") == "/home/sales-report",
+             f"got {s} loc={h.get('location')} cache={h.get('x-semantic-route-cache')}")
+        s, h, _ = _http("GET", "/hinted-report", token=TOKEN, headers={
+            "X-Semantic-Intent": "dashboard",
+            "Accept": "text/html",
+        })
+        test("router cache key includes request-side hints",
+             s == 303 and h.get("x-semantic-route-cache") == "hit"
+             and h.get("location") == "/home/sales/summary",
+             f"got {s} cache={h.get('x-semantic-route-cache')} loc={h.get('location')}")
 
         # §11c. Positive pool observation: the "probe-var-cache"
         # canned reply says MATCH: var/cache/router/fake, a world

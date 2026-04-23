@@ -88,7 +88,7 @@ FHS layout:
 
 ```
 GET    /home/{name}       read (JSON)
-GET    /home/{name}?raw   raw bytes
+GET    /home/{name}?raw   raw bytes (objects only)
 HEAD   /home/{name}       stat — same headers as GET, no body
 PUT    /home/{name}       overwrite
 POST   /home/{name}       append
@@ -104,6 +104,19 @@ GET    /bin               list all active routes
 HTTP method IS the action. No `/read` `/write` suffixes. Trailing `/` = ls.
 
 Content negotiation: browser gets HTML, curl gets JSON, pipes get plain text.
+
+Object / collection rules:
+
+- bare path = object view if an exact world exists
+- trailing slash = collection view
+- a path may be both object and collection if both `/foo` and `/foo/*` exist
+- a pure prefix with children but no exact world is collection-only
+- `?raw` belongs only to objects; it never turns a pure collection prefix into a hidden file
+
+Reason: elastik is flexible enough to look S3-like, but the URL contract still
+has to match human directory intuition. Cool tricks are allowed only after a
+path has first been promoted to an object. A pure collection prefix must stay a
+collection.
 
 ## Auth
 

@@ -89,6 +89,17 @@ _LOCAL_SCHEMES = set(
     if s.strip()
 )
 
+# Minimal metadata fields router may inspect without crossing into
+# body-aware routing. These are either already present on most worlds
+# (ext -> Content-Type) or cheap, explicit writer hints.
+_ROUTER_META_KEYS = (
+    "x-meta-title",
+    "x-meta-topic",
+    "x-meta-kind",
+    "x-meta-language",
+    "x-meta-audience",
+)
+
 
 # ====================================================================
 # router render fingerprint — rotates on prompt / config change
@@ -351,6 +362,30 @@ def _auth_scope_tag(scope) -> str:
     return "T1"
 
 
+def _read_request_hints(scope) -> tuple[str, str]:
+    """Read the same request-side semantic hints shaped reads.
+
+    Returns:
+      (intent_hint, accept_hint)
+
+    `X-Semantic-Intent` wins over `User-Agent` for browser-safe intent
+    injection, mirroring semantic.py. `Accept` is kept as a soft routing
+    hint only; router does not negotiate on it, but it can help pick a
+    better target when multiple worlds differ by representation kind.
+    """
+    intent = ""
+    accept = ""
+    ua = ""
+    for k, v in scope.get("headers", []) or []:
+        if k == b"x-semantic-intent":
+            intent = v.decode("utf-8", "replace").strip()
+        elif k == b"user-agent":
+            ua = v.decode("utf-8", "replace").strip()
+        elif k == b"accept":
+            accept = v.decode("utf-8", "replace").strip()
+    return (intent or ua, accept)
+
+
 #
 # /home/-backed worlds are stored WITHOUT the /home/ prefix on disk
 # (elastik's canonicalisation strips it at write time — see
@@ -518,6 +553,89 @@ def _world_list_fingerprint(worlds) -> str:
     return h.hexdigest()[:16]
 
 
+def _candidate_metadata(name: str) -> dict:
+    """Return a small metadata dict for one candidate world.
+
+    This is the reserved metadata-aware routing seam: router still does
+    NOT read world bodies, but it can cheaply inspect representation
+    metadata for top-K candidates. Today that means:
+
+      - `url`           readable URL form
+      - `ext`           stored extension, if any
+      - `content_type`  derived from ext
+      - selected `X-Meta-*` hints, if present
+
+    Intentionally omitted for now:
+      - body content
+      - arbitrary all-header dump
+      - volatile recency/version fields that would churn the route cache
+        without adding much semantic value yet
+    """
+    try:
+        row = server.conn(name).execute(
+            "SELECT ext, headers FROM stage_meta WHERE id=1"
+        ).fetchone()
+    except Exception:
+        row = None
+    ext = ((row["ext"] if row else None) or "").strip()
+    meta = {
+        "url": _name_to_url(name),
+    }
+    if ext:
+        meta["ext"] = ext
+        meta["content_type"] = server._ext_to_ct(ext)
+    else:
+        meta["content_type"] = server._ext_to_ct("plain")
+    stored = (row["headers"] if row else "[]") or "[]"
+    try:
+        pairs = json.loads(stored)
+    except (TypeError, ValueError):
+        pairs = []
+    if isinstance(pairs, list):
+        for item in pairs:
+            if not (isinstance(item, list) and len(item) == 2):
+                continue
+            k, v = item
+            if (isinstance(k, str) and isinstance(v, str)
+                    and k in _ROUTER_META_KEYS):
+                meta[k] = v
+    return meta
+
+
+def _candidate_metadata_map(candidates) -> dict:
+    """Metadata gather hook for the current top-K candidate set.
+
+    This is the interface we do NOT want to forget. v1 routing used
+    only path + names; v2 can route on metadata without having to
+    redesign the whole plugin. The call site wraps this in
+    `asyncio.to_thread` because the underlying sqlite reads are
+    blocking.
+    """
+    return {name: _candidate_metadata(name) for name in candidates}
+
+
+def _candidate_metadata_fingerprint(meta_map: dict) -> str:
+    """Hash of the metadata slice that actually enters the prompt.
+
+    If router prompt construction starts looking at candidate metadata,
+    the route-cache identity must rotate with it. Otherwise we'd reuse a
+    stale 303/300/404 decision generated under different candidate
+    metadata.
+    """
+    h = hashlib.sha256()
+    for name in sorted(meta_map):
+        h.update(name.encode("utf-8"))
+        h.update(b"\x00")
+        meta = meta_map.get(name) or {}
+        for k in sorted(meta):
+            v = meta[k]
+            h.update(str(k).encode("utf-8"))
+            h.update(b"=")
+            h.update(str(v).encode("utf-8"))
+            h.update(b"\x00")
+    return h.hexdigest()[:16]
+
+
 # ====================================================================
 # candidate pre-filter — stdlib scoring, no SLM
 # ====================================================================
@@ -607,10 +725,12 @@ def _candidate_prefilter(query: str, worlds, top_k: int):
 # primitive either way. See PLAN §5.
 
 def _route_cache_key(normalized: str, world_fp: str,
-                     auth_tag: str) -> str:
+                     auth_tag: str, meta_fp: str = "",
+                     intent_hint: str = "", accept_hint: str = "") -> str:
     """sha256 of the four-axis tuple (§5.1):
          normalized_path || world_list_fingerprint
-           || auth_scope_tag || RENDER_FINGERPRINT
+           || auth_scope_tag || candidate_metadata_fingerprint
+           || intent_hint || accept_hint || RENDER_FINGERPRINT
 
     The RENDER_FINGERPRINT axis folds in both the router's own
     prompt/config hash AND the /etc/gpu.conf backend hash so an
@@ -622,6 +742,12 @@ def _route_cache_key(normalized: str, world_fp: str,
     h.update(world_fp.encode("utf-8"))
     h.update(b"\x00")
     h.update(auth_tag.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(meta_fp.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(intent_hint.encode("utf-8"))
+    h.update(b"\x00")
+    h.update(accept_hint.encode("utf-8"))
     h.update(b"\x00")
     h.update(_render_fingerprint().encode("utf-8"))
     h.update(b"|gpu=")
@@ -927,7 +1053,8 @@ class _RouterSLMUnavailable(Exception):
     a non-local backend. Caller maps to static 404."""
 
 
-def _build_router_prompt(query: str, candidates) -> str:
+def _build_router_prompt(query: str, candidates, candidate_meta=None,
+                         intent_hint: str = "", accept_hint: str = "") -> str:
     """PLAN §3.3 prompt shape. Pure string build — no SLM, no I/O.
 
     Structured so the SLM's reply is easy to parse deterministically
@@ -938,6 +1065,21 @@ def _build_router_prompt(query: str, candidates) -> str:
     lines = ["REQUEST_PATH: " + query, "CANDIDATES:"]
     for c in candidates:
         lines.append("  " + c)
+    lines.append("")
+    lines.append("REQUEST_HINTS:")
+    lines.append("  intent=" + (intent_hint or "(none)"))
+    lines.append("  accept=" + (accept_hint or "(none)"))
+    candidate_meta = candidate_meta or {}
+    lines.append("")
+    lines.append("CANDIDATE_METADATA:")
+    for c in candidates:
+        meta = candidate_meta.get(c) or {}
+        lines.append("  " + c + ":")
+        if not meta:
+            lines.append("    (none)")
+            continue
+        for k in sorted(meta):
+            lines.append(f"    {k}={meta[k]}")
     lines.append("")
     lines.append(
         "Reply with exactly ONE line, prefixed by one of:"
@@ -1227,6 +1369,7 @@ async def handle(method, body, params):
     scope = params.get("_scope") or {}
     raw_path = scope.get("path", "") or ""
     query = _normalize_path(raw_path)
+    intent_hint, accept_hint = _read_request_hints(scope)
 
     # 2. Backend policy gate — §7.2 default posture rejects external
     #    backend unless the operator opts in.
@@ -1252,12 +1395,19 @@ async def handle(method, body, params):
     if not candidates:
         return _response_static_404("empty-pool-static-404")
     pool_set = set(candidates)      # for SLM-hallucination second-line
+    try:
+        candidate_meta = await asyncio.to_thread(
+            _candidate_metadata_map, candidates)
+    except Exception:
+        candidate_meta = {}
 
     # 5. Cache read — 4-axis key (PLAN §5.1). Hit: no cap consumed,
     #    no SLM, no scan beyond step 3.
     auth_tag = _auth_scope_tag(scope)
     world_fp = _world_list_fingerprint(candidates)
-    key = _route_cache_key(query, world_fp, auth_tag)
+    meta_fp = _candidate_metadata_fingerprint(candidate_meta)
+    key = _route_cache_key(query, world_fp, auth_tag, meta_fp,
+                           intent_hint, accept_hint)
     hit = _read_route_cache(key)
     if hit is not None:
         kind = hit.get("kind")
@@ -1281,7 +1431,8 @@ async def handle(method, body, params):
     #    degrade to static 404; we do NOT leak prose via NONE in
     #    that case because the prose would come from generic
     #    fallback text, not the model.
-    prompt = _build_router_prompt(query, candidates)
+    prompt = _build_router_prompt(query, candidates, candidate_meta,
+                                  intent_hint, accept_hint)
     try:
         decision = await _call_router_slm(prompt, scope)
     except _RouterSLMUnavailable:

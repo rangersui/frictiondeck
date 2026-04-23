@@ -258,6 +258,19 @@ def run_layer1():
     test("parse_slm: invalid meta json falls back",
          (body, ct, shape) == ("partial", "text/plain", "unknown"))
 
+    prompt = semantic._build_prompt(
+        "hello",
+        "grandma/1.0",
+        "text/html",
+        "text/plain",
+        {"x-meta-title": "Greeting", "x-meta-topic": "demo"},
+    )
+    test("build_prompt: includes SOURCE_METADATA block",
+         "SOURCE_METADATA:" in prompt)
+    test("build_prompt: includes x-meta entries",
+         "x-meta-title=Greeting" in prompt and "x-meta-topic=demo" in prompt,
+         prompt)
+
     body, ct, shape = semantic._parse_slm_output(
         '\n===META===\n{"content_type":"text/plain","shape":"empty"}'
     )
