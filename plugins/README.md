@@ -26,6 +26,7 @@ Rule of thumb:
 | `fstab.py` | `/mnt/*` | blind mount of **any registered URI scheme** (file + http/https in Phase 1; postgres/s3/redis in later phases); mount table in `/etc/fstab`; per-scheme adapters in the plugin |
 | `db.py` | `/dev/db` | read-only SQL over worlds or **file-kind** fstab mounts; non-file mounts (http/https/…) reject with 400 — use `/mnt/<name>/<path>` for raw bytes |
 | `fanout.py` | `/dev/fanout` | broadcast one write to N worlds; target list in `/etc/fanout.conf` |
+| `dav.py` | `/dav/*` | **opt-in** WebDAV view over the FHS tree; install into `/lib/dav` to expose `/dav/*`; reads are public like core reads, writes require auth, system-prefix writes require approve |
 | `semantic.py` | `/shaped/*` | Accept-driven shape renderer; `text/event-stream` in Accept triggers SSE outer transport with inner MIME picked from the rest of the list; `X-Semantic-Intent` is the browser-safe hint override when `User-Agent` cannot be changed; delegates to `/dev/gpu` (one-shot) or `/dev/gpu/stream` |
 | `router.py` | `/_router_fallback` (hook-only) | **opt-in** SLM-assisted resolver for unmatched paths; converts "no such world" into `303`/`300`/`404-with-prose` based on the caller's readable pool; caller-scoped candidate pool, separate rate cap, local-only backend by default; see "Semantic router" note below |
 
